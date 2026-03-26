@@ -5,6 +5,11 @@ from __future__ import annotations
 import os
 import sys
 
+try:
+    import sphinx_rtd_theme
+except ImportError:
+    sphinx_rtd_theme = None
+
 
 ROOT = os.path.abspath("..").replace("\\", "/")
 SRC = os.path.join(ROOT, "src")
@@ -15,6 +20,7 @@ if SRC not in sys.path:
 
 project = "Locksmith"
 author = "KERI Foundation"
+copyright = "2026, KERI Foundation and contributors"
 extensions = [
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
@@ -26,8 +32,9 @@ autosummary_generate = True
 autodoc_member_order = "bysource"
 autodoc_mock_imports = [
     "PySide6",
-    "keri",
+    "falcon",
     "hio",
+    "keri",
     "qasync",
     "locksmith.ui.home",
     "locksmith.ui.navigation",
@@ -67,4 +74,8 @@ autodoc_mock_imports = [
 
 templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
-html_theme = "alabaster"
+
+if sphinx_rtd_theme:
+    html_theme = "sphinx_rtd_theme"
+else:
+    html_theme = "alabaster"
