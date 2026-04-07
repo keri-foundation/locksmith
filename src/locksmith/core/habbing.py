@@ -4,6 +4,7 @@ locksmith.core.habs module
 
 Functions for working with KERI Haberies (habbing instances)
 """
+
 from hio.base import doing
 from keri import help
 from keri import kering
@@ -12,7 +13,6 @@ from keri.core import coring, signing
 from keri.core.serdering import SerderKERI
 from keri.vdr import credentialing
 
-from locksmith.core.vaulting import run_vault_controller
 from locksmith.core.grouping import GroupMultisigInceptDoer
 
 logger = help.ogler.getLogger(__name__)
@@ -29,11 +29,39 @@ def format_bran(bran):
         str: Formatted passcode
     """
     if bran:
-        bran = bran.replace('-', '')
+        bran = bran.replace("-", "")
     return bran
 
 
-def check_passcode(name, base, bran, salt=None, tier=None, pidx=None, algo=None, seed=None):
+def _normalize_salt(salt):
+    """Normalize a salt parameter into valid qb64 format for KERI signing keys.
+
+    Handles None (default salt), raw hex strings, qb64-encoded strings,
+    and raw bytes.
+
+    Args:
+        salt: Salt value as None, str, or bytes
+
+    Returns:
+        str: Valid qb64-encoded salt
+    """
+    if salt is None:
+        return signing.Salter(raw=b"0123456789abcdef").qb64
+
+    if salt == "0123456789abcdef":
+        return signing.Salter(raw=b"0123456789abcdef").qb64
+
+    try:
+        return signing.Salter(qb64=salt).qb64
+    except kering.UnexpectedCodeError:
+        if isinstance(salt, str):
+            return signing.Salter(raw=salt.encode("utf-8")).qb64
+        return signing.Salter(raw=salt).qb64
+
+
+def check_passcode(
+    name, base, bran, salt=None, tier=None, pidx=None, algo=None, seed=None
+):
     """
     Check if a passcode is valid for a given keystore.
 
@@ -52,36 +80,25 @@ def check_passcode(name, base, bran, salt=None, tier=None, pidx=None, algo=None,
         ValueError: If bran is too short
     """
     ks = keeping.Keeper(name=name, base=base, temp=False, reopen=True)
-    aeid = ks.gbls.get('aeid')
+    aeid = ks.gbls.get("aeid")
 
     if bran and not seed:  # create seed from stretch of bran as salt
         if len(bran) < 21:
-            raise ValueError('Bran (passcode seed material) too short.')
-        bran = coring.MtrDex.Salt_128 + 'A' + bran[:21]  # qb64 salt for seed
-        signer = signing.Salter(qb64=bran).signer(transferable=False, tier=None, temp=None)
+            raise ValueError("Bran (passcode seed material) too short.")
+        bran = coring.MtrDex.Salt_128 + "A" + bran[:21]  # qb64 salt for seed
+        signer = signing.Salter(qb64=bran).signer(
+            transferable=False, tier=None, temp=None
+        )
         seed = signer.qb64
         if not aeid:  # aeid must not be empty event on initial creation
             aeid = signer.verfer.qb64  # lest it remove encryption
 
-    if salt is None:  # salt for signing keys not aeid seed
-        salt = signing.Salter(raw=b'0123456789abcdef').qb64
-    else:
-        # If salt is the default hex string from config, treat as raw bytes
-        if salt == "0123456789abcdef":
-            salt = signing.Salter(raw=b'0123456789abcdef').qb64
-        else:
-            try:
-                salt = signing.Salter(qb64=salt).qb64
-            except kering.UnexpectedCodeError:
-                # Fallback: try treating as raw bytes if qb64 fails
-                # This handles cases where config might have a raw string that looks like code
-                if isinstance(salt, str):
-                   salt = signing.Salter(raw=salt.encode("utf-8")).qb64
-                else:
-                   salt = signing.Salter(raw=salt).qb64
+    salt = _normalize_salt(salt)
 
     try:
-        keeping.Manager(ks=ks, seed=seed, aeid=aeid, pidx=pidx, algo=algo, salt=salt, tier=tier)
+        keeping.Manager(
+            ks=ks, seed=seed, aeid=aeid, pidx=pidx, algo=algo, salt=salt, tier=tier
+        )
     except kering.AuthError as ex:
         raise ex
     finally:
@@ -106,33 +123,21 @@ def open_hby(name, base, bran, app, salt=None):
         kering.AuthError: If authentication fails
         ValueError: If habery opening fails
     """
-    # Handle salt configuration
-    if salt is None:
-        salt = signing.Salter(raw=b'0123456789abcdef').qb64
-    else:
-        # If salt is the default hex string from config, treat as raw bytes
-        if salt == "0123456789abcdef":
-            salt = signing.Salter(raw=b'0123456789abcdef').qb64
-        else:
-            try:
-                # check if it is already valid qb64
-                salt = signing.Salter(qb64=salt).qb64
-            except kering.UnexpectedCodeError:
-                # Fallback: try treating as raw bytes if qb64 fails
-                if isinstance(salt, str):
-                    salt = signing.Salter(raw=salt.encode("utf-8")).qb64
-                else:
-                    salt = signing.Salter(raw=salt).qb64
+    salt = _normalize_salt(salt)
 
     try:
-        hby = habbing.Habery(name=name, bran=bran, free=True, cf=None, base=base, salt=salt)
+        hby = habbing.Habery(
+            name=name, bran=bran, free=True, cf=None, base=base, salt=salt
+        )
     except kering.AuthError:
-        logger.error(f'Passcode incorrect for {name}')
+        logger.error(f"Passcode incorrect for {name}")
         raise
     except ValueError:
-        logger.error(f'Open Habery failed on ValueError for {name}')
+        logger.error(f"Open Habery failed on ValueError for {name}")
         raise
     rgy = credentialing.Regery(hby=hby, name=hby.name, base=base, temp=False)
+    from locksmith.core.vaulting import run_vault_controller
+
     return run_vault_controller(app=app, hby=hby, rgy=rgy)
 
 
@@ -148,7 +153,7 @@ def keystore_exists(name, base):
         bool: True if keystore exists, False otherwise
     """
     ks = keeping.Keeper(name=name, base=base, temp=False, reopen=True)
-    aeid = ks.gbls.get('aeid')
+    aeid = ks.gbls.get("aeid")
     exists = aeid is not None
     ks.close()
     return exists
@@ -166,8 +171,8 @@ def is_vault_encrypted(name, base):
         bool: True if encrypted, False otherwise
     """
     ks = keeping.Keeper(name=name, base=base, temp=False, reopen=True)
-    aeid = ks.gbls.get('aeid')
-    
+    aeid = ks.gbls.get("aeid")
+
     # Check if aeid is present and not empty
     # In KERI, unencrypted vaults might have empty string or None for aeid
     is_encrypted = False
@@ -176,12 +181,12 @@ def is_vault_encrypted(name, base):
             is_encrypted = len(aeid) > 0
         else:
             is_encrypted = len(str(aeid)) > 0
-            
+
     ks.close()
     return is_encrypted
 
 
-def load_potential_delegators(app, delegation_type='local'):
+def load_potential_delegators(app, delegation_type="local"):
     """
     Load potential delegators for identifier delegation.
 
@@ -196,13 +201,10 @@ def load_potential_delegators(app, delegation_type='local'):
 
     delegators = []
 
-    if delegation_type == 'local':
+    if delegation_type == "local":
         # Load local identifiers that can be delegators
         for name, pre in app.vault.hby.habs.items():
-            delegators.append({
-                'id': pre.pre,
-                'alias': name
-            })
+            delegators.append({"id": pre.pre, "alias": name})
     else:  # remote
         # Load remote identifiers that can be delegators
         org = connecting.Organizer(hby=app.vault.hby)
@@ -211,12 +213,9 @@ def load_potential_delegators(app, delegation_type='local'):
 
         # Filter to only transferable identifiers
         for remote_id in remote_ids:
-            rid = remote_id['id']
+            rid = remote_id["id"]
             if rid in kevers and kevers[rid].transferable:
-                delegators.append({
-                    'id': rid,
-                    'alias': remote_id.get('alias', '')
-                })
+                delegators.append({"id": rid, "alias": remote_id.get("alias", "")})
 
     return delegators
 
@@ -234,10 +233,7 @@ def load_potential_proxies(app):
     """
     proxies = []
     for name, hab in app.vault.hby.habs.items():
-        proxies.append({
-            'id': hab.pre,
-            'alias': name
-        })
+        proxies.append({"id": hab.pre, "alias": name})
     return proxies
 
 
@@ -254,12 +250,10 @@ def get_local_identifiers_for_dropdown(app):
     identifiers = {}
     # Load local identifiers
     for aid, hab in app.vault.hby.habs.items():
-        identifiers[f"{hab.name} - {aid}"] = {
-            'aid': aid,
-            'alias': hab.name
-        }
+        identifiers[f"{hab.name} - {aid}"] = {"aid": aid, "alias": hab.name}
 
     return identifiers
+
 
 def get_local_non_multisig_identifiers_for_dropdown(app):
     """
@@ -276,11 +270,9 @@ def get_local_non_multisig_identifiers_for_dropdown(app):
     for aid, hab in app.vault.hby.habs.items():
         if isinstance(hab, habbing.GroupHab):
             continue
-        identifiers[f"{hab.name} - {aid}"] = {
-            'aid': aid,
-            'alias': hab.name
-        }
+        identifiers[f"{hab.name} - {aid}"] = {"aid": aid, "alias": hab.name}
     return identifiers
+
 
 def load_group_members(app):
     """
@@ -292,20 +284,16 @@ def load_group_members(app):
     Returns:
         list: List of dicts with member information
     """
-    if not hasattr(app, 'members') or not app.members:
+    if not hasattr(app, "members") or not app.members:
         return []
 
     return [
-        {
-            'id': m['id'],
-            'alias': m['alias'],
-            'index': idx
-        }
+        {"id": m["id"], "alias": m["alias"], "index": idx}
         for idx, m in enumerate(app.members)
     ]
 
 
-def create_identifier(app, alias, key_type='salty', **kwargs):
+def create_identifier(app, alias, key_type="salty", **kwargs):
     """
     Create a new identifier with the specified parameters.
 
@@ -334,79 +322,91 @@ def create_identifier(app, alias, key_type='salty', **kwargs):
     """
     try:
         # Validate alias
-        if not alias or alias == '':
-            return {'success': False, 'message': 'Alias is required'}
+        if not alias or alias == "":
+            return {"success": False, "message": "Alias is required"}
 
         # Build kwargs for identifier creation
         creation_kwargs = {
-            'algo': key_type,
-            'estOnly': kwargs.get('estOnly', False),
-            'DnD': kwargs.get('DnD', False),
-            'wits': kwargs.get('wits', []),
-            'toad': kwargs.get('toad', '0'),
+            "algo": key_type,
+            "estOnly": kwargs.get("estOnly", False),
+            "DnD": kwargs.get("DnD", False),
+            "wits": kwargs.get("wits", []),
+            "toad": kwargs.get("toad", "0"),
         }
 
         # Add delegator if specified
-        if kwargs.get('delpre'):
-            creation_kwargs['delpre'] = kwargs['delpre']
+        if kwargs.get("delpre"):
+            creation_kwargs["delpre"] = kwargs["delpre"]
 
         # Handle different key types
-        if key_type == 'salty':
+        if key_type == "salty":
             # Key chain with salt
-            salt = kwargs.get('salt')
+            salt = kwargs.get("salt")
             if not salt or len(salt) != 21:
-                return {'success': False, 'message': 'Salt is required and must be 21 characters long'}
+                return {
+                    "success": False,
+                    "message": "Salt is required and must be 21 characters long",
+                }
 
-            creation_kwargs['salt'] = signing.Salter(raw=salt.encode('utf-8')).qb64
-            creation_kwargs['icount'] = int(kwargs.get('icount', 1))
-            creation_kwargs['isith'] = int(kwargs.get('isith', 1))
-            creation_kwargs['ncount'] = int(kwargs.get('ncount', 1))
-            creation_kwargs['nsith'] = int(kwargs.get('nsith', 1))
+            creation_kwargs["salt"] = signing.Salter(raw=salt.encode("utf-8")).qb64
+            creation_kwargs["icount"] = int(kwargs.get("icount", 1))
+            creation_kwargs["isith"] = int(kwargs.get("isith", 1))
+            creation_kwargs["ncount"] = int(kwargs.get("ncount", 1))
+            creation_kwargs["nsith"] = int(kwargs.get("nsith", 1))
 
-        elif key_type == 'randy':
+        elif key_type == "randy":
             # Random keys
-            creation_kwargs['salt'] = None
-            creation_kwargs['icount'] = int(kwargs.get('icount', 1))
-            creation_kwargs['isith'] = int(kwargs.get('isith', 1))
-            creation_kwargs['ncount'] = int(kwargs.get('ncount', 1))
-            creation_kwargs['nsith'] = int(kwargs.get('nsith', 1))
+            creation_kwargs["salt"] = None
+            creation_kwargs["icount"] = int(kwargs.get("icount", 1))
+            creation_kwargs["isith"] = int(kwargs.get("isith", 1))
+            creation_kwargs["ncount"] = int(kwargs.get("ncount", 1))
+            creation_kwargs["nsith"] = int(kwargs.get("nsith", 1))
 
-        elif key_type == 'group':
+        elif key_type == "group":
             # Group multisig
-            creation_kwargs['isith'] = int(kwargs.get('isith', 1))
-            creation_kwargs['nsith'] = int(kwargs.get('nsith', 1))
+            creation_kwargs["isith"] = int(kwargs.get("isith", 1))
+            creation_kwargs["nsith"] = int(kwargs.get("nsith", 1))
 
-            smids = kwargs.get('smids', [])
-            rmids = kwargs.get('rmids', smids)  # Default to smids if not specified
+            smids = kwargs.get("smids", [])
+            rmids = kwargs.get("rmids", smids)  # Default to smids if not specified
 
             if not smids:
-                return {'success': False, 'message': 'Signing members are required for group multisig'}
+                return {
+                    "success": False,
+                    "message": "Signing members are required for group multisig",
+                }
 
-            creation_kwargs['smids'] = smids
-            creation_kwargs['rmids'] = rmids
+            creation_kwargs["smids"] = smids
+            creation_kwargs["rmids"] = rmids
 
         else:
-            return {'success': False, 'message': f'Unknown key type: {key_type}'}
+            return {"success": False, "message": f"Unknown key type: {key_type}"}
 
         # Get delegation type
-        delegation_type = kwargs.get('delegation_type', 'none')
+        delegation_type = kwargs.get("delegation_type", "none")
 
         # Handle different delegation scenarios
-        if key_type == 'group':
+        if key_type == "group":
             # Group multisig creation using GroupMultisigInceptDoer
-            smids = creation_kwargs.get('smids', [])
-            rmids = creation_kwargs.get('rmids', smids)
-            isith = creation_kwargs.get('isith', len(smids))
-            nsith = creation_kwargs.get('nsith', isith)
+            smids = creation_kwargs.get("smids", [])
+            rmids = creation_kwargs.get("rmids", smids)
+            isith = creation_kwargs.get("isith", len(smids))
+            nsith = creation_kwargs.get("nsith", isith)
 
             # Get mhab from mhab_alias parameter
-            mhab_alias = kwargs.get('mhab_alias')
+            mhab_alias = kwargs.get("mhab_alias")
             if not mhab_alias:
-                return {'success': False, 'message': 'Local member identifier (mhab_alias) is required for group multisig'}
+                return {
+                    "success": False,
+                    "message": "Local member identifier (mhab_alias) is required for group multisig",
+                }
 
             mhab = app.vault.hby.habByName(mhab_alias)
             if not mhab:
-                return {'success': False, 'message': f"Local identifier '{mhab_alias}' not found"}
+                return {
+                    "success": False,
+                    "message": f"Local identifier '{mhab_alias}' not found",
+                }
 
             # Create and launch GroupMultisigInceptDoer
             group_incept_doer = GroupMultisigInceptDoer(
@@ -417,22 +417,22 @@ def create_identifier(app, alias, key_type='salty', **kwargs):
                 rmids=rmids,
                 isith=isith,
                 nsith=nsith,
-                wits=creation_kwargs.get('wits', []),
-                toad=int(creation_kwargs.get('toad', 0)),
-                delpre=creation_kwargs.get('delpre'),
-                signal_bridge=app.vault.signals
+                wits=creation_kwargs.get("wits", []),
+                toad=int(creation_kwargs.get("toad", 0)),
+                delpre=creation_kwargs.get("delpre"),
+                signal_bridge=app.vault.signals,
             )
             app.vault.extend([group_incept_doer])
 
             return {
-                'success': True,
-                'message': f'Creating group identifier, waiting for multisig collaboration...',
-                'async': True
+                "success": True,
+                "message": "Creating group identifier, waiting for multisig collaboration...",
+                "async": True,
             }
 
-        elif delegation_type == 'remote' or delegation_type == 'none':
+        elif delegation_type == "remote" or delegation_type == "none":
             # Remote delegation or no delegation - use InceptDoer for async handling
-            proxy_alias = kwargs.get('proxy_alias')
+            proxy_alias = kwargs.get("proxy_alias")
             proxy = app.vault.hby.habByName(proxy_alias) if proxy_alias else None
 
             # Create and launch InceptDoer
@@ -441,44 +441,37 @@ def create_identifier(app, alias, key_type='salty', **kwargs):
                 alias=alias,
                 proxy=proxy,
                 signal_bridge=app.vault.signals,
-                **creation_kwargs
+                **creation_kwargs,
             )
             app.vault.extend([incept_doer])
 
-            return {
-                'success': True,
-                'message': f'Creating identifier...',
-                'async': True
-            }
+            return {"success": True, "message": "Creating identifier...", "async": True}
 
-        elif delegation_type == 'local':
+        elif delegation_type == "local":
             # Local delegation - synchronous creation
             from keri.db import dbing
 
             hab = app.vault.hby.makeHab(name=alias, **creation_kwargs)
             serder, _, _ = hab.getOwnEvent(sn=0)
 
-            if creation_kwargs.get('delpre'):
-                delegator_hab = app.vault.hby.habByPre(creation_kwargs['delpre'])
+            if creation_kwargs.get("delpre"):
+                delegator_hab = app.vault.hby.habByPre(creation_kwargs["delpre"])
                 anchor = dict(i=hab.pre, s="0", d=hab.pre)
                 delegator_hab.interact(data=[anchor])
                 seqner = coring.Seqner(sn=delegator_hab.kever.serder.sn)
                 couple = seqner.qb64b + delegator_hab.kever.serder.saidb
-                dgkey = dbing.dgKey(anchor['i'], anchor['d'])
+                dgkey = dbing.dgKey(anchor["i"], anchor["d"])
                 app.vault.hby.db.setAes(dgkey, couple)
 
             return {
-                'success': True,
-                'message': f'Identifier {hab.pre} created successfully',
-                'pre': hab.pre
+                "success": True,
+                "message": f"Identifier {hab.pre} created successfully",
+                "pre": hab.pre,
             }
 
     except Exception as e:
         logger.exception(f"Error creating identifier: {e}")
-        return {
-            'success': False,
-            'message': f'Error creating identifier: {str(e)}'
-        }
+        return {"success": False, "message": f"Error creating identifier: {str(e)}"}
 
 
 def delete_identifier(app, alias):
@@ -494,8 +487,8 @@ def delete_identifier(app, alias):
     """
     try:
         # Validate alias
-        if not alias or alias == '':
-            return {'success': False, 'message': 'Alias is required'}
+        if not alias or alias == "":
+            return {"success": False, "message": "Alias is required"}
 
         hab = app.hby.habByName(alias)
         pre = hab.pre
@@ -505,7 +498,9 @@ def delete_identifier(app, alias):
             try:
                 app.vault.remove([app.vault.counseling_completion_doers[pre]])
             except Exception as e:
-                logger.warning(f"Attempted to remove counseling completion doer for group identifier: {e}")
+                logger.warning(
+                    f"Attempted to remove counseling completion doer for group identifier: {e}"
+                )
 
             # 1. Group Partially Signed Escrow
             app.vault.hby.db.gpse.rem(keys=(pre,))
@@ -524,35 +519,31 @@ def delete_identifier(app, alias):
             try:
                 app.vault.hby.deleteHab(alias)
             except KeyError as e:
-                logger.warning(f"Attempted to delete group identifier. This message is expected ONLY when deleting "
-                               f"group identifiers with incomplete inception signatures: {e}")
+                logger.warning(
+                    f"Attempted to delete group identifier. This message is expected ONLY when deleting "
+                    f"group identifiers with incomplete inception signatures: {e}"
+                )
 
         else:
             app.vault.hby.deleteHab(alias)
 
         # Emit signal if signal bridge is available
-        if hasattr(app.vault, 'signals') and app.vault.signals:
+        if hasattr(app.vault, "signals") and app.vault.signals:
             app.vault.signals.emit_doer_event(
                 doer_name="DeleteIdentifier",
                 event_type="identifier_deleted",
-                data={
-                    'alias': alias,
-                    'success': True
-                }
+                data={"alias": alias, "success": True},
             )
 
         logger.info(f"Identifier '{alias}' deleted successfully")
         return {
-            'success': True,
-            'message': f"Identifier '{alias}' deleted successfully"
+            "success": True,
+            "message": f"Identifier '{alias}' deleted successfully",
         }
 
     except Exception as e:
         logger.exception(f"Error deleting identifier: {e}")
-        return {
-            'success': False,
-            'message': f'Error deleting identifier: {str(e)}'
-        }
+        return {"success": False, "message": f"Error deleting identifier: {str(e)}"}
 
 
 class InceptDoer(doing.DoDoer):
@@ -607,7 +598,7 @@ class InceptDoer(doing.DoDoer):
         # Enter context
         self.wind(tymth)
         self.tock = tock
-        _ = (yield self.tock)
+        _ = yield self.tock
 
         try:
             # Create the identifier
@@ -622,7 +613,9 @@ class InceptDoer(doing.DoDoer):
                 self.swain.delegation(pre=hab.pre, sn=0)
 
                 # Wait for delegation to complete
-                while not self.swain.complete(hab.kever.prefixer, coring.Seqner(sn=hab.kever.sn)):
+                while not self.swain.complete(
+                    hab.kever.prefixer, coring.Seqner(sn=hab.kever.sn)
+                ):
                     yield self.tock
 
             # Handle witness receipts if present
@@ -637,7 +630,9 @@ class InceptDoer(doing.DoDoer):
             # Send event to delegator if needed
             if hab.kever.delpre:
                 sender = self.proxy if self.proxy is not None else hab
-                yield from self.postman.sendEventToDelegator(hab=hab, sender=sender, fn=hab.kever.sn)
+                yield from self.postman.sendEventToDelegator(
+                    hab=hab, sender=sender, fn=hab.kever.sn
+                )
 
             # Cleanup
             to_remove = [self.swain]
@@ -648,11 +643,7 @@ class InceptDoer(doing.DoDoer):
                 self.signal_bridge.emit_doer_event(
                     doer_name="InceptDoer",
                     event_type="identifier_created",
-                    data={
-                        'alias': self.alias,
-                        'pre': hab.pre,
-                        'success': True
-                    }
+                    data={"alias": self.alias, "pre": hab.pre, "success": True},
                 )
 
             logger.info(f"Identifier {self.alias} ({hab.pre}) created successfully")
@@ -667,11 +658,7 @@ class InceptDoer(doing.DoDoer):
                 self.signal_bridge.emit_doer_event(
                     doer_name="InceptDoer",
                     event_type="identifier_creation_failed",
-                    data={
-                        'alias': self.alias,
-                        'error': str(e),
-                        'success': False
-                    }
+                    data={"alias": self.alias, "error": str(e), "success": False},
                 )
             self.app.vault.remove([self])
             return
@@ -712,7 +699,7 @@ def get_identifier_details(app, hab):
     if isinstance(hab, keri_habbing.GroupHab):
         key_type = "Group Multisig Identifier"
         is_group_multisig = True
-    elif hasattr(hab, 'algo'):
+    elif hasattr(hab, "algo"):
         if hab.algo == Algos.salty:
             key_type = "Hierarchical Key Chain Identifier"
         elif hab.algo == Algos.randy:
@@ -733,7 +720,7 @@ def get_identifier_details(app, hab):
     pretty_kel = ""
     for msg in hab.db.clonePreIter(pre=hab.pre):
         serder = SerderKERI(raw=msg)
-        attachments = msg[serder.size:]
+        attachments = msg[serder.size :]
 
         pretty_kel += f"{serder.pretty()}\n{attachments.decode('utf-8')}\n\n"
 
@@ -751,24 +738,24 @@ def get_identifier_details(app, hab):
     do_not_delegate = kever.serder.ked.get("c", False)
 
     return {
-        'pre': hab.pre,
-        'alias': hab.name,
-        'kel': kel_str,
-        'pretty_kel': pretty_kel,
-        'key_type': key_type,
-        'is_group_multisig': is_group_multisig,
-        'do_not_delegate': do_not_delegate,
-        'sequence_number': kever.sner.num,
-        'witnesses': list(kever.wits),
-        'witness_count': len(kever.wits),
-        'witness_receipts': len(wigs),
-        'witness_threshold': kever.toader.num,
-        'public_keys': public_keys,
-        'needs_resubmit': needs_resubmit
+        "pre": hab.pre,
+        "alias": hab.name,
+        "kel": kel_str,
+        "pretty_kel": pretty_kel,
+        "key_type": key_type,
+        "is_group_multisig": is_group_multisig,
+        "do_not_delegate": do_not_delegate,
+        "sequence_number": kever.sner.num,
+        "witnesses": list(kever.wits),
+        "witness_count": len(kever.wits),
+        "witness_receipts": len(wigs),
+        "witness_threshold": kever.toader.num,
+        "public_keys": public_keys,
+        "needs_resubmit": needs_resubmit,
     }
 
 
-def generate_oobi(app, hab, role='witness'):
+def generate_oobi(app, hab, role="witness"):
     """
     Generate OOBI URL and QR code for an identifier.
 
@@ -784,59 +771,78 @@ def generate_oobi(app, hab, role='witness'):
     import io
     import base64
     from urllib.parse import urljoin, urlparse
+
     try:
         import qrcode
     except ImportError:
         qrcode = None
-        logger.warning("qrcode library not installed, QR code generation will be skipped")
+        logger.warning(
+            "qrcode library not installed, QR code generation will be skipped"
+        )
 
     try:
         oobis = []
 
-        if role == 'witness':
+        if role == "witness":
             # Fetch URL OOBIs for all witnesses
             for wit in hab.kever.wits:
-                urls = hab.fetchUrls(eid=wit, scheme=kering.Schemes.http) or hab.fetchUrls(
-                    eid=wit, scheme=kering.Schemes.https
-                )
+                urls = hab.fetchUrls(
+                    eid=wit, scheme=kering.Schemes.http
+                ) or hab.fetchUrls(eid=wit, scheme=kering.Schemes.https)
                 if not urls:
                     continue
 
-                url = urls[kering.Schemes.http] if kering.Schemes.http in urls else urls.get(kering.Schemes.https)
+                url = (
+                    urls[kering.Schemes.http]
+                    if kering.Schemes.http in urls
+                    else urls.get(kering.Schemes.https)
+                )
                 if url:
                     up = urlparse(url)
-                    oobis.append(urljoin(up.geturl(), f'/oobi/{hab.pre}/witness/{wit}'))
+                    oobis.append(urljoin(up.geturl(), f"/oobi/{hab.pre}/witness/{wit}"))
 
-        elif role == 'controller':
+        elif role == "controller":
             # Fetch controller URL OOBIs
-            urls = hab.fetchUrls(eid=hab.pre, scheme=kering.Schemes.http) or hab.fetchUrls(
-                eid=hab.pre, scheme=kering.Schemes.https
-            )
+            urls = hab.fetchUrls(
+                eid=hab.pre, scheme=kering.Schemes.http
+            ) or hab.fetchUrls(eid=hab.pre, scheme=kering.Schemes.https)
             if urls:
-                url = urls[kering.Schemes.http] if kering.Schemes.http in urls else urls.get(kering.Schemes.https)
+                url = (
+                    urls[kering.Schemes.http]
+                    if kering.Schemes.http in urls
+                    else urls.get(kering.Schemes.https)
+                )
                 if url:
                     up = urlparse(url)
-                    oobis.append(urljoin(up.geturl(), f'/oobi/{hab.pre}/controller'))
+                    oobis.append(urljoin(up.geturl(), f"/oobi/{hab.pre}/controller"))
 
-        elif role == 'mailbox':
+        elif role == "mailbox":
             # Fetch agent/mailbox URL OOBIs
             roleUrls = hab.fetchRoleUrls(
                 hab.pre, scheme=kering.Schemes.http, role=kering.Roles.agent
-            ) or hab.fetchRoleUrls(hab.pre, scheme=kering.Schemes.https, role=kering.Roles.agent)
+            ) or hab.fetchRoleUrls(
+                hab.pre, scheme=kering.Schemes.https, role=kering.Roles.agent
+            )
 
-            if roleUrls and 'agent' in roleUrls:
-                for eid, urls in roleUrls['agent'].items():
-                    url = urls[kering.Schemes.http] if kering.Schemes.http in urls else urls.get(kering.Schemes.https)
+            if roleUrls and "agent" in roleUrls:
+                for eid, urls in roleUrls["agent"].items():
+                    url = (
+                        urls[kering.Schemes.http]
+                        if kering.Schemes.http in urls
+                        else urls.get(kering.Schemes.https)
+                    )
                     if url:
                         up = urlparse(url)
-                        oobis.append(urljoin(up.geturl(), f'/oobi/{hab.pre}/agent/{eid}'))
+                        oobis.append(
+                            urljoin(up.geturl(), f"/oobi/{hab.pre}/agent/{eid}")
+                        )
 
         if not oobis:
             return {
-                'success': False,
-                'oobi': None,
-                'qr_code': None,
-                'message': f'No {role} OOBIs available'
+                "success": False,
+                "oobi": None,
+                "qr_code": None,
+                "message": f"No {role} OOBIs available",
             }
 
         # Select random OOBI if multiple available
@@ -848,26 +854,17 @@ def generate_oobi(app, hab, role='witness'):
             try:
                 img = qrcode.make(oobi_url)
                 f = io.BytesIO()
-                img.save(f, format='PNG')
+                img.save(f, format="PNG")
                 f.seek(0)
-                qr_code_base64 = base64.b64encode(f.read()).decode('utf-8')
+                qr_code_base64 = base64.b64encode(f.read()).decode("utf-8")
             except Exception as e:
                 logger.warning(f"Failed to generate QR code: {e}")
 
-        return {
-            'success': True,
-            'oobi': oobi_url,
-            'qr_code': qr_code_base64
-        }
+        return {"success": True, "oobi": oobi_url, "qr_code": qr_code_base64}
 
     except Exception as e:
         logger.exception(f"Error generating OOBI: {e}")
-        return {
-            'success': False,
-            'oobi': None,
-            'qr_code': None,
-            'message': str(e)
-        }
+        return {"success": False, "oobi": None, "qr_code": None, "message": str(e)}
 
 
 def get_delegates_awaiting_approval(app, hab):
@@ -888,12 +885,14 @@ def get_delegates_awaiting_approval(app, hab):
 
     try:
         for (pre, sn), edig in app.vault.hby.db.delegables.getItemIter():
-            delegates.append({
-                'pre': pre,
-                'sn': sn[-1],  # Get last element of sequence number
-                'edig': edig,
-                'sn_full': sn  # Keep full sn for later use
-            })
+            delegates.append(
+                {
+                    "pre": pre,
+                    "sn": sn[-1],  # Get last element of sequence number
+                    "edig": edig,
+                    "sn_full": sn,  # Keep full sn for later use
+                }
+            )
 
     except Exception as e:
         logger.exception(f"Error getting delegates: {e}")
@@ -915,33 +914,26 @@ def confirm_delegates(app, hab, selected_delegates):
     """
     try:
         # Convert selected delegates to format expected by ConfirmDoer
-        escrowed = [(d['pre'], d['sn_full'], d['edig']) for d in selected_delegates]
+        escrowed = [(d["pre"], d["sn_full"], d["edig"]) for d in selected_delegates]
 
         # Create and launch ConfirmDoer
         # ConfirmDoer is defined later in this file, but available at runtime
         # type: ignore
         confirm_doer = ConfirmDoer(
-            app=app,
-            alias=hab.name,
-            escrowed=escrowed,
-            auto=True,
-            interact=True
+            app=app, alias=hab.name, escrowed=escrowed, auto=True, interact=True
         )
 
         # Add to app's doer queue
         app.vault.extend([confirm_doer])
 
         return {
-            'success': True,
-            'message': f'Confirming {len(selected_delegates)} delegate(s)...'
+            "success": True,
+            "message": f"Confirming {len(selected_delegates)} delegate(s)...",
         }
 
     except Exception as e:
         logger.exception(f"Error confirming delegates: {e}")
-        return {
-            'success': False,
-            'message': f'Error confirming delegates: {str(e)}'
-        }
+        return {"success": False, "message": f"Error confirming delegates: {str(e)}"}
 
 
 def refresh_keystate(app, hab):
@@ -960,10 +952,7 @@ def refresh_keystate(app, hab):
 
     try:
         if not isinstance(hab, keri_habbing.GroupHab):
-            return {
-                'success': False,
-                'message': 'Identifier is not a group multisig'
-            }
+            return {"success": False, "message": "Identifier is not a group multisig"}
 
         org = connecting.Organizer(hby=app.vault.hby)
 
@@ -974,22 +963,21 @@ def refresh_keystate(app, hab):
 
             remote_id = org.get(pre)
             if remote_id:
-                logger.info(f"Querying key state for {remote_id.get('alias', 'unknown')} with pre: {pre}")
+                logger.info(
+                    f"Querying key state for {remote_id.get('alias', 'unknown')} with pre: {pre}"
+                )
                 # TODO: Implement OOBI resolution for key state refresh
                 # This would require async/await or a doer
                 # For now, just log the intent
 
         return {
-            'success': True,
-            'message': 'Key state refresh initiated for group members'
+            "success": True,
+            "message": "Key state refresh initiated for group members",
         }
 
     except Exception as e:
         logger.exception(f"Error refreshing key state: {e}")
-        return {
-            'success': False,
-            'message': f'Error refreshing key state: {str(e)}'
-        }
+        return {"success": False, "message": f"Error refreshing key state: {str(e)}"}
 
 
 class ConfirmDoer(doing.DoDoer):
@@ -999,8 +987,17 @@ class ConfirmDoer(doing.DoDoer):
     This is adapted from the Flet implementation to work with PySide6.
     """
 
-    def __init__(self, app, alias, escrowed, interact=False, auto=False, authenticate=False, codes=None,
-                 codeTime=None):
+    def __init__(
+        self,
+        app,
+        alias,
+        escrowed,
+        interact=False,
+        auto=False,
+        authenticate=False,
+        codes=None,
+        codeTime=None,
+    ):
         """
         Initialize the ConfirmDoer.
 
@@ -1066,7 +1063,7 @@ class ConfirmDoer(doing.DoDoer):
         # Enter context
         self.wind(tymth)
         self.tock = tock
-        _ = (yield self.tock)
+        _ = yield self.tock
 
         try:
             while True:
@@ -1106,35 +1103,54 @@ class ConfirmDoer(doing.DoDoer):
                         if isinstance(hab, habbing.GroupHab):
                             aids = hab.smids
 
-                            anchor = dict(i=eserder.ked["i"], s=eserder.snh, d=eserder.said)
+                            anchor = dict(
+                                i=eserder.ked["i"], s=eserder.snh, d=eserder.said
+                            )
                             if self.interact:
                                 msg = hab.interact(data=[anchor])
                             else:
-                                logger.warning("Confirm does not support rotation for delegation approval with group multisig")
+                                logger.warning(
+                                    "Confirm does not support rotation for delegation approval with group multisig"
+                                )
                                 continue
 
                             serder = serdering.SerderKERI(raw=msg)
-                            exn, atc = grouping.multisigInteractExn(ghab=hab, aids=aids, ixn=bytearray(msg))
+                            exn, atc = grouping.multisigInteractExn(
+                                ghab=hab, aids=aids, ixn=bytearray(msg)
+                            )
                             others = list(oset(hab.smids + (hab.rmids or [])))
                             others.remove(hab.mhab.pre)
 
-                            for recpt in others:  # send notification to other participants
-                                self.postman.send(src=hab.mhab.pre, dest=recpt, topic="multisig", serder=exn,
-                                                  attachment=atc)
+                            for (
+                                recpt
+                            ) in others:  # send notification to other participants
+                                self.postman.send(
+                                    src=hab.mhab.pre,
+                                    dest=recpt,
+                                    topic="multisig",
+                                    serder=exn,
+                                    attachment=atc,
+                                )
 
                             prefixer = coring.Prefixer(qb64=hab.pre)
                             sner = core.Number(num=serder.sn, code=core.NumDex.Huge)
                             saider = coring.Saider(qb64b=serder.saidb)
-                            self.counselor.start(ghab=hab, prefixer=prefixer, seqner=sner, saider=saider)
+                            self.counselor.start(
+                                ghab=hab, prefixer=prefixer, seqner=sner, saider=saider
+                            )
 
                             while True:
-                                saider = self.hby.db.cgms.get(keys=(prefixer.qb64, sner.qb64))
+                                saider = self.hby.db.cgms.get(
+                                    keys=(prefixer.qb64, sner.qb64)
+                                )
                                 if saider is not None:
                                     break
 
                                 yield self.tock
 
-                            logger.info(f"Delegate {eserder.pre} {typ} event committed.")
+                            logger.info(
+                                f"Delegate {eserder.pre} {typ} event committed."
+                            )
 
                             self.remove(self.toRemove)
                             return True
@@ -1142,7 +1158,9 @@ class ConfirmDoer(doing.DoDoer):
                         else:
                             cur = hab.kever.sner.num
 
-                            anchor = dict(i=eserder.ked["i"], s=eserder.snh, d=eserder.said)
+                            anchor = dict(
+                                i=eserder.ked["i"], s=eserder.snh, d=eserder.said
+                            )
                             if self.interact:
                                 hab.interact(data=[anchor])
                             else:
@@ -1151,41 +1169,59 @@ class ConfirmDoer(doing.DoDoer):
                             auths = {}
                             if self.authenticate:
                                 from keri.help import helping
-                                codeTime = helping.fromIso8601(
-                                    self.codeTime) if self.codeTime is not None else helping.nowIso8601()
+
+                                codeTime = (
+                                    helping.fromIso8601(self.codeTime)
+                                    if self.codeTime is not None
+                                    else helping.nowIso8601()
+                                )
                                 for arg in self.codes:
                                     (wit, code) = arg.split(":")
                                     auths[wit] = f"{code}#{codeTime}"
 
-                            witDoer = agenting.WitnessReceiptor(hby=self.hby, auths=auths)
+                            witDoer = agenting.WitnessReceiptor(
+                                hby=self.hby, auths=auths
+                            )
                             self.extend(doers=[witDoer])
                             self.toRemove.append(witDoer)  # type: ignore
                             yield self.tock
 
                             if hab.kever.wits:
-                                witDoer.msgs.append(dict(pre=hab.pre, sn=cur+1))
+                                witDoer.msgs.append(dict(pre=hab.pre, sn=cur + 1))
                                 while not witDoer.cues:
                                     _ = yield self.tock
 
-                            logger.info(f'Delegator Prefix  {hab.pre}')
-                            logger.info(f'\tDelegate {eserder.pre} {typ} Anchored at Seq. No.  {hab.kever.sner.num}')
+                            logger.info(f"Delegator Prefix  {hab.pre}")
+                            logger.info(
+                                f"\tDelegate {eserder.pre} {typ} Anchored at Seq. No.  {hab.kever.sner.num}"
+                            )
 
                             # wait for confirmation of fully committed event
                             if eserder.pre in self.hby.kevers:
-
-                                self.witq.query(src=hab.pre, pre=eserder.pre, sn=eserder.sn)
+                                self.witq.query(
+                                    src=hab.pre, pre=eserder.pre, sn=eserder.sn
+                                )
 
                                 while eserder.sn < self.hby.kevers[eserder.pre].sn:
                                     yield self.tock
 
-                                logger.info(f"Delegate {eserder.pre} {typ} event committed.")
+                                logger.info(
+                                    f"Delegate {eserder.pre} {typ} event committed."
+                                )
                             else:  # It should be an inception event then...
                                 wits = [werfer.qb64 for werfer in eserder.berfers]
-                                self.witq.query(src=hab.pre, pre=eserder.pre, sn=eserder.sn, wits=wits)
+                                self.witq.query(
+                                    src=hab.pre,
+                                    pre=eserder.pre,
+                                    sn=eserder.sn,
+                                    wits=wits,
+                                )
                                 while eserder.pre not in self.hby.kevers:
                                     yield self.tock
 
-                                logger.info(f"Delegate {eserder.pre} {typ} event committed.")
+                                logger.info(
+                                    f"Delegate {eserder.pre} {typ} event committed."
+                                )
 
                             self.hby.db.delegables.rem(keys=(pre, sn))
                             self.remove(self.toRemove)
@@ -1235,7 +1271,7 @@ class TestDoer(doing.Doer):
                 self.signal_bridge.emit_doer_event(
                     doer_name="TestDoer",
                     event_type="count_threshold_reached",
-                    data={"count": self.count, "threshold": 10}
+                    data={"count": self.count, "threshold": 10},
                 )
                 # Stop the doer after reaching threshold
                 return True
