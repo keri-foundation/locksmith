@@ -10,6 +10,7 @@
         <file>assets/material-icons/account_tree.svg</file>
         <file>assets/material-icons/public.svg</file>
         <file>assets/material-icons/add_to_drive.svg</file>
+        <file>assets/material-icons/said_fingerprint.svg</file>
         <file>assets/material-icons/all_inbox.svg</file>
         <file>assets/material-icons/shield_person.svg</file>
         <file>assets/material-icons/step-next.svg</file>
@@ -37,6 +38,7 @@
         <file>assets/material-icons/mail.svg</file>
         <file>assets/material-icons/shield.svg</file>
         <file>assets/material-icons/hub.svg</file>
+        <file>assets/material-icons/targeting_untargeted.svg</file>
         <file>assets/material-icons/notifications_unread_hover.svg</file>
         <file>assets/material-icons/in-badge.svg</file>
         <file>assets/material-icons/chevron_right.svg</file>
@@ -63,6 +65,7 @@
         <file>assets/material-icons/inbox_active.svg</file>
         <file>assets/material-icons/refresh.svg</file>
         <file>assets/material-icons/fingerprint_off.svg</file>
+        <file>assets/material-icons/privacy_public.svg</file>
         <file>assets/material-icons/chevron_up.svg</file>
         <file>assets/material-icons/settings_video_camera.svg</file>
         <file>assets/material-icons/badge.svg</file>
@@ -71,7 +74,9 @@
         <file>assets/material-icons/device_hub.svg</file>
         <file>assets/material-icons/p2p.svg</file>
         <file>assets/material-icons/delegate.svg</file>
+        <file>assets/material-icons/issuer_sigil.svg</file>
         <file>assets/material-icons/send.svg</file>
+        <file>assets/material-icons/ecosystem_diamond.svg</file>
         <file>assets/material-icons/interact.svg</file>
         <file>assets/material-icons/remote_contact.svg</file>
         <file>assets/material-icons/notifications_hover.svg</file>
@@ -79,6 +84,7 @@
         <file>assets/material-icons/security.svg</file>
         <file>assets/material-icons/lan.svg</file>
         <file>assets/material-icons/launch-proxy.svg</file>
+        <file>assets/material-icons/targeting_targeted.svg</file>
         <file>assets/material-icons/visibility_off.svg</file>
         <file>assets/material-icons/edit.svg</file>
         <file>assets/material-icons/api.svg</file>
@@ -91,6 +97,9 @@
         <file>assets/material-icons/delete.svg</file>
         <file>assets/material-icons/dock_to_left_on.svg</file>
         <file>assets/material-icons/rotate_right.svg</file>
+        <file>assets/material-icons/fit_to_content.svg</file>
+        <file>assets/material-icons/unresolved.svg</file>
+        <file>assets/material-icons/privacy_private.svg</file>
         <file>assets/material-icons/profile.svg</file>
         <file>assets/material-icons/share.svg</file>
         <file>assets/material-icons/view.svg</file>
