@@ -7,6 +7,7 @@ Plugin discovery, initialization, and lifecycle management.
 from __future__ import annotations
 
 import importlib.metadata
+from types import SimpleNamespace
 from typing import Any, TYPE_CHECKING
 
 from keri import help
@@ -68,11 +69,20 @@ class PluginManager:
             except Exception:
                 logger.exception(f"Plugin '{plugin.plugin_id}' failed on_vault_opened")
 
-    def on_vault_closed(self, vault: Any) -> None:
+    def prepare_vault_deletion(self, vault: Any) -> None:
+        """Let plugins revoke remote state before local vault deletion."""
+        for plugin in self._plugins.values():
+            try:
+                plugin.prepare_vault_deletion(vault)
+            except Exception:
+                logger.exception(f"Plugin '{plugin.plugin_id}' failed prepare_vault_deletion")
+                raise
+
+    def on_vault_closed(self, vault: Any, *, clear: bool = False) -> None:
         """Notify all plugins that a vault is being closed."""
         for plugin in self._plugins.values():
             try:
-                plugin.on_vault_closed(vault)
+                plugin.on_vault_closed(vault, clear=clear)
             except Exception:
                 logger.exception(f"Plugin '{plugin.plugin_id}' failed on_vault_closed")
 
@@ -98,12 +108,30 @@ class PluginManager:
                 )
 
     def get_witness_batches(self, vault: Any, hab_pre: str) -> Any | None:
-        """Query all plugins for witness batch data. First non-None result wins."""
+        """Query all plugins for witness batch data and merge distinct groups."""
+        merged = []
+        seen = set()
+
         for plugin in self._plugins.values():
             result = plugin.get_witness_batches(vault, hab_pre)
-            if result is not None:
-                return result
-        return None
+            if result is None:
+                continue
+
+            for batch in getattr(result, "batches", []) or []:
+                if not isinstance(batch, (list, tuple)) or not batch:
+                    continue
+
+                key = tuple(sorted(str(eid) for eid in batch))
+                if key in seen:
+                    continue
+
+                seen.add(key)
+                merged.append(list(batch))
+
+        if not merged:
+            return None
+
+        return SimpleNamespace(batches=merged)
 
     def update_witness_state_after_rotation(self, vault: Any, wit_eid: str) -> None:
         """Notify all plugins to update witness state after rotation."""

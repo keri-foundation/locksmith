@@ -10,6 +10,7 @@ from keri import help
 
 from locksmith.core.configing import LocksmithConfig
 from locksmith.core.vaulting import Vault
+from locksmith.db.basing import LocksmithBaser
 from locksmith.plugins.manager import PluginManager
 
 logger = help.ogler.getLogger(__name__)
@@ -165,11 +166,20 @@ class LocksmithApplication:
 
         logger.info(f"Deleting vault '{vault_name}' using close(clear=True)")
 
+        try:
+            self.plugin_manager.prepare_vault_deletion(self.vault)
+        except Exception:
+            logger.exception(f"Aborting vault deletion for '{vault_name}' during plugin cleanup")
+            return False
+
         # First, shutdown the QtTask to stop all doers
         if self.qtask is not None:
             self.qtask.shutdown()
             self.qtask.cleanup()
             self.qtask = None
+
+        if self.vault is not None:
+            self.plugin_manager.on_vault_closed(self.vault, clear=True)
 
         # Collect all database instances to close with clear=True
         # Order matters: close dependencies first
@@ -272,25 +282,28 @@ class LocksmithApplication:
                     alias="API",
                 )
 
-    @staticmethod
-    def environments():
+    def environments(self):
         """
-        List all available vault environments.
+        List Locksmith vault environments.
+
+        Uses Locksmith's runtime database as the source of truth so generic KERI
+        environments such as witnesses do not appear in the vault drawer.
 
         Returns:
             list: List of vault names
         """
-        dbhome = Path('/usr/local/var/keri/db')
-        if not dbhome.exists():
-            dbhome = Path(f'{Path.home()}/.keri/db')
-
-        if not dbhome.is_dir():
+        base_path = Path(self.config.base) if self.config.base else Path()
+        candidates = (
+            Path("/usr/local/var") / Path(LocksmithBaser.TailDirPath) / base_path,
+            Path.home() / Path(LocksmithBaser.AltTailDirPath) / base_path,
+        )
+        rt_home = next((path for path in candidates if path.is_dir()), None)
+        if rt_home is None:
             return []
 
-        envs = []
-        for p in dbhome.iterdir():
-            if p.is_dir():  # Only include directories
-                envs.append(p.stem)
-
-        return sorted(envs)  # Return sorted list
+        return sorted(
+            path.name
+            for path in rt_home.iterdir()
+            if path.is_dir()
+        )
         
