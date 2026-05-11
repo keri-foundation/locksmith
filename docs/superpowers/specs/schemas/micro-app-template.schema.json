@@ -1,0 +1,609 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://locksmith/spec/micro-app-template/0.1",
+  "title": "Micro-App Template",
+  "description": "Canonical artifact describing one role's slice of operational behavior in a KERI-native ecosystem application.",
+  "type": "object",
+  "required": ["d", "spec_version", "header", "role", "credentials", "commands", "aggregates", "reactions", "workflows", "projections", "rules"],
+  "additionalProperties": false,
+  "properties": {
+    "d": {
+      "type": "string",
+      "minLength": 44,
+      "maxLength": 44,
+      "description": "Self-SAID of this document. 44-character CESR-encoded Blake3-256 digest of the canonical form with d field placeholdered."
+    },
+    "spec_version": {
+      "type": "string",
+      "pattern": "^micro-app-template/[0-9]+\\.[0-9]+$",
+      "description": "Version of the ecosystem-template meta-schema this document conforms to."
+    },
+    "header": { "$ref": "#/$defs/header" },
+    "role": { "$ref": "#/$defs/role" },
+    "credentials": {
+      "type": "object",
+      "required": ["imports", "exports"],
+      "additionalProperties": false,
+      "properties": {
+        "imports": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/imported_credential" }
+        },
+        "exports": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/exported_credential" }
+        }
+      }
+    },
+    "commands": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/command" }
+    },
+    "aggregates": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/aggregate" }
+    },
+    "reactions": { "type": "array", "items": { "$ref": "#/$defs/reaction" } },
+    "workflows": { "type": "array", "items": { "$ref": "#/$defs/workflow" } },
+    "projections": { "type": "array", "items": { "$ref": "#/$defs/projection" } },
+    "rules": { "type": "array", "items": { "$ref": "#/$defs/rule" } }
+  },
+  "$defs": {
+    "header": {
+      "type": "object",
+      "required": ["id", "display_name", "description", "version", "expression_language"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+        "display_name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+(\\.[0-9]+)?$" },
+        "expression_language": { "type": "string", "pattern": "^[A-Z][A-Za-z]*/[0-9]+\\.[0-9]+$" },
+        "forked_from": {
+          "type": "object",
+          "required": ["template_said", "template_version", "forked_at"],
+          "additionalProperties": false,
+          "properties": {
+            "template_said": { "type": "string", "minLength": 44, "maxLength": 44 },
+            "template_version": { "type": "string" },
+            "forked_at": { "type": "string", "format": "date" },
+            "fork_intent": { "type": "string" }
+          }
+        }
+      }
+    },
+    "role": {
+      "type": "object",
+      "required": ["id", "display_name", "description", "kind", "keri_infrastructure"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+        "display_name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "kind": {
+          "type": "string",
+          "enum": ["individual", "organization", "system", "device", "agent", "government"]
+        },
+        "keri_infrastructure": {
+          "type": "object",
+          "required": ["witness_pool", "watcher_network", "mailbox", "acdc_registry"],
+          "additionalProperties": false,
+          "properties": {
+            "witness_pool": { "type": "boolean" },
+            "watcher_network": { "type": "boolean" },
+            "mailbox": { "type": "boolean" },
+            "acdc_registry": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "imported_credential": {
+      "type": "object",
+      "required": ["id", "expected_schema_said"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+        "expected_schema_said": { "type": "string", "minLength": 44, "maxLength": 44 },
+        "expected_issuer_role": { "type": "string" },
+        "expected_attribute_constraints": { "type": "object" },
+        "lifecycle_acceptance": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["active"]
+        },
+        "narrative": { "type": "string" }
+      }
+    },
+    "edge_operator": {
+      "type": "string",
+      "enum": ["authorizes", "references", "authorizes-via-delegate"]
+    },
+    "disclosure_mode": {
+      "type": "string",
+      "enum": ["full", "selective", "aggregate"]
+    },
+    "tel_primitive": {
+      "type": "string",
+      "enum": ["issue", "update", "revoke"]
+    },
+    "exported_credential": {
+      "type": "object",
+      "required": ["id", "name", "description", "envelope", "schema", "lifecycle"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "envelope": {
+          "type": "object",
+          "required": ["holder_role", "verifier_roles", "edges", "disclosure_mode"],
+          "additionalProperties": false,
+          "properties": {
+            "holder_role": { "type": "string" },
+            "verifier_roles": { "type": "array", "items": { "type": "string" } },
+            "edges": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["edge_name", "credential_id", "cardinality", "operator"],
+                "additionalProperties": false,
+                "properties": {
+                  "edge_name": { "type": "string" },
+                  "credential_id": { "type": "string" },
+                  "cardinality": { "type": "string", "enum": ["one", "one_or_more"] },
+                  "operator": { "$ref": "#/$defs/edge_operator" }
+                }
+              }
+            },
+            "disclosure_mode": { "$ref": "#/$defs/disclosure_mode" }
+          }
+        },
+        "schema": {
+          "type": "object",
+          "required": ["schema_said", "schema_path"],
+          "additionalProperties": false,
+          "properties": {
+            "schema_said": { "type": "string", "minLength": 44, "maxLength": 44 },
+            "schema_path": { "type": "string", "pattern": "^schemas/[a-z][a-z0-9_-]*\\.json$" }
+          }
+        },
+        "lifecycle": {
+          "type": "object",
+          "required": ["states", "initial", "transitions"],
+          "additionalProperties": false,
+          "properties": {
+            "states": {
+              "type": "array",
+              "items": { "type": "string" },
+              "minItems": 1,
+              "uniqueItems": true
+            },
+            "initial": { "type": "string" },
+            "transitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["id", "from", "to", "tel_primitive"],
+                "additionalProperties": false,
+                "properties": {
+                  "id": { "type": "string" },
+                  "from": {
+                    "oneOf": [
+                      { "type": "string" },
+                      { "type": "array", "items": { "type": "string" } }
+                    ]
+                  },
+                  "to": { "type": "string" },
+                  "via_workflow": { "type": ["string", "null"] },
+                  "tel_primitive": { "$ref": "#/$defs/tel_primitive" },
+                  "trigger": { "type": "string", "enum": ["manual", "automatic"] },
+                  "condition_rule_ref": { "type": "string" },
+                  "requires": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["rule_ref"],
+                      "additionalProperties": false,
+                      "properties": { "rule_ref": { "type": "string" } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "rule_refs": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "value_flow": {
+          "type": "object",
+          "required": ["implied_credentials"],
+          "additionalProperties": false,
+          "properties": {
+            "implied_credentials": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["credential_id", "relationship"],
+                "additionalProperties": false,
+                "properties": {
+                  "credential_id": { "type": "string" },
+                  "relationship": {
+                    "type": "string",
+                    "enum": ["issuer_grants", "per_emission", "per_holder_emission", "implies_obligation"]
+                  },
+                  "description": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "rule_ref_obj": {
+      "type": "object",
+      "required": ["rule_ref"],
+      "additionalProperties": false,
+      "properties": { "rule_ref": { "type": "string" } }
+    },
+    "exchange": {
+      "type": "object",
+      "required": ["kind"],
+      "oneOf": [
+        {
+          "required": ["kind", "verb"],
+          "properties": {
+            "kind": { "const": "credential" },
+            "verb": { "type": "string", "enum": ["apply", "offer", "agree", "grant", "admit", "spurn"] },
+            "imported_credential_id": { "type": ["string", "null"] },
+            "exported_credential_id": { "type": ["string", "null"] },
+            "schema_said_referenced": { "type": ["string", "null"] }
+          }
+        },
+        {
+          "required": ["kind", "pattern", "route"],
+          "properties": {
+            "kind": { "const": "message" },
+            "pattern": { "type": "string", "enum": ["command", "query", "notification"] },
+            "route": { "type": "string", "pattern": "^/[a-z][a-z0-9_/-]*$" },
+            "schema_id": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "emission": {
+      "type": "object",
+      "required": ["kind"],
+      "oneOf": [
+        {
+          "required": ["kind", "exchange"],
+          "properties": {
+            "kind": { "const": "exchange" },
+            "exchange": { "$ref": "#/$defs/exchange" }
+          }
+        },
+        {
+          "required": ["kind", "exported_credential_id", "to_state"],
+          "properties": {
+            "kind": { "const": "lifecycle_advance" },
+            "exported_credential_id": { "type": "string" },
+            "to_state": { "type": "string" }
+          }
+        },
+        {
+          "required": ["kind", "aggregate_id", "event_type", "payload_mapping"],
+          "properties": {
+            "kind": { "const": "aggregate_event" },
+            "aggregate_id": { "type": "string" },
+            "event_type": { "type": "string" },
+            "payload_mapping": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "command": {
+      "type": "object",
+      "required": ["id", "name", "description", "route", "payload_schema", "idempotency_key_expression", "emissions"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "route": {
+          "type": "string",
+          "pattern": "^/[a-z][a-z0-9_/-]*$",
+          "not": { "pattern": "^/ipex/" }
+        },
+        "counterparty_role": { "type": ["string", "null"] },
+        "payload_schema": { "type": "object" },
+        "auth_preconditions": { "type": "array", "items": { "$ref": "#/$defs/rule_ref_obj" } },
+        "state_preconditions": { "type": "array", "items": { "$ref": "#/$defs/rule_ref_obj" } },
+        "temporal_preconditions": { "type": "array", "items": { "$ref": "#/$defs/rule_ref_obj" } },
+        "idempotency_key_expression": { "type": "string" },
+        "emissions": { "type": "array", "items": { "$ref": "#/$defs/emission" } }
+      }
+    },
+    "log_scope": { "type": "string", "enum": ["private", "witnessed", "shared"] },
+    "aggregate": {
+      "type": "object",
+      "required": ["id", "description", "inception_event_type", "state_schema", "initial_state", "log_scope"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+        "description": { "type": "string" },
+        "inception_event_type": { "type": "string" },
+        "state_schema": { "type": "object" },
+        "initial_state": {},
+        "invariants": { "type": "array", "items": { "$ref": "#/$defs/rule_ref_obj" } },
+        "log_scope": { "$ref": "#/$defs/log_scope" }
+      }
+    },
+    "reaction_trigger": {
+      "type": "object",
+      "required": ["type"],
+      "oneOf": [
+        {
+          "required": ["type", "imported_credential_id"],
+          "properties": {
+            "type": { "const": "credential_received" },
+            "imported_credential_id": { "type": "string" },
+            "ipex_verb": { "type": "string", "enum": ["apply", "offer", "agree", "grant", "admit", "spurn"] }
+          }
+        },
+        {
+          "required": ["type", "route"],
+          "properties": {
+            "type": { "const": "exn_received" },
+            "route": { "type": "string", "pattern": "^/[a-z][a-z0-9_/-]*$" },
+            "schema_id": { "type": "string" }
+          }
+        },
+        {
+          "required": ["type"],
+          "properties": {
+            "type": { "const": "lifecycle_event" },
+            "exported_credential_id": { "type": "string" },
+            "imported_credential_id": { "type": "string" },
+            "to_state": { "type": "string" }
+          }
+        },
+        {
+          "required": ["type"],
+          "properties": {
+            "type": { "const": "scheduled" },
+            "cadence": { "type": "string" },
+            "at": { "type": "string", "format": "date-time" }
+          }
+        }
+      ]
+    },
+    "reaction": {
+      "type": "object",
+      "required": ["id", "description", "trigger", "emissions"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+        "description": { "type": "string" },
+        "trigger": { "$ref": "#/$defs/reaction_trigger" },
+        "emissions": { "type": "array", "items": { "$ref": "#/$defs/emission" } },
+        "failure_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "on_validation_failure": { "type": "string", "enum": ["log_and_continue", "log_and_spurn", "abort"] },
+            "timeout_seconds": { "type": ["integer", "null"], "minimum": 0 }
+          }
+        }
+      }
+    },
+    "workflow_step": {
+      "type": "object",
+      "required": ["id", "name", "actor"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "actor": { "type": "string", "enum": ["self", "counterparty"] },
+        "command_id": { "type": "string" },
+        "reaction_id": { "type": "string" },
+        "advance_lifecycle": {
+          "type": ["object", "null"],
+          "required": ["credential_id", "to_state"],
+          "additionalProperties": false,
+          "properties": {
+            "credential_id": { "type": "string" },
+            "to_state": { "type": "string" }
+          }
+        },
+        "expected_inbound": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "trigger_type": { "type": "string", "enum": ["credential_received", "exn_received", "lifecycle_event"] },
+              "imported_credential_id": { "type": "string" },
+              "ipex_verb": { "type": "string", "enum": ["apply", "offer", "agree", "grant", "admit", "spurn"] },
+              "route": { "type": "string" },
+              "on_match": { "type": "string", "pattern": "^next_step:" }
+            }
+          }
+        },
+        "branches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["rule_ref", "next_step"],
+            "additionalProperties": false,
+            "properties": {
+              "rule_ref": { "type": "string" },
+              "next_step": { "type": "string" }
+            }
+          }
+        },
+        "next_steps": { "type": "array", "items": { "type": "string" } },
+        "time_bound": {
+          "type": "object",
+          "required": ["duration", "on_expiry"],
+          "additionalProperties": false,
+          "properties": {
+            "duration": { "type": "string" },
+            "on_expiry": { "type": "string" }
+          }
+        }
+      }
+    },
+    "workflow_trigger": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "enum": ["manual", "scheduled", "lifecycle_event", "exn_received", "credential_received"] },
+        "initiator_role": { "type": "string" },
+        "cadence": { "type": "string" },
+        "at": { "type": "string", "format": "date-time" },
+        "credential_id": { "type": "string" },
+        "imported_credential_id": { "type": "string" },
+        "to_state": { "type": "string" },
+        "route": { "type": "string" },
+        "ipex_verb": { "type": "string", "enum": ["apply", "offer", "agree", "grant", "admit", "spurn"] }
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "required": ["id", "name", "description", "trigger", "steps"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "counterparty_role": { "type": ["string", "null"] },
+        "trigger": { "$ref": "#/$defs/workflow_trigger" },
+        "steps": { "type": "array", "items": { "$ref": "#/$defs/workflow_step" }, "minItems": 1 }
+      }
+    },
+    "view_type": {
+      "type": "string",
+      "enum": ["table", "list", "cards", "kanban", "timeline", "summary"]
+    },
+    "projection": {
+      "type": "object",
+      "required": ["id", "name", "description", "source_events", "output_schema", "fold_expression"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "source_events": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "output_schema": { "type": "object" },
+        "fold_expression": { "type": "string" },
+        "access": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "row_filter_rule_ref": { "type": "string" },
+            "lens_template": { "type": "string" }
+          }
+        },
+        "display": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "view_type": { "$ref": "#/$defs/view_type" },
+            "columns": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "field": { "type": "string" },
+                  "header": { "type": "string" },
+                  "display_template": { "type": "string" }
+                }
+              }
+            },
+            "default_sort": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "column": { "type": "string" },
+                "direction": { "type": "string", "enum": ["asc", "desc"] }
+              }
+            },
+            "empty_state": { "type": "string" }
+          }
+        }
+      }
+    },
+    "rule_type": {
+      "type": "string",
+      "enum": [
+        "legal_prose",
+        "behavioral_expectation",
+        "business_policy",
+        "predicate",
+        "computational",
+        "validation",
+        "binding_link"
+      ]
+    },
+    "predicate_purpose": {
+      "type": "string",
+      "enum": [
+        "auth_precondition",
+        "state_precondition",
+        "temporal_precondition",
+        "lifecycle_transition_requires",
+        "lifecycle_transition_condition",
+        "workflow_branch_condition",
+        "aggregate_invariant",
+        "projection_row_filter",
+        "derived_membership"
+      ]
+    },
+    "rule": {
+      "type": "object",
+      "required": ["id", "type", "title"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+        "type": { "$ref": "#/$defs/rule_type" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "body": { "type": "string" },
+        "expression": { "type": "string" },
+        "language": { "type": "string", "pattern": "^[A-Z][A-Za-z]*/[0-9]+\\.[0-9]+$" },
+        "purpose": { "$ref": "#/$defs/predicate_purpose" },
+        "result_attribute": { "type": "string" },
+        "links": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["rule_id"],
+            "additionalProperties": false,
+            "properties": { "rule_id": { "type": "string" } }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "enum": ["legal_prose", "behavioral_expectation"] } } },
+          "then": { "required": ["body"] }
+        },
+        {
+          "if": { "properties": { "type": { "enum": ["predicate", "computational", "validation"] } } },
+          "then": { "required": ["expression", "language"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "predicate" } } },
+          "then": { "required": ["purpose"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "computational" } } },
+          "then": { "required": ["result_attribute"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "binding_link" } } },
+          "then": { "required": ["links"] }
+        }
+      ]
+    }
+  }
+}
