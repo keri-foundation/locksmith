@@ -7,6 +7,7 @@ This module contains the peer-to-peer challenge response protocol
 
 """
 import os
+import tempfile
 
 from hio.base import doing
 from hio.help import decking
@@ -47,10 +48,11 @@ class TurretDoer(doing.DoDoer):
         hab = hby.habByName(locksmith_alias, ns="settings")
         cues = decking.Deck()
 
-        if os.path.exists("/tmp/keripy_kli.s"):
-            os.remove("/tmp/keripy_kli.s")
+        _socket_path = os.path.join(tempfile.gettempdir(), "keripy_kli.s")
+        if os.path.exists(_socket_path):
+            os.remove(_socket_path)
 
-        server = Server(path="/tmp/keripy_kli.s", bufsize=8069)
+        server = Server(path=_socket_path, bufsize=8069)
         server_doer = ServerDoer(server=server)
 
         exc = exchanging.Exchanger(hby, handlers=[])
