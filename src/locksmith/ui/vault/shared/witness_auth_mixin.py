@@ -7,7 +7,7 @@ Shared mixin for witness authentication dialogs.
 import re
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QVBoxLayout, QLabel, QHBoxLayout, QFrame
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QFrame
 from keri import help
 
 from locksmith.ui import colors
@@ -209,12 +209,8 @@ class WitnessAuthenticationMixin:
         if hasattr(self, 'rotate_button'):
             self.rotate_button.setEnabled(enabled)
 
-    def _on_rotate(self):
-        """Handle rotate button click - validate and accept."""
-        # Clear any previous errors
-        self.clear_error()
-
-        # Validate that at least one code is provided
+    def validate_authentication_codes(self) -> tuple[bool, list[str], str]:
+        """Validate entered witness passcodes and return KERI auth code strings."""
         has_any_code = False
         all_valid = True
         error_messages = []
@@ -224,12 +220,9 @@ class WitnessAuthenticationMixin:
 
             if passcode:
                 has_any_code = True
-                # Validate 6-digit format
                 if not re.match(r'^\d{6}$', passcode):
                     all_valid = False
-                    # Handle both batch keys (tuples) and individual witness IDs (strings)
                     if isinstance(key, tuple):
-                        # Find the batch label for this key
                         batch_label = next(
                             (label for label, wits in self.batch_groups
                              if tuple(sorted(wits)) == key),
@@ -242,18 +235,24 @@ class WitnessAuthenticationMixin:
                         error_messages.append(f"{alias}: Invalid code (must be 6 digits)")
 
         if not has_any_code:
-            self.show_error("Please enter at least one passcode")
-            return
+            return False, [], "Please enter at least one passcode"
 
         if not all_valid:
-            error_message = "Invalid passcode format:\n" + "\n".join(error_messages)
+            return False, [], "Invalid passcode format:\n" + "\n".join(error_messages)
+
+        codes = self.get_authentication_codes()
+        logger.info(f"Authenticating {len([f for f in self.passcode_fields.values() if f.text().strip()])} witnesses")
+        return True, codes, ""
+
+    def _on_rotate(self):
+        """Handle rotate button click - validate and accept."""
+        # Clear any previous errors
+        self.clear_error()
+
+        valid, codes, error_message = self.validate_authentication_codes()
+        if not valid:
             self.show_error(error_message)
             return
-
-        logger.info(f"Authenticating {len([f for f in self.passcode_fields.values() if f.text().strip()])} witnesses")
-
-        # Get authentication codes
-        codes = self.get_authentication_codes()
 
         # If signals is provided, emit the codes instead of authenticating directly
         if hasattr(self, 'signals') and self.signals:
@@ -277,3 +276,29 @@ class WitnessAuthenticationMixin:
         )
 
         # Don't call self.accept() here - wait for authentication result events
+
+
+class WitnessAuthenticationPanel(WitnessAuthenticationMixin, QWidget):
+    """Embeddable witness authentication fields for multi-step credential flows."""
+
+    def __init__(self, app, hab, witness_ids: list[str], parent=None):
+        super().__init__(parent)
+        self.app = app
+        self.hab = hab
+        self.witness_ids = witness_ids
+        self.auth_only = True
+        self.signals = None
+        self.passcode_fields = {}
+        self.witness_info = {}
+        self.batch_groups = []
+        self.individual_witnesses = []
+
+        self._load_witness_info()
+        self._organize_witnesses_by_batch()
+
+        self.setStyleSheet(f"background-color: {colors.BACKGROUND_CONTENT};")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 20, 0, 0)
+        layout.setSpacing(15)
+        self._build_witness_fields(layout)
+        layout.addStretch()

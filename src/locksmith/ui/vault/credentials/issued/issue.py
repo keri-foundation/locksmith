@@ -11,6 +11,7 @@ from keri import help
 from keri.core import coring
 
 from locksmith.core.credentialing import IssueCredentialDoer
+from locksmith.core.habbing import list_eligible_local_identifiers
 from locksmith.ui.toolkit.widgets import (
     LocksmithDialog,
     LocksmithButton,
@@ -19,7 +20,7 @@ from locksmith.ui.toolkit.widgets import (
 )
 from locksmith.ui.toolkit.widgets.buttons import LocksmithRadioButton
 from locksmith.ui.toolkit.widgets.fields import FloatingLabelComboBox, FloatingLabelLineEdit
-from locksmith.ui.vault.identifiers.authenticate import WitnessAuthenticationDialog
+from locksmith.ui.vault.shared.witness_auth_mixin import WitnessAuthenticationPanel
 
 logger = help.ogler.getLogger(__name__)
 
@@ -41,12 +42,13 @@ class IssueCredentialDialog(LocksmithDialog):
         self._dynamic_fields_start_index = None
         self._const_fields_values = {}
         self._edge_dropdowns = {}  # Store edge credential dropdowns
-        self._auth_pending = False
-        self._auth_codes_connected = False
+        self._auth_panel = None
+        self._workflow_mode = "issue"
 
         # Create content widget
         content_widget = QWidget()
         content_widget.setStyleSheet("background-color: #F8F9FF;")
+        self._issue_content_widget = content_widget
         layout = QVBoxLayout(content_widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -146,30 +148,124 @@ class IssueCredentialDialog(LocksmithDialog):
         self.recipient_type_group.addButton(self.remote_radio)
 
         # Connect signals
-        self.cancel_button.clicked.connect(self.close)
+        self.cancel_button.clicked.connect(self._on_cancel_clicked)
         self.local_radio.toggled.connect(self._on_recipient_type_changed)
         self.remote_radio.toggled.connect(self._on_recipient_type_changed)
         self.schema_dropdown.currentIndexChanged.connect(self._on_schema_changed)
-        self.issue_button.clicked.connect(self._on_issue)
+        self.issue_button.clicked.connect(self._on_primary_clicked)
 
         # Connect to vault signal bridge for doer events
         if hasattr(self.app.vault, 'signals'):
             self.app.vault.signals.doer_event.connect(self._on_doer_event)
+            self._doer_event_connected = True
             logger.info("IssueCredentialDialog: Connected to vault signal bridge")
+        else:
+            self._doer_event_connected = False
 
-    def _disconnect_auth_codes_signal(self):
-        if not self._auth_codes_connected:
+        self.finished.connect(self._on_dialog_finished)
+
+    def _disconnect_doer_event_signal(self):
+        if not getattr(self, '_doer_event_connected', False):
             return
-
         try:
-            self.app.vault.signals.auth_codes_entered.disconnect(self._on_auth_codes_entered)
+            self.app.vault.signals.doer_event.disconnect(self._on_doer_event)
         except RuntimeError:
             pass
-        self._auth_codes_connected = False
+        self._doer_event_connected = False
 
-    def closeEvent(self, event):
-        self._disconnect_auth_codes_signal()
-        super().closeEvent(event)
+    def _on_dialog_finished(self, _result):
+        self._disconnect_doer_event_signal()
+
+    def _on_primary_clicked(self):
+        if self._workflow_mode == "auth":
+            self._submit_auth_step()
+        else:
+            self._on_issue()
+
+    def _on_cancel_clicked(self):
+        if self._workflow_mode == "auth":
+            self._show_issue_step()
+        else:
+            self.close()
+
+    def _show_auth_step(self, hab):
+        self.clear_error()
+
+        if self._auth_panel is not None:
+            self._auth_panel.setParent(None)
+            self._auth_panel.deleteLater()
+
+        self._issue_content_widget.hide()
+        self._auth_panel = WitnessAuthenticationPanel(
+            app=self.app,
+            hab=hab,
+            witness_ids=list(hab.kever.wits),
+            parent=self
+        )
+        self.content_layout.addWidget(self._auth_panel)
+
+        self._workflow_mode = "auth"
+        self.cancel_button.setText("Back")
+        self.cancel_button.setEnabled(True)
+        self.issue_button.setText("Authenticate")
+        self.issue_button.setEnabled(True)
+        self.setFixedSize(700, self._auth_step_height())
+        self.center_on_parent()
+
+    def _auth_step_height(self) -> int:
+        if self._auth_panel is None:
+            return 420
+
+        base_height = 180
+        individual_height = len(self._auth_panel.individual_witnesses) * 110
+        batch_height = sum(
+            100 + len(batch_witness_ids) * 10
+            for _, batch_witness_ids in self._auth_panel.batch_groups
+        )
+
+        return min(max(base_height + individual_height + batch_height, 360), 700)
+
+    def _show_issue_step(self):
+        self.clear_error()
+
+        if self._auth_panel is not None:
+            self.content_layout.removeWidget(self._auth_panel)
+            self._auth_panel.setParent(None)
+            self._auth_panel.deleteLater()
+            self._auth_panel = None
+
+        self._issue_content_widget.show()
+        self._workflow_mode = "issue"
+        self.cancel_button.setText("Cancel")
+        self.cancel_button.setEnabled(True)
+        self.issue_button.setText("Issue Credential")
+        self.issue_button.setEnabled(True)
+        self.setFixedSize(500, 720)
+        self.center_on_parent()
+
+    def _set_primary_button_idle(self):
+        self.cancel_button.setEnabled(True)
+        self.issue_button.setEnabled(True)
+        if self._workflow_mode == "auth":
+            self.issue_button.setText("Authenticate")
+        else:
+            self.issue_button.setText("Issue Credential")
+
+    def _submit_auth_step(self):
+        if self._auth_panel is None:
+            self._show_issue_step()
+            return
+
+        self.clear_error()
+        valid, codes, error_message = self._auth_panel.validate_authentication_codes()
+        if not valid:
+            self.show_error(error_message)
+            return
+
+        self.issue_button.setEnabled(False)
+        self.issue_button.setText("Issuing...")
+        self.cancel_button.setEnabled(False)
+        self._complete_issuance(codes=codes)
 
     def _populate_schema_dropdown(self):
         """Populate the schema dropdown with loaded schemas from the vault."""
@@ -206,12 +302,9 @@ class IssueCredentialDialog(LocksmithDialog):
 
         try:
             if self.local_radio.isChecked():
-                # Populate with local identifiers
-                hby = self.app.vault.hby
-                for hab_pre, hab in hby.habs.items():
-                    # Format: "Name (prefix)"
-                    display_text = f"{hab.name} ({hab_pre})"
-                    self.recipient_dropdown.addItem(display_text, userData=hab_pre)
+                for identifier in list_eligible_local_identifiers(self.app):
+                    display_text = f"{identifier['alias']} ({identifier['prefix']})"
+                    self.recipient_dropdown.addItem(display_text, userData=identifier['prefix'])
             else:
                 # Populate with remote identifiers
                 remote_ids = self.app.vault.org.list()
@@ -922,10 +1015,6 @@ class IssueCredentialDialog(LocksmithDialog):
         if not self._validate_fields():
             return
 
-        # Disable issue button during processing
-        self.issue_button.setEnabled(False)
-        self.issue_button.setText("Issuing...")
-
         # Get selected values
         schema_index = self.schema_dropdown.currentIndex()
         schema_said = self.schema_dropdown.itemData(schema_index)
@@ -933,39 +1022,18 @@ class IssueCredentialDialog(LocksmithDialog):
         registryName = schema_said
         registry = self.app.vault.rgy.registryByName(registryName)
         if not registry:
-            self.issue_button.setEnabled(True)
-            self.issue_button.setText("Issue Credential")
             self.show_error(f"Registry not found for schema {schema_said}")
             return
 
         hab = registry.hab
         if hab.kever.wits:
-            self._auth_pending = True
-            self.app.vault.signals.auth_codes_entered.connect(self._on_auth_codes_entered)
-            self._auth_codes_connected = True
-
-            # Launch witness authentication dialog
-            auth_dialog = WitnessAuthenticationDialog(
-                app=self.app,
-                hab=hab,
-                witness_ids=hab.kever.wits,
-                auth_only=True,
-                signals=self.app.vault.signals,
-                parent=self
-            )
-            auth_dialog.finished.connect(self._on_auth_dialog_finished)
-            auth_dialog.open()
-        else:
-            self._complete_issuance(codes=None)
-
-    def _on_auth_dialog_finished(self, _result):
-        if not self._auth_pending:
+            self._show_auth_step(hab)
             return
 
-        self._auth_pending = False
-        self._disconnect_auth_codes_signal()
-        self.issue_button.setEnabled(True)
-        self.issue_button.setText("Issue Credential")
+        self.issue_button.setEnabled(False)
+        self.issue_button.setText("Issuing...")
+        self.cancel_button.setEnabled(False)
+        self._complete_issuance(codes=None)
 
     def _validate_fields(self):
         """
@@ -1064,46 +1132,15 @@ class IssueCredentialDialog(LocksmithDialog):
         # Handle credential issuance success
         if doer_name == "IssueCredentialDoer" and event_type == "credential_issued":
             logger.info(f"Credential issued successfully: {data.get('credential_said')}")
-
-            # Re-enable issue button
-            self.issue_button.setEnabled(True)
-            self.issue_button.setText("Issue Credential")
-
-            # Show success message
-            schema_title = data.get('schema_title', 'Credential')
-            self.show_success(f"{schema_title} issued successfully!")
-
-            # Close the dialog after a short delay
-            # (Let user see the success message)
+            self.close()
 
         # Handle credential issuance failure
         elif doer_name == "IssueCredentialDoer" and event_type == "credential_issuance_failed":
             error_msg = data.get('error', 'Unknown error')
             logger.error(f"Credential issuance failed: {error_msg}")
 
-            # Re-enable issue button
-            self.issue_button.setEnabled(True)
-            self.issue_button.setText("Issue Credential")
-
-            # Show error message
+            self._set_primary_button_idle()
             self.show_error(f"Failed to issue credential: {error_msg}")
-
-    def _on_auth_codes_entered(self, data: dict):
-        """
-        Handle auth codes entered from WitnessAuthenticationDialog.
-
-        Args:
-            data: Dictionary containing 'codes' key with list of "witness_id:passcode" strings
-        """
-        if not self._auth_pending:
-            return
-
-        self._auth_pending = False
-        self._disconnect_auth_codes_signal()
-        codes = data.get('codes', [])
-        logger.info(f"Received {len(codes)} auth codes from WitnessAuthenticationDialog")
-
-        self._complete_issuance(codes=codes)
 
     def _complete_issuance(self, codes=None):
         # Get selected values
@@ -1145,6 +1182,5 @@ class IssueCredentialDialog(LocksmithDialog):
 
         except Exception as e:
             logger.exception(f"Error creating IssueCredentialDoer: {e}")
-            self.issue_button.setEnabled(True)
-            self.issue_button.setText("Issue Credential")
+            self._set_primary_button_idle()
             self.show_error(f"Failed to start credential issuance: {str(e)}")
