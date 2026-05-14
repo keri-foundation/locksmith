@@ -11,6 +11,7 @@ from keri import help
 from keri.core import coring
 
 from locksmith.core.credentialing import IssueCredentialDoer
+from locksmith.core.habbing import list_eligible_local_identifiers
 from locksmith.ui.toolkit.widgets import (
     LocksmithDialog,
     LocksmithButton,
@@ -208,8 +209,21 @@ class IssueCredentialDialog(LocksmithDialog):
         self.cancel_button.setEnabled(True)
         self.issue_button.setText("Authenticate")
         self.issue_button.setEnabled(True)
-        self.setFixedSize(700, 720)
+        self.setFixedSize(700, self._auth_step_height())
         self.center_on_parent()
+
+    def _auth_step_height(self) -> int:
+        if self._auth_panel is None:
+            return 420
+
+        base_height = 180
+        individual_height = len(self._auth_panel.individual_witnesses) * 110
+        batch_height = sum(
+            100 + len(batch_witness_ids) * 10
+            for _, batch_witness_ids in self._auth_panel.batch_groups
+        )
+
+        return min(max(base_height + individual_height + batch_height, 360), 700)
 
     def _show_issue_step(self):
         self.clear_error()
@@ -288,12 +302,9 @@ class IssueCredentialDialog(LocksmithDialog):
 
         try:
             if self.local_radio.isChecked():
-                # Populate with local identifiers
-                hby = self.app.vault.hby
-                for hab_pre, hab in hby.habs.items():
-                    # Format: "Name (prefix)"
-                    display_text = f"{hab.name} ({hab_pre})"
-                    self.recipient_dropdown.addItem(display_text, userData=hab_pre)
+                for identifier in list_eligible_local_identifiers(self.app):
+                    display_text = f"{identifier['alias']} ({identifier['prefix']})"
+                    self.recipient_dropdown.addItem(display_text, userData=identifier['prefix'])
             else:
                 # Populate with remote identifiers
                 remote_ids = self.app.vault.org.list()
