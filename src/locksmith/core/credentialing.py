@@ -264,8 +264,6 @@ class IssueCredentialDoer(doing.DoDoer):
         self.recipient_pre = recipient_pre
         self.attributes = attributes
         self.edges = edges or {}
-        # Empty rules must stay None: keripy credential() only omits "r" when rules is None;
-        # passing {} still sets r={} and fails schema oneOf (e.g. string SAID vs object).
         self.rules = rules if rules else None
         self.codes = codes or []
         self.signal_bridge = signal_bridge
