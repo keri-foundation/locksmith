@@ -6,6 +6,7 @@ Functions and services for resolving OOBIs and managing remote identifiers
 """
 import asyncio
 import datetime
+import time
 from typing import TYPE_CHECKING
 
 from keri.app.forwarding import StreamPoster
@@ -14,8 +15,8 @@ if TYPE_CHECKING:
     pass
 
 from hio.base import doing
-from keri import help
-from keri.app import connecting, forwarding
+from keri import help, kering
+from keri.app import organizing, forwarding
 from keri.app.habbing import GroupHab
 from keri.core import parsing, serdering
 from keri.core.serdering import SerderKERI
@@ -25,6 +26,35 @@ from keri.peer import exchanging
 from mnemonic import Mnemonic
 
 logger = help.ogler.getLogger(__name__)
+
+
+def message_version(ims: bytes | bytearray) -> kering.Versionage:
+    """Return the KERI wire version for a complete raw message."""
+    if kering.sniff(ims) == kering.Colds.msg:
+        return kering.smell(ims).pvrsn
+
+    return kering.Vrsn_2_0
+
+
+def upsert_remote_id_metadata(app, pre: str, *, alias=None, cid=None, tag=None, oobi=None):
+    """Create or update Organizer metadata for a resolved remote identifier."""
+    if not pre:
+        return None
+
+    data = {
+        'last-refresh': helping.nowIso8601(),
+    }
+    if alias:
+        data['alias'] = alias
+    if cid:
+        data['cid'] = cid
+    if tag:
+        data['tag'] = tag
+    if oobi:
+        data['oobi'] = oobi
+
+    app.vault.org.update(pre, data)
+    return app.vault.org.get(pre)
 
 
 def get_remote_id_details(app, remote_id_pre: str) -> dict:
@@ -44,7 +74,7 @@ def get_remote_id_details(app, remote_id_pre: str) -> dict:
     kever = hby.kevers.get(remote_id_pre)
 
     # Get organizer data for alias and metadata
-    org = connecting.Organizer(hby=hby)
+    org = organizing.Organizer(hby=hby)
     remote_data = org.get(remote_id_pre) or {}
 
     # Extract alias
@@ -71,7 +101,7 @@ def get_remote_id_details(app, remote_id_pre: str) -> dict:
     # Extract existing role assignments from ends database
     existing_roles = []
     mailboxes = []
-    for (cid, role, eid), end in hby.db.ends.getItemIter():
+    for (cid, role, eid), end in hby.db.ends.getTopItemIter():
         if eid == remote_id_pre and end.allowed:
             existing_roles.append((cid, role, eid))
         if cid == remote_id_pre and role == 'mailbox':
@@ -103,6 +133,115 @@ def get_remote_id_details(app, remote_id_pre: str) -> dict:
         'existing_roles': existing_roles,
         'mailboxes': mailboxes,
     }
+
+
+def describe_oobi_resolution_state(app, *, pre: str | None = None, oobi: str | None = None) -> str:
+    """Summarize the local resolver state for an OOBI for diagnostics."""
+
+    vault = getattr(app, "vault", None)
+    hby = getattr(vault, "hby", None)
+    db = getattr(hby, "db", None)
+
+    if db is None:
+        return "resolver_state=unknown(no_hby_db)"
+
+    roobi = db.roobi.get(keys=(oobi,)) if oobi else None
+    queued = bool(db.oobis.get(keys=(oobi,))) if oobi else False
+    pending_client = bool(db.coobi.get(keys=(oobi,))) if oobi else False
+    retry_escrow = bool(db.eoobi.get(keys=(oobi,))) if oobi else False
+
+    kevers = getattr(hby, "kevers", {})
+    pre_known = bool(pre and pre in kevers)
+
+    parts = [
+        f"roobi_state={getattr(roobi, 'state', '-')}",
+        f"queued={queued}",
+        f"pending_client={pending_client}",
+        f"retry_escrow={retry_escrow}",
+        f"pre_known={pre_known}",
+    ]
+    return "resolver_state(" + ", ".join(parts) + ")"
+
+
+def purge_oobi_resolution_state(app, *, oobi: str | None) -> None:
+    """Remove local resolver state for an OOBI that should no longer be retried."""
+
+    if not oobi:
+        return
+
+    vault = getattr(app, "vault", None)
+    hby = getattr(vault, "hby", None)
+    db = getattr(hby, "db", None)
+    if db is None:
+        return
+
+    for store_name in ("oobis", "coobi", "eoobi", "roobi", "moobi"):
+        store = getattr(db, store_name, None)
+        if store is None:
+            continue
+        try:
+            store.rem(keys=(oobi,))
+        except Exception:
+            logger.warning("Failed purging %s OOBI state for %s", store_name, oobi, exc_info=True)
+
+
+def introduce_watcher_observed_aid(
+    app,
+    *,
+    hab,
+    watcher_eid: str,
+    observed_aid: str,
+    observed_oobis: list[str],
+    timeout_seconds: float = 10.0,
+) -> None:
+    """Send the local controller KEL and watcher-add reply to a hosted watcher."""
+
+    if not watcher_eid:
+        raise ValueError("watcher_eid is required")
+    if not observed_aid:
+        raise ValueError("observed_aid is required")
+    observed_oobis = [oobi for oobi in dict.fromkeys(observed_oobis or []) if oobi]
+    if not observed_oobis:
+        raise ValueError("observed_oobis is required")
+
+    ender = hab.db.ends.get(keys=(hab.pre, "watcher", watcher_eid))
+    if not ender or not ender.allowed:
+        msg = hab.reply(
+            route="/end/role/add",
+            data=dict(cid=hab.pre, role="watcher", eid=watcher_eid),
+        )
+        hab.psr.parseOne(ims=bytes(msg))
+
+    postman = forwarding.StreamPoster(
+        hby=app.vault.hby,
+        hab=hab,
+        recp=watcher_eid,
+        topic="reply",
+    )
+
+    for msg in hab.db.cloneDelegation(hab.kever):
+        serder = serdering.SerderKERI(raw=msg)
+        postman.send(serder=serder, attachment=msg[serder.size:])
+
+    for msg in hab.db.clonePreIter(pre=hab.pre):
+        serder = serdering.SerderKERI(raw=msg)
+        postman.send(serder=serder, attachment=msg[serder.size:])
+
+    for observed_oobi in observed_oobis:
+        msg = hab.reply(
+            route=f"/watcher/{watcher_eid}/add",
+            data=dict(cid=hab.pre, oid=observed_aid, oobi=observed_oobi),
+        )
+        raw = bytes(msg)
+        hab.psr.parseOne(ims=raw)
+        serder = SerderKERI(raw=raw)
+        postman.send(serder=serder, attachment=raw[serder.size:])
+
+    doer = doing.DoDoer(doers=postman.deliver())
+    try:
+        doing.Doist(tock=0.03125, real=True).do(doers=[doer], limit=timeout_seconds)
+    except Exception as exc:
+        raise ValueError(f"Failed introducing observed AID {observed_aid} to watcher {watcher_eid}: {exc}") from exc
 
 
 async def resolve_oobi(app, pre: str, oobi: str | None = None, force=False, alias=None, cid=None, tag=None):
@@ -143,15 +282,14 @@ async def resolve_oobi(app, pre: str, oobi: str | None = None, force=False, alia
         logger.error(f'OOBI Resolution failed for alias {alias} and OOBI {oobi}, {pre} not found in KERI DB.')
         return False
 
-    remote_id = app.vault.org.get(pre)
-
-    if remote_id:
-        remote_id['last-refresh'] = helping.nowIso8601()
-        if cid:
-            remote_id['cid'] = cid
-        if tag:
-            remote_id['tag'] = tag
-        app.vault.org.update(pre, remote_id)
+    upsert_remote_id_metadata(
+        app,
+        pre,
+        alias=alias,
+        cid=cid,
+        tag=tag,
+        oobi=oobi,
+    )
 
     logger.info(f'OOBI resolved: {alias} {oobi}')
     return True
@@ -216,6 +354,75 @@ def resolve_oobi_sync(app, pre: str | None, oobi: str | None = None, force=False
     return doer
 
 
+def resolve_oobi_blocking(
+        app,
+        pre: str,
+        oobi: str | None = None,
+        force=False,
+        alias=None,
+        cid=None,
+        tag=None,
+        timeout_seconds: float = 15.0,
+        tock: float = 0.125,
+):
+    """Resolve an OOBI synchronously without blocking the UI event loop."""
+
+    qtask = getattr(app, "qtask", None)
+    if qtask is None:
+        doer = ResolveOobiDoer(
+            app=app,
+            pre=pre,
+            oobi=oobi,
+            force=force,
+            alias=alias,
+            cid=cid,
+            tag=tag,
+            timeout_seconds=timeout_seconds,
+        )
+        doing.Doist(tock=tock, real=True).do(doers=[doer], limit=timeout_seconds + tock)
+        return doer.resolved
+
+    obr = basing.OobiRecord(date=helping.nowIso8601())
+    obr.oobialias = alias
+
+    if force:
+        app.vault.hby.db.roobi.rem(keys=(oobi,))
+        logger.info(f"Forcing re-resolution of OOBI: {oobi}")
+
+    app.vault.hby.db.oobis.put(keys=(oobi,), val=obr)
+    logger.info(f"OOBI written to database: {alias} ({oobi})")
+
+    start_time = helping.nowUTC()
+    timeout_delta = datetime.timedelta(seconds=timeout_seconds)
+    sleep_interval = max(tock, 0.05)
+
+    while not app.vault.hby.db.roobi.get(keys=(oobi,)) and pre not in app.vault.hby.kevers:
+        if helping.nowUTC() > start_time + timeout_delta:
+            logger.warning("OOBI resolve timeout for %s (%s)", alias, oobi)
+            return False
+        time.sleep(sleep_interval)
+
+    if pre not in app.vault.hby.kevers:
+        logger.error(
+            "OOBI resolution failed for alias %s and OOBI %s, %s not found in KERI DB.",
+            alias,
+            oobi,
+            pre,
+        )
+        return False
+
+    upsert_remote_id_metadata(
+        app,
+        pre,
+        alias=alias,
+        cid=cid,
+        tag=tag,
+        oobi=oobi,
+    )
+    logger.info(f"OOBI resolved: {alias} {oobi}")
+    return True
+
+
 class ResolveOobiDoer(doing.DoDoer):
     """
     Doer for asynchronous OOBI resolution.
@@ -228,8 +435,18 @@ class ResolveOobiDoer(doing.DoDoer):
     - Signaling completion to UI
     """
 
-    def __init__(self, app, pre: str, oobi: str | None = None, force=False, alias=None,
-                 cid=None, tag=None, signal_bridge=None):
+    def __init__(
+            self,
+            app,
+            pre: str,
+            oobi: str | None = None,
+            force=False,
+            alias=None,
+            cid=None,
+            tag=None,
+            signal_bridge=None,
+            timeout_seconds: float = 15.0,
+    ):
         """
         Initialize the ResolveOobiDoer.
 
@@ -251,6 +468,9 @@ class ResolveOobiDoer(doing.DoDoer):
         self.cid = cid
         self.tag = tag
         self.signal_bridge = signal_bridge
+        self.timeout_seconds = timeout_seconds
+        self.resolved = False
+        self.completed = False
 
         doers = [doing.doify(self.resolve_do)]
 
@@ -287,7 +507,7 @@ class ResolveOobiDoer(doing.DoDoer):
 
             # Wait for OOBI resolution with timeout
             start_time = helping.nowUTC()
-            timeout_delta = datetime.timedelta(seconds=15)
+            timeout_delta = datetime.timedelta(seconds=self.timeout_seconds)
 
             while not self.app.vault.hby.db.roobi.get(keys=(self.oobi,)) and self.pre not in self.app.vault.hby.kevers:
                 if helping.nowUTC() > start_time + timeout_delta:
@@ -305,6 +525,7 @@ class ResolveOobiDoer(doing.DoDoer):
                                 'success': False
                             }
                         )
+                    self.completed = True
                     return
 
                 yield self.tock
@@ -329,35 +550,18 @@ class ResolveOobiDoer(doing.DoDoer):
                             'success': False
                         }
                     )
+                self.completed = True
                 return
 
-            # Update or create remote ID record in Organizer
-            remote_id = self.app.vault.org.get(self.pre)
-
-            if remote_id:
-                # Update existing remote ID
-                remote_id['last-refresh'] = helping.nowIso8601()
-                if self.cid:
-                    remote_id['cid'] = self.cid
-                if self.tag:
-                    remote_id['tag'] = self.tag
-                if self.alias:
-                    remote_id['alias'] = self.alias
-
-                self.app.vault.org.update(self.pre, remote_id)
-                logger.info(f'Updated remote ID in Organizer: {self.alias} ({self.pre})')
-            else:
-                logger.info(f'Remote ID not found in Organizer, will be created by system: {self.pre}')
-
-            # Wait for Organizer record to exist (with timeout)
-            org_timeout = datetime.timedelta(seconds=5)
-            org_start = helping.nowUTC()
-
-            while not self.app.vault.org.get(self.pre):
-                if helping.nowUTC() > org_start + org_timeout:
-                    logger.warning(f'Timeout waiting for Organizer record: {self.pre}')
-                    break
-                yield self.tock
+            upsert_remote_id_metadata(
+                self.app,
+                self.pre,
+                alias=self.alias,
+                cid=self.cid,
+                tag=self.tag,
+                oobi=self.oobi,
+            )
+            logger.info(f'Updated remote ID in Organizer: {self.alias} ({self.pre})')
 
             # Now signal success
             if self.signal_bridge:
@@ -376,6 +580,8 @@ class ResolveOobiDoer(doing.DoDoer):
                 logger.info("OOBI resolution signaled")
 
             logger.info(f'OOBI resolved successfully: {self.alias} ({self.oobi})')
+            self.resolved = True
+            self.completed = True
             return
 
         except Exception as e:
@@ -392,8 +598,9 @@ class ResolveOobiDoer(doing.DoDoer):
                         'oobi': self.oobi if self.oobi else None,
                         'error': str(e),
                         'success': False
-                    }
-                )
+                        }
+                    )
+            self.completed = True
             return
 
 
@@ -515,7 +722,12 @@ class ImportDoer(doing.DoDoer):
             with open(self.file, 'rb') as f:
                 ims = f.read()
 
-                parsing.Parser(kvy=self.hby.kvy, rvy=self.hby.rvy, local=False).parse(ims)
+                parsing.Parser(
+                    kvy=self.hby.kvy,
+                    rvy=self.hby.rvy,
+                    local=False,
+                    version=message_version(ims),
+                ).parse(ims)
                 self.hby.kvy.processEscrows()
 
                 serder = SerderKERI(raw=ims)
@@ -592,7 +804,7 @@ def refresh_keystate(app, remote_id_pre: str, oobi: str = None):
     """
     # Get current remote ID data to extract OOBI if not provided
     if not oobi:
-        org = connecting.Organizer(hby=app.vault.hby)
+        org = organizing.Organizer(hby=app.vault.hby)
         remote_data = org.get(remote_id_pre) or {}
         oobi = remote_data.get('oobi')
 
@@ -601,7 +813,7 @@ def refresh_keystate(app, remote_id_pre: str, oobi: str = None):
         return None
 
     # Get alias for logging
-    org = connecting.Organizer(hby=app.vault.hby)
+    org = organizing.Organizer(hby=app.vault.hby)
     remote_data = org.get(remote_id_pre) or {}
     alias = remote_data.get('alias', remote_id_pre)
 
@@ -941,4 +1153,3 @@ class SetRoleDoer(doing.DoDoer):
                     }
                 )
             return
-

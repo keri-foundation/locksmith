@@ -10,7 +10,7 @@ from hio.help import decking
 from keri import help
 from keri.app import (
     agenting,
-    connecting,
+    organizing,
     delegating,
     forwarding,
     grouping,
@@ -29,6 +29,7 @@ from locksmith.core import indirecting, challenging
 from locksmith.core.adjudication import Watchmen, KeyStateVarianceAuthority
 from locksmith.core.credentialing import Registrar
 from locksmith.core.grouping import CounselingCompletionDoer
+from locksmith.core.receipting import LocksmithReceiptor
 from locksmith.core.signals import DoerSignalBridge
 from locksmith.core.tasking import QtTask
 from locksmith.core.turretting import TurretDoer
@@ -79,7 +80,7 @@ class Vault(doing.DoDoer):
         # Core components
         self.swain = delegating.Anchorer(hby=hby)
         self.counselor = grouping.Counselor(hby=hby, swain=self.swain)
-        self.org = connecting.Organizer(hby=hby)
+        self.org = organizing.Organizer(hby=hby)
 
         # Message queues for inter-component communication
         self.cues = decking.Deck()
@@ -93,7 +94,7 @@ class Vault(doing.DoDoer):
         oobiery = oobiing.Oobiery(hby=hby)
 
         # Core KERI doers
-        self.receiptor = agenting.Receiptor(hby=hby)
+        self.receiptor = LocksmithReceiptor(hby=hby)
         self.postman = forwarding.Poster(hby=hby)
         self.witPub = agenting.WitnessPublisher(hby=self.hby)
         self.witDoer = agenting.WitnessReceiptor(hby=self.hby)
@@ -179,7 +180,7 @@ class Vault(doing.DoDoer):
 
         # Add counseling doers for group identifiers awaiting participant signatures
         self.counseling_completion_doers = {}
-        for (pre,), (seqner, saider) in self.hby.db.gpse.getItemIter():
+        for (pre,), (seqner, saider) in self.hby.db.gpse.getTopItemIter(keys=()):
             prefixer = coring.Prefixer(qb64=pre)
             hab = self.hby.habByPre(pre)
 
@@ -195,7 +196,7 @@ class Vault(doing.DoDoer):
 
     def load_active_mailboxes(self):
         """Load active mailbox listeners from db."""
-        for (eid,), mbl in self.db.mbx.getItemIter():
+        for (eid,), mbl in self.db.mbx.getTopItemIter():
             hab = self.hby.habByPre(mbl.cid)
             if hab is not None:
                 self.activate_mailbox(hab, mbl.name, eid)
@@ -307,7 +308,7 @@ class NotificationToastDoer(doing.Doer):
         most_recent = None
         most_recent_dt = None
 
-        for (dt, rid), note in self.vault.notifier.noter.notes.getItemIter():
+        for (dt, rid), note in self.vault.notifier.noter.notes.getTopItemIter():
             if not note.read:
                 if most_recent_dt is None or dt > most_recent_dt:
                     most_recent_dt = dt
@@ -318,7 +319,7 @@ class NotificationToastDoer(doing.Doer):
     def _count_unread(self):
         """Count total unread notifications."""
         count = 0
-        for _, note in self.vault.notifier.noter.notes.getItemIter():
+        for _, note in self.vault.notifier.noter.notes.getTopItemIter():
             if not note.read:
                 count += 1
         return count
@@ -349,7 +350,7 @@ class NotificationToastDoer(doing.Doer):
 
         if "/challenge/response" in route:
             signer = note.pad.get('a', {}).get('signer', '')
-            org = connecting.Organizer(hby=self.vault.hby)
+            org = organizing.Organizer(hby=self.vault.hby)
             signer_contact = org.get(signer)
             if signer_contact is None:
                 signer_name = "Unknown"
@@ -361,7 +362,7 @@ class NotificationToastDoer(doing.Doer):
             pre = note.pad.get('a', {}).get('pre', '')
             sn = note.pad.get('a', {}).get('sn', '')
             dig = note.pad.get('a', {}).get('dig', '')
-            org = connecting.Organizer(hby=self.vault.hby)
+            org = organizing.Organizer(hby=self.vault.hby)
             signer_contact = org.get(pre)
             if signer_contact is None:
                 signer_name = "Unknown"

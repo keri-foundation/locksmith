@@ -415,7 +415,7 @@ class LocksmithDialog(QDialog):
         if LocksmithDialog._current_dialog is not None and LocksmithDialog._current_dialog != self:
             LocksmithDialog._current_dialog.close()
 
-        # Set this as the current dialog
+        # Track this as the current dialog
         LocksmithDialog._current_dialog = self
 
         super().showEvent(event)

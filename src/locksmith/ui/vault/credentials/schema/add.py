@@ -12,6 +12,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QButtonGroup, QFileDialog, QCheckBox
 
 from locksmith.core.credentialing import LoadSchemaDoer
+from locksmith.core.habbing import list_eligible_local_identifiers
 from locksmith.ui.toolkit.widgets import (
     LocksmithDialog,
     FloatingLabelLineEdit,
@@ -20,7 +21,7 @@ from locksmith.ui.toolkit.widgets import (
     LocksmithInvertedButton
 )
 from locksmith.ui.toolkit.widgets.buttons import LocksmithRadioButton, LocksmithIconButton
-from locksmith.ui.vault.identifiers.authenticate import WitnessAuthenticationDialog
+from locksmith.ui.vault.shared.witness_auth_mixin import WitnessAuthenticationPanel
 
 logger = help.ogler.getLogger(__name__)
 
@@ -38,10 +39,14 @@ class AddSchemaDialog(LocksmithDialog):
             parent: Parent widget
         """
         self.app = app
+        self._auth_panel = None
+        self._workflow_mode = "schema"
+        self.pending_load_params = None
 
         # Create content widget
         content_widget = QWidget()
         content_widget.setStyleSheet("background-color: #F8F9FF;")
+        self._schema_content_widget = content_widget
         layout = QVBoxLayout(content_widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -172,11 +177,11 @@ class AddSchemaDialog(LocksmithDialog):
         self.connection_type_group.addButton(self.file_radio)
 
         # Connect signals
-        self.cancel_button.clicked.connect(self.close)
+        self.cancel_button.clicked.connect(self._on_cancel_clicked)
         self.oobi_radio.toggled.connect(self._on_connection_type_changed)
         self.file_radio.toggled.connect(self._on_connection_type_changed)
         self.browse_button.clicked.connect(self._browse_file)
-        self.load_button.clicked.connect(self._on_load)
+        self.load_button.clicked.connect(self._on_primary_clicked)
         self.oobi_field.line_edit.textChanged.connect(self._on_oobi_changed)
         self.create_registry_checkbox.toggled.connect(self._on_registry_checkbox_toggled)
 
@@ -186,12 +191,130 @@ class AddSchemaDialog(LocksmithDialog):
         # Connect to vault signal bridge for doer events
         if self.app and hasattr(self.app, 'vault') and self.app.vault and hasattr(self.app.vault, 'signals'):
             self.app.vault.signals.doer_event.connect(self._on_doer_event)
-            self.app.vault.signals.auth_codes_entered.connect(self._on_auth_codes_entered)
+            self._doer_event_connected = True
             logger.info("AddSchemaDialog: Connected to vault signal bridge")
+        else:
+            self._doer_event_connected = False
 
-        # State for workflow with authentication
-        self.pending_load_params = None  # Stores params while waiting for auth codes
+        self.finished.connect(self._on_dialog_finished)
 
+    def _disconnect_doer_event_signal(self):
+        if not self._doer_event_connected:
+            return
+        try:
+            self.app.vault.signals.doer_event.disconnect(self._on_doer_event)
+        except RuntimeError:
+            pass
+        self._doer_event_connected = False
+
+    def _on_dialog_finished(self, _result):
+        self.pending_load_params = None
+        self._disconnect_doer_event_signal()
+
+    def _on_primary_clicked(self):
+        if self._workflow_mode == "auth":
+            self._submit_auth_step()
+        else:
+            self._on_load()
+
+    def _on_cancel_clicked(self):
+        if self._workflow_mode == "auth":
+            self._show_schema_step(clear_pending=True)
+        else:
+            self.close()
+
+    def _show_auth_step(self, hab):
+        self.clear_error()
+
+        if self._auth_panel is not None:
+            self._auth_panel.setParent(None)
+            self._auth_panel.deleteLater()
+
+        self._schema_content_widget.hide()
+        self._auth_panel = WitnessAuthenticationPanel(
+            app=self.app,
+            hab=hab,
+            witness_ids=list(hab.kever.wits),
+            parent=self
+        )
+        self.content_layout.addWidget(self._auth_panel)
+
+        self._workflow_mode = "auth"
+        self.cancel_button.setText("Back")
+        self.cancel_button.setEnabled(True)
+        self.load_button.setText("Authenticate")
+        self.load_button.setEnabled(True)
+        self.setFixedSize(700, 540)
+        self.center_on_parent()
+
+    def _show_schema_step(self, clear_pending: bool = False):
+        self.clear_error()
+
+        if clear_pending:
+            self.pending_load_params = None
+
+        if self._auth_panel is not None:
+            self.content_layout.removeWidget(self._auth_panel)
+            self._auth_panel.setParent(None)
+            self._auth_panel.deleteLater()
+            self._auth_panel = None
+
+        self._schema_content_widget.show()
+        self._workflow_mode = "schema"
+        self.cancel_button.setText("Cancel")
+        self.cancel_button.setEnabled(True)
+        self.load_button.setText("Load Schema")
+        self.load_button.setEnabled(True)
+        self.setFixedSize(420, 540)
+        self.center_on_parent()
+
+    def _set_primary_button_idle(self):
+        self.cancel_button.setEnabled(True)
+        self.load_button.setEnabled(True)
+        if self._workflow_mode == "auth":
+            self.load_button.setText("Authenticate")
+        else:
+            self.load_button.setText("Load Schema")
+
+    def _submit_auth_step(self):
+        if self._auth_panel is None:
+            self._show_schema_step(clear_pending=True)
+            return
+
+        self.clear_error()
+        valid, codes, error_message = self._auth_panel.validate_authentication_codes()
+        if not valid:
+            self.show_error(error_message)
+            return
+
+        self.load_button.setEnabled(False)
+        self.load_button.setText("Loading...")
+        self.cancel_button.setEnabled(False)
+        self._launch_pending_load(codes)
+
+    def _launch_pending_load(self, codes: list[str]):
+        if not self.pending_load_params:
+            self._show_schema_step(clear_pending=True)
+            self.show_error("No pending schema load operation")
+            return
+
+        params = self.pending_load_params
+
+        if params['workflow'] == 'oobi':
+            self._create_load_schema_doer(
+                oobi=params['oobi'],
+                create_registry=params['create_registry'],
+                issuer_aid=params['issuer_aid'],
+                auth_codes=codes
+            )
+        elif params['workflow'] == 'file':
+            self._create_load_schema_doer(
+                file_path=params['file_path'],
+                file_content=params['file_content'],
+                create_registry=params['create_registry'],
+                issuer_aid=params['issuer_aid'],
+                auth_codes=codes
+            )
 
     def _on_connection_type_changed(self):
         """Handle connection type radio button selection changes."""
@@ -224,14 +347,14 @@ class AddSchemaDialog(LocksmithDialog):
         self.issuer_dropdown.addItem("Select an issuer...")
 
         try:
-            # Get all local identifiers from the vault
-            hby = self.app.vault.hby
-            for hab_pre, hab in hby.habs.items():
+            for identifier in list_eligible_local_identifiers(self.app):
+                hab_pre = identifier["prefix"]
+                hab = self.app.vault.hby.habs[hab_pre]
                 # Format: "Name (prefix)"
                 display_text = f"{hab.name} ({hab_pre[:15]}...)"
                 self.issuer_dropdown.addItem(display_text, userData=hab_pre)
 
-            logger.debug(f"Populated issuer dropdown with {len(hby.habs)} identifiers")
+            logger.debug(f"Populated issuer dropdown with {self.issuer_dropdown.count() - 1} identifiers")
         except Exception as e:
             logger.exception(f"Error loading local identifiers: {e}")
             self.show_error(f"Failed to load issuers: {str(e)}")
@@ -401,26 +524,14 @@ class AddSchemaDialog(LocksmithDialog):
             if issuer_aid and create_registry:
                 hab = self.app.vault.hby.habs.get(issuer_aid)
                 if hab and hab.kever.wits:
-                    logger.info(f"Issuer {issuer_aid} has {len(hab.kever.wits)} witnesses, launching auth dialog")
-
-                    # Store params for later use after auth
+                    logger.info(f"Issuer {issuer_aid} has {len(hab.kever.wits)} witnesses, awaiting authentication")
                     self.pending_load_params = {
                         'workflow': 'oobi',
                         'oobi': oobi,
                         'create_registry': create_registry,
                         'issuer_aid': issuer_aid
                     }
-
-                    # Launch witness authentication dialog
-                    auth_dialog = WitnessAuthenticationDialog(
-                        app=self.app,
-                        hab=hab,
-                        witness_ids=hab.kever.wits,
-                        auth_only=True,
-                        signals=self.app.vault.signals,
-                        parent=self
-                    )
-                    auth_dialog.open()
+                    self._show_auth_step(hab)
                     return
 
             # No witnesses or no registry creation - proceed directly
@@ -432,8 +543,7 @@ class AddSchemaDialog(LocksmithDialog):
 
         except Exception as e:
             logger.error(f"Failed to create LoadSchemaDoer: {e}")
-            self.load_button.setEnabled(True)
-            self.load_button.setText("Load Schema")
+            self._set_primary_button_idle()
             self.show_error(f"Failed to initiate schema loading: {str(e)}")
 
     def _load_file(self):
@@ -461,9 +571,7 @@ class AddSchemaDialog(LocksmithDialog):
             if issuer_aid and create_registry:
                 hab = self.app.vault.hby.habs.get(issuer_aid)
                 if hab and hab.kever.wits:
-                    logger.info(f"Issuer {issuer_aid} has {len(hab.kever.wits)} witnesses, launching auth dialog")
-
-                    # Store params for later use after auth
+                    logger.info(f"Issuer {issuer_aid} has {len(hab.kever.wits)} witnesses, awaiting authentication")
                     self.pending_load_params = {
                         'workflow': 'file',
                         'file_path': file_path,
@@ -471,17 +579,7 @@ class AddSchemaDialog(LocksmithDialog):
                         'create_registry': create_registry,
                         'issuer_aid': issuer_aid
                     }
-
-                    # Launch witness authentication dialog
-                    auth_dialog = WitnessAuthenticationDialog(
-                        app=self.app,
-                        hab=hab,
-                        witness_ids=hab.kever.wits,
-                        auth_only=True,
-                        signals=self.app.vault.signals,
-                        parent=self
-                    )
-                    auth_dialog.open()
+                    self._show_auth_step(hab)
                     return
 
             # No witnesses or no registry creation - proceed directly
@@ -494,8 +592,7 @@ class AddSchemaDialog(LocksmithDialog):
 
         except Exception as e:
             logger.error(f"Failed to create LoadSchemaDoer: {e}")
-            self.load_button.setEnabled(True)
-            self.load_button.setText("Load Schema")
+            self._set_primary_button_idle()
             self.show_error(f"Failed to initiate schema loading: {str(e)}")
 
     def _create_load_schema_doer(self, oobi=None, file_path=None, file_content=None,
@@ -533,43 +630,8 @@ class AddSchemaDialog(LocksmithDialog):
 
         except Exception as e:
             logger.error(f"Failed to create LoadSchemaDoer: {e}")
-            self.load_button.setEnabled(True)
-            self.load_button.setText("Load Schema")
+            self._set_primary_button_idle()
             self.show_error(f"Failed to initiate schema loading: {str(e)}")
-
-    def _on_auth_codes_entered(self, data: dict):
-        """
-        Handle auth codes entered from WitnessAuthenticationDialog.
-
-        Args:
-            data: Dictionary containing 'codes' key with list of "witness_id:passcode" strings
-        """
-        codes = data.get('codes', [])
-        logger.info(f"Received {len(codes)} auth codes from WitnessAuthenticationDialog")
-
-        if not self.pending_load_params:
-            logger.warning("Received auth codes but no pending load operation")
-            return
-
-        params = self.pending_load_params
-        self.pending_load_params = None  # Clear pending state
-
-        # Launch LoadSchemaDoer with auth codes
-        if params['workflow'] == 'oobi':
-            self._create_load_schema_doer(
-                oobi=params['oobi'],
-                create_registry=params['create_registry'],
-                issuer_aid=params['issuer_aid'],
-                auth_codes=codes
-            )
-        elif params['workflow'] == 'file':
-            self._create_load_schema_doer(
-                file_path=params['file_path'],
-                file_content=params['file_content'],
-                create_registry=params['create_registry'],
-                issuer_aid=params['issuer_aid'],
-                auth_codes=codes
-            )
 
     def _on_doer_event(self, doer_name: str, event_type: str, data: dict):
         """
@@ -607,11 +669,7 @@ class AddSchemaDialog(LocksmithDialog):
         if registry_name:
             logger.info(f"Created credential registry: {registry_name}")
 
-        # Reset button state
-        self.load_button.setEnabled(True)
-        self.load_button.setText("Load Schema")
-
-        # Close dialog
+        self._show_schema_step(clear_pending=True)
         self.close()
 
     def _on_failure(self, error_msg):
@@ -623,9 +681,5 @@ class AddSchemaDialog(LocksmithDialog):
         """
         logger.error(f"Failed to load schema: {error_msg}")
 
-        # Reset button state
-        self.load_button.setEnabled(True)
-        self.load_button.setText("Load Schema")
-
-        # Show error
+        self._set_primary_button_idle()
         self.show_error(error_msg)

@@ -192,7 +192,7 @@ def load_potential_delegators(app, delegation_type='local'):
     Returns:
         list: List of dicts with 'id', 'alias' keys for potential delegators
     """
-    from keri.app import connecting
+    from keri.app import organizing
 
     delegators = []
 
@@ -205,7 +205,7 @@ def load_potential_delegators(app, delegation_type='local'):
             })
     else:  # remote
         # Load remote identifiers that can be delegators
-        org = connecting.Organizer(hby=app.vault.hby)
+        org = organizing.Organizer(hby=app.vault.hby)
         remote_ids = org.list()
         kevers = app.vault.hby.kevers
 
@@ -261,6 +261,48 @@ def get_local_identifiers_for_dropdown(app):
 
     return identifiers
 
+
+def list_eligible_local_identifiers(app):
+    """
+    List root-namespace, non-group local identifiers.
+
+    Args:
+        app: Application instance with an open vault
+
+    Returns:
+        list: List of dicts with ``alias`` and ``prefix`` keys
+    """
+    identifiers = []
+
+    if not app or not hasattr(app, 'vault') or not app.vault or not getattr(app.vault, 'hby', None):
+        logger.info("Eligible local identifier load skipped: vault or habery unavailable")
+        return identifiers
+
+    logger.info("Loading eligible local identifiers")
+
+    hby = app.vault.hby
+    for (ns, alias), prefix in hby.db.names.getTopItemIter(keys=()):
+        if ns != "":
+            continue
+
+        hab = hby.habByName(alias)
+        if hab is None:
+            logger.warning(f"Skipping eligible local identifier entry with missing hab: alias={alias}")
+            continue
+
+        if isinstance(hab, habbing.GroupHab):
+            logger.debug(f"Skipping group identifier from eligible local identifier list: {alias}")
+            continue
+
+        identifiers.append({
+            'alias': alias,
+            'prefix': prefix,
+        })
+
+    logger.info(f"Loaded {len(identifiers)} eligible local identifiers")
+    return identifiers
+
+
 def get_local_non_multisig_identifiers_for_dropdown(app):
     """
     Load identifiers.
@@ -272,15 +314,13 @@ def get_local_non_multisig_identifiers_for_dropdown(app):
         dict: Dict of identifier information keyed by to_string
     """
     identifiers = {}
-    # Load local identifiers
-    for aid, hab in app.vault.hby.habs.items():
-        if isinstance(hab, habbing.GroupHab):
-            continue
-        identifiers[f"{hab.name} - {aid}"] = {
-            'aid': aid,
-            'alias': hab.name
+    for identifier in list_eligible_local_identifiers(app):
+        identifiers[f"{identifier['alias']} - {identifier['prefix']}"] = {
+            'aid': identifier['prefix'],
+            'alias': identifier['alias']
         }
     return identifiers
+
 
 def load_group_members(app):
     """
@@ -462,10 +502,10 @@ def create_identifier(app, alias, key_type='salty', **kwargs):
                 delegator_hab = app.vault.hby.habByPre(creation_kwargs['delpre'])
                 anchor = dict(i=hab.pre, s="0", d=hab.pre)
                 delegator_hab.interact(data=[anchor])
-                seqner = coring.Seqner(sn=delegator_hab.kever.serder.sn)
-                couple = seqner.qb64b + delegator_hab.kever.serder.saidb
+                number = coring.Number(sn=delegator_hab.kever.serder.sn, code=coring.NumDex.Huge)
+                diger = coring.Diger(qb64b=delegator_hab.kever.serder.saidb)
                 dgkey = dbing.dgKey(anchor['i'], anchor['d'])
-                app.vault.hby.db.setAes(dgkey, couple)
+                app.vault.hby.db.aess.pin(keys=dgkey, val=(number, diger))
 
             return {
                 'success': True,
@@ -518,7 +558,7 @@ def delete_identifier(app, alias):
 
             # 4. Completed Group Multisig markers (if any partial completion exists)
             #    This is keyed by (pre, seqner.qb64), so you may need to iterate:
-            for keys, saider in app.vault.hby.db.cgms.getItemIter(keys=(pre,)):
+            for keys, saider in app.vault.hby.db.cgms.getTopItemIter(keys=(pre,)):
                 app.vault.hby.db.cgms.rem(keys=keys)
 
             try:
@@ -739,7 +779,7 @@ def get_identifier_details(app, hab):
 
     # Get witness receipts
     dgkey = dbing.dgKey(ser.preb, ser.saidb)
-    wigs = hab.db.getWigs(dgkey)
+    wigs = hab.db.wigs.get(keys=dgkey)
 
     # Check if resubmit is needed
     needs_resubmit = len(kever.wits) != len(wigs) if len(kever.wits) > 0 else False
@@ -887,7 +927,7 @@ def get_delegates_awaiting_approval(app, hab):
     delegates = []
 
     try:
-        for (pre, sn), edig in app.vault.hby.db.delegables.getItemIter():
+        for (pre, sn), edig in app.vault.hby.db.delegables.getTopItemIter(keys=()):
             delegates.append({
                 'pre': pre,
                 'sn': sn[-1],  # Get last element of sequence number
@@ -956,7 +996,7 @@ def refresh_keystate(app, hab):
         dict: Result with 'success' bool and 'message' str
     """
     from keri.app import habbing as keri_habbing
-    from keri.app import connecting
+    from keri.app import organizing
 
     try:
         if not isinstance(hab, keri_habbing.GroupHab):
@@ -965,7 +1005,7 @@ def refresh_keystate(app, hab):
                 'message': 'Identifier is not a group multisig'
             }
 
-        org = connecting.Organizer(hby=app.vault.hby)
+        org = organizing.Organizer(hby=app.vault.hby)
 
         # Query key state for each member
         for pre in hab.smids:
@@ -1073,10 +1113,9 @@ class ConfirmDoer(doing.DoDoer):
                 esc = self.escrowed
                 for pre, sn, edig in esc:
                     dgkey = dbing.dgKey(pre, edig)
-                    eraw = self.hby.db.getEvt(dgkey)
-                    if eraw is None:
+                    eserder = self.hby.db.evts.get(keys=dgkey)
+                    if eserder is None:
                         continue
-                    eserder = serdering.SerderKERI(raw=bytes(eraw))  # escrowed event
 
                     ilk = eserder.sad["t"]
                     if ilk in (coring.Ilks.dip,):
@@ -1124,8 +1163,8 @@ class ConfirmDoer(doing.DoDoer):
 
                             prefixer = coring.Prefixer(qb64=hab.pre)
                             sner = core.Number(num=serder.sn, code=core.NumDex.Huge)
-                            saider = coring.Saider(qb64b=serder.saidb)
-                            self.counselor.start(ghab=hab, prefixer=prefixer, seqner=sner, saider=saider)
+                            diger = coring.Diger(qb64b=serder.saidb)
+                            self.counselor.start(ghab=hab, prefixer=prefixer, number=sner, diger=diger)
 
                             while True:
                                 saider = self.hby.db.cgms.get(keys=(prefixer.qb64, sner.qb64))

@@ -9,10 +9,9 @@ from hio.base import doing
 from keri import help, core, kering
 from keri.app import grouping, forwarding, signing, habbing, agenting
 from keri.app.habbing import GroupHab
-from keri.core import scheming, coring, serdering, eventing
+from keri.core import scheming, coring, serdering, eventing, signing as core_signing
 from keri.core.eventing import SealEvent
-from keri.db import dbing
-from keri.db.dbing import dgKey, snKey
+from keri.db.dbing import dgKey
 from keri.help import helping
 from keri.kering import Kinds
 from keri.vdr import credentialing, verifying
@@ -165,7 +164,32 @@ class LoadSchemaDoer(doing.DoDoer):
         Returns:
             str: Name of the created registry
         """
-        # Use schema SAID as registry name
+        registry_name = schema_said
+
+        # Check if registry already exists
+        existing_registry = self.rgy.registryByName(registry_name)
+        if existing_registry is not None:
+            seqner = coring.Seqner(sn=0)
+            if self.rgy.reger.ctel.get(keys=(existing_registry.regk, seqner.qb64)) is None:
+                raise kering.MissingEntryError(
+                    f"Registry {registry_name} already exists but is not complete; "
+                    "witness receipts may still be pending"
+                )
+            logger.info(f"Registry already exists and is complete: {registry_name}")
+            return registry_name
+
+        # Validate that issuer AID was provided
+        if not self.issuer_aid:
+            raise Exception("Issuer AID is required for registry creation")
+
+        # Get the hab for the issuer AID
+        if self.issuer_aid not in self.hby.habs:
+            raise Exception(f"Issuer identifier {self.issuer_aid} not found")
+
+        hab = self.hby.habs[self.issuer_aid]
+
+        logger.info(f"Creating credential registry: {registry_name} for issuer {hab.name} ({hab.pre})")
+
         counselor = grouping.Counselor(hby=self.hby)
 
         # Convert auth_codes list to dict format if provided
@@ -181,26 +205,7 @@ class LoadSchemaDoer(doing.DoDoer):
 
         self.extend([counselor, registrar, postman])
 
-        registry_name = schema_said
-
-        # Check if registry already exists
-        if registry_name in self.rgy.regs:
-            logger.info(f"Registry already exists: {registry_name}")
-            return registry_name
-
-        # Validate that issuer AID was provided
-        if not self.issuer_aid:
-            raise Exception("Issuer AID is required for registry creation")
-
-        # Get the hab for the issuer AID
-        if self.issuer_aid not in self.hby.habs:
-            raise Exception(f"Issuer identifier {self.issuer_aid} not found")
-
-        hab = self.hby.habs[self.issuer_aid]
-
-        logger.info(f"Creating credential registry: {registry_name} for issuer {hab.name} ({hab.pre})")
-
-        kwa = dict(nonce=coring.randomNonce())
+        kwa = dict(nonce=core_signing.Salter().qb64)
         registry = self.rgy.makeRegistry(name=registry_name, prefix=hab.pre, **kwa)
 
         rseal = SealEvent(registry.regk, "0", registry.regd)
@@ -259,7 +264,7 @@ class IssueCredentialDoer(doing.DoDoer):
         self.recipient_pre = recipient_pre
         self.attributes = attributes
         self.edges = edges or {}
-        self.rules = rules or {}
+        self.rules = rules if rules else None
         self.codes = codes or []
         self.signal_bridge = signal_bridge
 
@@ -411,6 +416,8 @@ class IssueCredentialDoer(doing.DoDoer):
 
             while not credentialer.complete(said=creder.said):
                 self.rgy.processEscrows()
+                verifier.processEscrows()
+                credentialer.processEscrows()
                 yield self.tock
 
             logger.info(f"Credential issued successfully: {creder.said}")
@@ -465,8 +472,8 @@ def outputCred(hby, rgy, said):
     issr = creder.issuer
     out.extend(outputKEL(hby, issr))
 
-    if creder.regi is not None:
-        out.extend(outputTEL(rgy, creder.regi))
+    if creder.regid is not None:
+        out.extend(outputTEL(rgy, creder.regid))
         out.extend(outputTEL(rgy, creder.said))
 
     chains = creder.edge if creder.edge is not None else {}
@@ -575,11 +582,11 @@ class Registrar(doing.DoDoer):
         """
         registry = self.rgy.regs[iserder.pre]
         hab = registry.hab
-        rseq = coring.Seqner(sn=0)
+        rseq = core.Number(num=0, code=core.NumDex.Huge)
 
         if not isinstance(hab, GroupHab):  # not a multisig group
-            seqner = coring.Seqner(sn=hab.kever.sner.num)
-            saider = coring.Saider(qb64=hab.kever.serder.said)
+            seqner = core.Number(sn=hab.kever.sner.num)
+            saider = coring.Diger(qb64=hab.kever.serder.said)
             registry.anchorMsg(
                 pre=iserder.pre, regd=iserder.said, seqner=seqner, saider=saider
             )
@@ -600,11 +607,11 @@ class Registrar(doing.DoDoer):
             said = anc.said
 
             prefixer = coring.Prefixer(qb64=hab.pre)
-            seqner = coring.Seqner(sn=sn)
-            saider = coring.Saider(qb64=said)
+            seqner = core.Number(sn=sn)
+            saider = coring.Diger(qb64=said)
 
             self.counselor.start(
-                prefixer=prefixer, seqner=seqner, saider=saider, ghab=hab
+                prefixer=prefixer, number=seqner, diger=saider, ghab=hab
             )
 
             print("Waiting for TEL registry vcp event multisig anchoring event")
@@ -623,16 +630,16 @@ class Registrar(doing.DoDoer):
             anc (SerderKERI): Serder object of anchoring event
 
         """
-        regk = creder.regi
+        regk = creder.regid
         registry = self.rgy.regs[regk]
         hab = registry.hab
 
         vcid = iserder.ked["i"]
-        rseq = coring.Seqner(snh=iserder.ked["s"])
+        rseq = core.Number(num=iserder.ked["s"], code=core.NumDex.Huge)
 
         if not isinstance(hab, GroupHab):  # not a multisig group
-            seqner = coring.Seqner(sn=hab.kever.sner.num)
-            saider = coring.Saider(qb64=hab.kever.serder.said)
+            seqner = core.Number(sn=hab.kever.sner.num)
+            saider = coring.Diger(qb64=hab.kever.serder.said)
             # Key is credential SAID and TEL event SAID
             registry.anchorMsg(
                 pre=vcid, regd=iserder.said, seqner=seqner, saider=saider
@@ -655,11 +662,11 @@ class Registrar(doing.DoDoer):
             said = anc.said
 
             prefixer = coring.Prefixer(qb64=hab.pre)
-            seqner = coring.Seqner(sn=sn)
-            saider = coring.Saider(qb64=said)
+            seqner = core.Number(sn=sn)
+            saider = coring.Diger(qb64=said)
 
             self.counselor.start(
-                prefixer=prefixer, seqner=seqner, saider=saider, ghab=hab
+                prefixer=prefixer, number=seqner, diger=saider, ghab=hab
             )
 
             print(f"Waiting for TEL iss event multisig anchoring event {seqner.sn}")
@@ -677,16 +684,16 @@ class Registrar(doing.DoDoer):
             anc (Serder): Serder object of anchoring event
         """
 
-        regk = creder.regi
+        regk = creder.regid
         registry = self.rgy.regs[regk]
         hab = registry.hab
 
         vcid = rserder.ked["i"]
-        rseq = coring.Seqner(snh=rserder.ked["s"])
+        rseq = core.Number(num=rserder.ked["s"], code=core.NumDex.Huge)
 
         if not isinstance(hab, GroupHab):  # not a multisig group
-            seqner = coring.Seqner(sn=hab.kever.sner.num)
-            saider = coring.Saider(qb64=hab.kever.serder.said)
+            seqner = core.Number(sn=hab.kever.sner.num)
+            saider = coring.Diger(qb64=hab.kever.serder.said)
             registry.anchorMsg(
                 pre=vcid, regd=rserder.said, seqner=seqner, saider=saider
             )
@@ -706,11 +713,11 @@ class Registrar(doing.DoDoer):
             said = anc.said
 
             prefixer = coring.Prefixer(qb64=hab.pre)
-            seqner = coring.Seqner(sn=sn)
-            saider = coring.Saider(qb64=said)
+            seqner = core.Number(sn=sn)
+            saider = coring.Diger(qb64=said)
 
             self.counselor.start(
-                prefixer=prefixer, seqner=seqner, saider=saider, ghab=hab
+                prefixer=prefixer, number=seqner, diger=saider, ghab=hab
             )
 
             print(f"Waiting for TEL rev event multisig anchoring event {seqner.sn}")
@@ -792,14 +799,13 @@ class Registrar(doing.DoDoer):
         """
         for (regk, snq), (
                 prefixer,
-                seqner,
-                saider,
-        ) in self.rgy.reger.tpwe.getItemIter():  # partial witness escrow
+                number,
+                diger,
+        ) in self.rgy.reger.tpwe.getTopItemIter(keys=()):  # partial witness escrow
             kever = self.hby.kevers[prefixer.qb64]
-            dgkey = dbing.dgKey(prefixer.qb64b, saider.qb64)
 
             # Load all the witness receipts we have so far
-            wigs = self.hby.db.getWigs(dgkey)
+            wigs = self.hby.db.wigs.get(keys=(prefixer.qb64b, diger.qb64))
             if kever.wits:
                 if len(wigs) == len(
                         kever.wits
@@ -807,7 +813,7 @@ class Registrar(doing.DoDoer):
                     hab = self.hby.habs[prefixer.qb64]
                     witnessed = False
                     for cue in self.receiptor.cues:
-                        if cue["pre"] == hab.pre and cue["sn"] == seqner.sn:
+                        if cue["pre"] == hab.pre and cue["sn"] == number.sn:
                             witnessed = True
 
                     if not witnessed:
@@ -815,11 +821,11 @@ class Registrar(doing.DoDoer):
                 else:
                     continue
 
-            rseq = coring.Seqner(qb64=snq)
+            rseq = core.Number(qb64=snq, code=core.NumDex.Huge)
             self.rgy.reger.tpwe.rem(keys=(regk, snq))
 
             self.rgy.reger.tede.add(
-                keys=(regk, rseq.qb64), val=(prefixer, seqner, saider)
+                keys=(regk, rseq.qb64), val=(prefixer, number, diger)
             )
 
     def processMultisigEscrow(self):
@@ -831,36 +837,35 @@ class Registrar(doing.DoDoer):
         """
         for (regk, snq, regd), (
                 prefixer,
-                seqner,
-                saider,
-        ) in self.rgy.reger.tmse.getItemIter():  # multisig escrow
+                number,
+                diger,
+        ) in self.rgy.reger.tmse.getTopItemIter(keys=()):  # multisig escrow
             try:
-                if not self.counselor.complete(prefixer, seqner, saider):
+                if not self.counselor.complete(prefixer, number, diger):
                     continue
             except kering.ValidationError:
                 self.rgy.reger.tmse.rem(keys=(regk, snq, regd))
                 continue
 
-            rseq = coring.Seqner(qb64=snq)
+            rseq = core.Number(qb64=snq, code=core.NumDex.Huge)
 
             # Anchor the message, registry or otherwise
             key = dgKey(regk, regd)
-            sealet = seqner.qb64b + saider.qb64b
-            self.rgy.reger.putAnc(key, sealet)
+            self.rgy.reger.ancs.put(keys=key, val=(core.Number(num=number.sn), diger))
 
             self.rgy.reger.tmse.rem(keys=(regk, snq, regd))
             self.rgy.reger.tede.add(
-                keys=(regk, rseq.qb64), val=(prefixer, seqner, saider)
+                keys=(regk, rseq.qb64), val=(prefixer, number, diger)
             )
 
     def processDiseminationEscrow(self):
         for (regk, snq), (
                 prefixer,
-                seqner,
+                number,
                 saider,
-        ) in self.rgy.reger.tede.getItemIter():  # group multisig escrow
-            rseq = coring.Seqner(qb64=snq)
-            dig = self.rgy.reger.getTel(key=snKey(pre=regk, sn=rseq.sn))
+        ) in self.rgy.reger.tede.getTopItemIter(keys=()):  # group multisig escrow
+            rseq = core.Number(qb64=snq, code=core.NumDex.Huge)
+            dig = self.rgy.reger.tels.get(keys=regk, on=rseq.sn)
             if dig is None:
                 continue
 
@@ -875,4 +880,3 @@ class Registrar(doing.DoDoer):
             # to determine when the Witnesses have received the TEL events.
             self.witPub.msgs.append(dict(pre=prefixer.qb64, said=regk, msg=tevt))
             self.rgy.reger.ctel.put(keys=(regk, rseq.qb64), val=saider)  # idempotent
-

@@ -4,11 +4,11 @@ locksmith.ui.vaults.create module
 
 Dialog for creating new vaults
 """
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QButtonGroup
 from keri import help
-from keri.core import coring
+from keri.core import signing
 
 from locksmith.core import habbing
 from locksmith.ui import colors
@@ -28,6 +28,9 @@ logger = help.ogler.getLogger(__name__)
 
 class CreateIdentifierDialog(DelegationMixin, LocksmithDialog):
     """Dialog for initializing a new vault."""
+
+    identifier_created = Signal(str, str)
+    identifier_creation_failed = Signal(str)
 
     def __init__(self, icon_path, app, parent=None, config=None):
         """
@@ -124,7 +127,7 @@ class CreateIdentifierDialog(DelegationMixin, LocksmithDialog):
         advanced_config_layout.addLayout(radio_layout)
 
         # Generate random salt by default
-        default_salt = coring.randomNonce()[2:23]
+        default_salt = signing.Salter().qb64[2:23]
         self.key_salt_field = FloatingLabelLineEdit("Key Salt", password_mode=True)
         self.key_salt_field.setText(default_salt)
         advanced_config_layout.addWidget(self.key_salt_field)
@@ -247,14 +250,6 @@ class CreateIdentifierDialog(DelegationMixin, LocksmithDialog):
             self.app.vault.signals.doer_event.connect(self._on_doer_event)
             logger.info("CreateIdentifierDialog: Connected to vault signal bridge")
 
-    def showEvent(self, event):
-        """Override showEvent to connect the participants selector to the dialog after it's shown."""
-        super().showEvent(event)
-
-        # Connect participants selector to dialog for height animation coordination if it exists
-        if self.participants_selector:
-            self.participants_selector.set_dialog(self)
-
     def create_identifier(self):
         """Create a new identifier using the form values."""
         logger.info("Creating new identifier...")
@@ -322,10 +317,12 @@ class CreateIdentifierDialog(DelegationMixin, LocksmithDialog):
             logger.info(f"Identifier creation initiated: {result['message']}")
             # Keep dialog open if async operation, it will close when InceptDoer signals completion
             if not result.get('async'):
+                self.identifier_created.emit(alias, result.get('pre', ''))
                 # Synchronous creation succeeded, close dialog
                 self.close()
         else:
             logger.error(f"Identifier creation failed: {result['message']}")
+            self.identifier_creation_failed.emit(result['message'])
             # TODO: Show error message to user
 
     def _on_doer_event(self, doer_name: str, event_type: str, data: dict):
@@ -346,9 +343,11 @@ class CreateIdentifierDialog(DelegationMixin, LocksmithDialog):
         # Handle identifier creation completion
         if event_type == "identifier_created":
             logger.info(f"Identifier created successfully: {data.get('alias')} ({data.get('pre')})")
+            self.identifier_created.emit(data.get('alias', ''), data.get('pre', ''))
             self.close()
         elif event_type == "identifier_creation_failed":
             logger.error(f"Identifier creation failed: {data.get('error')}")
+            self.identifier_creation_failed.emit(data.get('error', ''))
             self.show_error(f"Identifier creation failed: {data.get('error')}")
             # Keep dialog open so user can try again
 
@@ -365,4 +364,3 @@ class CreateIdentifierDialog(DelegationMixin, LocksmithDialog):
 
         # Update collapsible section height to reflect content changes
         self.advanced_config.update_content_height()
-
