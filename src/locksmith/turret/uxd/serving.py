@@ -111,6 +111,12 @@ class Acceptor(tyming.Tymee):
         if socket not closed properly, binding socket gets error
            OSError: (48, 'Address already in use')
         """
+        if not hasattr(socket, "AF_UNIX"):
+            raise NotImplementedError(
+                "Turret UXD bridge requires Unix-domain socket support (socket.AF_UNIX). "
+                "This platform does not provide AF_UNIX. "
+                "Upgrade to Windows 10 version 1803 or later, or run on macOS/Linux."
+            )
         # create server socket ss to listen on
         self.ss = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 
