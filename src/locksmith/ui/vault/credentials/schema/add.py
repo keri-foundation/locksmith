@@ -8,6 +8,7 @@ from keri import help
 import re
 from urllib import parse
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QButtonGroup, QFileDialog, QCheckBox
 
@@ -21,7 +22,10 @@ from locksmith.ui.toolkit.widgets import (
     LocksmithInvertedButton
 )
 from locksmith.ui.toolkit.widgets.buttons import LocksmithRadioButton, LocksmithIconButton
-from locksmith.ui.vault.shared.witness_auth_mixin import WitnessAuthenticationPanel
+from locksmith.ui.vault.shared.witness_auth_mixin import (
+    WitnessAuthenticationPanel,
+    witness_auth_dialog_height
+)
 
 logger = help.ogler.getLogger(__name__)
 
@@ -240,11 +244,15 @@ class AddSchemaDialog(LocksmithDialog):
         self.content_layout.addWidget(self._auth_panel)
 
         self._workflow_mode = "auth"
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.cancel_button.setText("Back")
         self.cancel_button.setEnabled(True)
         self.load_button.setText("Authenticate")
         self.load_button.setEnabled(True)
-        self.setFixedSize(700, 540)
+        self.setFixedSize(700, witness_auth_dialog_height(
+            self._auth_panel.individual_witnesses,
+            self._auth_panel.batch_groups
+        ))
         self.center_on_parent()
 
     def _show_schema_step(self, clear_pending: bool = False):
