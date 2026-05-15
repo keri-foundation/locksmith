@@ -6,16 +6,17 @@ Dialog for accepting multisig group rotation proposals.
 """
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QHBoxLayout, QScrollArea,
-    QFrame, QDialog
+    QFrame
 )
 from keri import help
 from keri.help import helping
 from keri.peer import exchanging
 from keri.core.serdering import SerderKERI
 
+from locksmith.core import rotating
 from locksmith.core.grouping import MultisigRotationJoinDoer
 from locksmith.ui import colors
 from locksmith.ui.toolkit.widgets import (
@@ -25,7 +26,10 @@ from locksmith.ui.toolkit.widgets import (
 )
 from locksmith.ui.toolkit.widgets.fields import FloatingLabelComboBox
 from locksmith.ui.vault.shared.display_helpers import resolve_alias, add_info_row
-from locksmith.ui.vault.groups.authenticate import GroupWitnessAuthenticationDialog
+from locksmith.ui.vault.shared.witness_auth_mixin import (
+    WitnessAuthenticationPanel,
+    witness_auth_dialog_height
+)
 
 if TYPE_CHECKING:
     from locksmith.core.apping import LocksmithApplication
@@ -59,7 +63,10 @@ class AcceptMultisigRotationDialog(LocksmithDialog):
         self.app = app
         self.parent_widget = parent
         self.proposal_said = proposal_said
-        self._finished_follow_up = None
+        self._auth_panel = None
+        self._auth_hab = None
+        self._workflow_mode = "join"
+        self._signals_connected = False
 
         # Load proposal message data
         try:
@@ -78,7 +85,7 @@ class AcceptMultisigRotationDialog(LocksmithDialog):
             parent=self.parent_widget,
             title="Join Multisig Rotation",
             title_icon=":/assets/material-icons/rotate_right.svg",
-            content=self.scroll_area,
+            content=self.proposal_scroll_area,
             buttons=self.button_row,
             show_overlay=False
         )
@@ -87,44 +94,99 @@ class AcceptMultisigRotationDialog(LocksmithDialog):
 
         # Connect signals
         self.cancel_button.clicked.connect(self.close)
-        self.accept_button.clicked.connect(self._on_accept)
+        self.accept_button.clicked.connect(self._on_primary_clicked)
 
         # Connect to vault signal bridge for doer events
         if self.app and hasattr(self.app, 'vault') and self.app.vault and hasattr(self.app.vault, 'signals'):
             self.app.vault.signals.doer_event.connect(self._on_doer_event)
+            self._signals_connected = True
         self.finished.connect(self._on_dialog_finished)
 
     def _cleanup_signal_connection(self):
+        if not self._signals_connected:
+            return
+
         if self.app and hasattr(self.app, 'vault') and self.app.vault and hasattr(self.app.vault, 'signals'):
             try:
                 self.app.vault.signals.doer_event.disconnect(self._on_doer_event)
             except RuntimeError:
                 pass
+        self._signals_connected = False
 
-    def _on_dialog_finished(self, result):
+    def _on_dialog_finished(self, _result):
         self._cleanup_signal_connection()
-
-        if result != QDialog.DialogCode.Accepted or self._finished_follow_up is None:
-            self._finished_follow_up = None
-            return
-
-        follow_up = self._finished_follow_up
-        self._finished_follow_up = None
-        QTimer.singleShot(0, follow_up)
 
     def closeEvent(self, event):
         self._cleanup_signal_connection()
         super().closeEvent(event)
 
-    def _open_witness_auth_dialog(self, hab, witness_ids: list[str], auth_only: bool):
-        auth_dialog = GroupWitnessAuthenticationDialog(
+    def _on_primary_clicked(self):
+        if self._workflow_mode == "auth":
+            self._submit_auth_step()
+        else:
+            self._on_accept()
+
+    def _show_auth_step(self, hab, witness_ids: list[str]):
+        self.clear_error()
+        self.clear_success()
+
+        if self._auth_panel is not None:
+            self.content_layout.removeWidget(self._auth_panel)
+            self._auth_panel.setParent(None)
+            self._auth_panel.deleteLater()
+
+        self.proposal_scroll_area.hide()
+        self._auth_hab = hab
+        self._auth_panel = WitnessAuthenticationPanel(
             app=self.app,
             hab=hab,
             witness_ids=witness_ids,
-            auth_only=auth_only,
-            parent=self.parent_widget
+            parent=self
         )
-        auth_dialog.open()
+        self.content_layout.addWidget(self._auth_panel)
+
+        self._workflow_mode = "auth"
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.cancel_button.setText("Close")
+        self.cancel_button.setEnabled(True)
+        self.accept_button.setText("Authenticate")
+        self.accept_button.setEnabled(True)
+        self.setFixedSize(700, self._auth_step_height())
+        self.center_on_parent()
+
+    def _auth_step_height(self) -> int:
+        if self._auth_panel is None:
+            return 440
+
+        return witness_auth_dialog_height(
+            self._auth_panel.individual_witnesses,
+            self._auth_panel.batch_groups
+        )
+
+    def _submit_auth_step(self):
+        if self._auth_panel is None or self._auth_hab is None:
+            self.close()
+            return
+
+        self.clear_error()
+        valid, codes, error_message = self._auth_panel.validate_authentication_codes()
+        if not valid:
+            self.show_error(error_message)
+            return
+
+        self.accept_button.setEnabled(False)
+        self.accept_button.setText("Authenticating...")
+        self.cancel_button.setEnabled(False)
+        rotating.authenticate_witnesses(self.app, self._auth_hab, codes)
+
+    def _set_auth_button_idle(self):
+        self.cancel_button.setEnabled(True)
+        self.accept_button.setEnabled(True)
+        self.accept_button.setText("Authenticate")
+
+    async def _check_and_spawn_keystate_update(self):
+        if hasattr(self.app, 'plugin_manager') and self.app.plugin_manager and self._auth_hab is not None:
+            await self.app.plugin_manager.after_identifier_authenticated(self.app.vault, self._auth_hab)
 
     def _load_proposal_message(self):
         """Load rotation proposal message using exchanging.cloneMessage()."""
@@ -191,10 +253,10 @@ class AcceptMultisigRotationDialog(LocksmithDialog):
     def _build_ui(self):
         """Build the dialog UI."""
         # Create scroll area for content
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.proposal_scroll_area = QScrollArea()
+        self.proposal_scroll_area.setWidgetResizable(True)
+        self.proposal_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.proposal_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         # Content widget
         content_widget = QWidget()
@@ -295,7 +357,7 @@ class AcceptMultisigRotationDialog(LocksmithDialog):
 
         content_layout.addStretch()
 
-        self.scroll_area.setWidget(content_widget)
+        self.proposal_scroll_area.setWidget(content_widget)
 
         # Button row
         self.button_row = QHBoxLayout()
@@ -381,10 +443,28 @@ class AcceptMultisigRotationDialog(LocksmithDialog):
 
     def _on_doer_event(self, doer_name: str, event_type: str, data: dict):
         """Handle doer events from the signal bridge."""
-        if doer_name != "MultisigRotationJoinDoer":
+        if doer_name not in ("MultisigRotationJoinDoer", "AuthenticateWitnessesDoer"):
             return
 
         logger.info(f"AcceptMultisigRotationDialog received: {event_type} - {data}")
+
+        if doer_name == "AuthenticateWitnessesDoer":
+            if self._auth_hab is None or data.get('pre') != self._auth_hab.pre:
+                return
+
+            if event_type == "witness_authentication_success":
+                logger.info(f"Witness authentication succeeded for {data.get('alias')}")
+                import asyncio
+                asyncio.ensure_future(self._check_and_spawn_keystate_update())
+                self.accept()
+
+            elif event_type == "witness_authentication_failed":
+                error_msg = data.get('error', 'Authentication failed')
+                logger.error(f"Witness authentication failed: {error_msg}")
+                self._set_auth_button_idle()
+                self.show_error(error_msg)
+
+            return
 
         if event_type == "group_rotation_joined":
             logger.info(f"Successfully joined rotation: {data.get('alias')} ({data.get('pre')})")
@@ -392,22 +472,16 @@ class AcceptMultisigRotationDialog(LocksmithDialog):
             # Check if witnesses need authentication
             if data.get('needs_witness_auth'):
                 shared_witnesses = data.get('shared_witnesses', [])
-                logger.info(f"Opening authentication dialog for {len(shared_witnesses)} shared witnesses")
+                logger.info(f"Showing authentication step for {len(shared_witnesses)} shared witnesses")
 
                 # Get the group hab for witness auth
                 ghab = self.app.vault.hby.habs.get(data.get('pre'))
                 if ghab:
-                    self._finished_follow_up = lambda: self._open_witness_auth_dialog(
-                        hab=ghab,
-                        witness_ids=shared_witnesses,
-                        auth_only=True,
-                    )
+                    self._show_auth_step(ghab, shared_witnesses)
                 else:
-                    self._finished_follow_up = None
+                    self.accept()
             else:
-                self._finished_follow_up = None
-
-            self.accept()
+                self.accept()
 
         elif event_type == "group_rotation_join_failed":
             logger.error(f"Failed to join rotation: {data.get('error')}")
