@@ -177,3 +177,5 @@ cython_debug/
 
 # proxy stuff
 *.pem
+# git worktrees (out-of-tree feature work)
+.worktrees/
