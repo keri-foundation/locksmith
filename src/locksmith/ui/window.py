@@ -47,6 +47,9 @@ class LocksmithWindow(QMainWindow):
 
         self.app = LocksmithApplication(config=config)
 
+        # Staged-install tracking: set to plugin_id between install() and trust.
+        self._pending_trust_install: str | None = None
+
         # Window setup
         self.setWindowTitle("Locksmith")
         self.setMinimumSize(1280, 1024)
@@ -85,9 +88,12 @@ class LocksmithWindow(QMainWindow):
 
         # Wire PluginsPage signals
         plugins_page = self.pages[Pages.PLUGINS]
-        plugins_page.install_clicked.connect(self._open_install_flow)
+        plugins_page.install_requested.connect(self._handle_install_requested)
+        plugins_page.install_trusted.connect(self._handle_install_trusted)
         plugins_page.uninstall_clicked.connect(self._handle_uninstall)
         plugins_page.exclude_toggled.connect(self._handle_exclude_toggle)
+        # Cancel: page collapses its panel, window rolls back pre-trust installs.
+        plugins_page._install_panel.cancelled.connect(self._handle_install_cancelled)
 
         # Store VaultPage reference for plugin access
         vault_page = self.pages[Pages.VAULT]
@@ -427,42 +433,42 @@ class LocksmithWindow(QMainWindow):
 
     # ------------------- Plugin install/uninstall/exclude handlers ---
 
-    def _open_install_flow(self) -> None:
-        from locksmith.ui.plugins.install_dialog import InstallSourceDialog
-        dlg = InstallSourceDialog(self)
-        dlg.source_chosen.connect(self._handle_source_chosen)
-        dlg.exec()
-
-    def _handle_source_chosen(self, source) -> None:
+    def _handle_install_requested(self, source) -> None:
         from locksmith.plugins.installer import InstallError, PluginInstaller
-        from locksmith.ui.plugins.trust_dialog import PluginTrustDialog
-        # Fetch-then-confirm-with-rollback shape. Cleaner staging-area split
-        # is a follow-up (see plan Task 13 step 3 note).
         installer = PluginInstaller()
         try:
             record = installer.install(source)
         except InstallError as e:
-            self._show_error("Install failed", str(e))
+            # Stay in source mode, render error inline. No popup.
+            self.pages[Pages.PLUGINS].show_install_error(str(e))
             return
-        snap = record["manifest_snapshot"]
-        dlg = PluginTrustDialog(
-            manifest_snapshot=snap,
+        self.pages[Pages.PLUGINS].show_trust_step(
+            manifest_snapshot=record["manifest_snapshot"],
             source=record["source"],
             commit=record["commit"],
-            parent=self,
         )
-        dlg.trusted.connect(lambda pid=record["plugin_id"]: self._on_trust_accepted(pid))
-        result = dlg.exec()
-        if result != dlg.Accepted:
-            try:
-                installer.uninstall(record["plugin_id"])
-            except InstallError:
-                logger.exception("plugin.rollback_failed plugin_id=%s", record["plugin_id"])
+        # Cache the staged record so we can roll it back if the user cancels trust.
+        self._pending_trust_install = record["plugin_id"]
+
+    def _handle_install_trusted(self, plugin_id: str) -> None:
+        logger.info("plugin.trust.accepted plugin_id=%s", plugin_id)
+        self._pending_trust_install = None
+        self.pages[Pages.PLUGINS].collapse_install_panel()
         self.pages[Pages.PLUGINS]._refresh()
         self.pages[Pages.PLUGINS].set_restart_required(True)
 
-    def _on_trust_accepted(self, plugin_id: str) -> None:
-        logger.info("plugin.trust.accepted plugin_id=%s", plugin_id)
+    def _handle_install_cancelled(self) -> None:
+        # The page already collapsed its panel before emitting this.
+        # If we have a pending trust-stage install, roll it back.
+        from locksmith.plugins.installer import InstallError, PluginInstaller
+        pid = self._pending_trust_install
+        if pid:
+            try:
+                PluginInstaller().uninstall(pid)
+            except InstallError:
+                logger.exception("plugin.rollback_failed plugin_id=%s", pid)
+            self._pending_trust_install = None
+        self.pages[Pages.PLUGINS]._refresh()
         self.pages[Pages.PLUGINS].set_restart_required(True)
 
     def _handle_uninstall(self, plugin_id: str) -> None:

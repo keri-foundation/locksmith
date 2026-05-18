@@ -6,7 +6,7 @@ Top-level Plugins page (Pages.PLUGINS). Lists installed plugins with
 state badges; exposes Install / Uninstall / Exclude affordances.
 
 Install and Uninstall both surface signals; the LocksmithWindow wires
-those signals to dialogs and to PluginInstaller calls (Task 13).
+those signals to handlers and to PluginInstaller calls.
 """
 from __future__ import annotations
 
@@ -25,6 +25,9 @@ from PySide6.QtWidgets import (
 )
 from keri import help
 
+from locksmith.plugins.installer import SourceDescriptor
+from locksmith.ui.plugins.install_panel import InstallPanel
+
 logger = help.ogler.getLogger(__name__)
 
 
@@ -40,9 +43,10 @@ _STATUS_COPY = {
 class PluginsPage(QWidget):
     """The Plugins management page."""
 
-    install_clicked = Signal()
-    uninstall_clicked = Signal(str)            # plugin_id
-    exclude_toggled = Signal(str, bool)         # plugin_id, now_excluded
+    install_requested = Signal(SourceDescriptor)   # user submitted Fetch
+    install_trusted = Signal(str)                  # user clicked Trust&Install, arg is plugin_id
+    uninstall_clicked = Signal(str)                # plugin_id
+    exclude_toggled = Signal(str, bool)            # plugin_id, now_excluded
 
     class PluginNameLabel(QLabel):
         pass
@@ -92,11 +96,19 @@ class PluginsPage(QWidget):
         self._list_scroll.setWidget(self._list_container)
         outer.addWidget(self._list_scroll, stretch=1)
 
+        # Inline install panel (hidden by default)
+        self._install_panel = InstallPanel()
+        self._install_panel.setVisible(False)
+        self._install_panel.cancelled.connect(self._on_panel_cancelled)
+        self._install_panel.source_chosen.connect(self.install_requested)
+        self._install_panel.trusted.connect(self.install_trusted)
+        outer.addWidget(self._install_panel)
+
         button_row = QHBoxLayout()
         button_row.addStretch(1)
         self._install_button = QPushButton("+ Install plugin")
         self._install_button.setObjectName("plugins_install_button")
-        self._install_button.clicked.connect(self.install_clicked.emit)
+        self._install_button.clicked.connect(self._on_install_button_clicked)
         button_row.addWidget(self._install_button)
         outer.addLayout(button_row)
 
@@ -195,7 +207,44 @@ class PluginsPage(QWidget):
         v.addLayout(bottom_row)
         return card
 
+    # ------------------------------------------------------------------
+    # Install panel show/hide flow
+    # ------------------------------------------------------------------
+
+    def _on_install_button_clicked(self) -> None:
+        self._install_panel.set_source_mode()
+        self._install_panel.setVisible(True)
+        self._install_button.setVisible(False)
+
+    def _on_panel_cancelled(self) -> None:
+        self._install_panel.setVisible(False)
+        self._install_button.setVisible(True)
+
+    def show_trust_step(
+        self,
+        *,
+        manifest_snapshot: dict,
+        source: dict,
+        commit: str,
+    ) -> None:
+        """Advance the panel to trust-confirm view (panel is already visible)."""
+        self._install_panel.set_trust_mode(
+            manifest_snapshot=manifest_snapshot,
+            source=source,
+            commit=commit,
+        )
+
+    def show_install_error(self, message: str) -> None:
+        """Render an inline error in source mode; panel stays open for retry."""
+        self._install_panel.set_inline_error(message)
+
+    def collapse_install_panel(self) -> None:
+        """Hide the panel and show the install button (called after success)."""
+        self._on_panel_cancelled()
+
+    # ------------------------------------------------------------------
     # Toolbar / window protocol — every page implements this.
+    # ------------------------------------------------------------------
 
     def get_toolbar_config(self) -> dict:
         return {"title": "Plugins", "show_back": False}
