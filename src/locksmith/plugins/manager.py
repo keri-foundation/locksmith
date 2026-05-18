@@ -13,7 +13,7 @@ from typing import Any, TYPE_CHECKING
 from keri import help
 
 from locksmith.plugins.base import (
-    PluginBase,
+    VaultPlugin,
     AccountProviderPlugin,
 )
 
@@ -31,7 +31,7 @@ class PluginManager:
 
     def __init__(self, app: Any):
         self._app = app
-        self._plugins: dict[str, PluginBase] = {}
+        self._plugins: dict[str, VaultPlugin] = {}
 
     def discover_and_initialize(self, vault_page: VaultPage, nav_menu: VaultNavMenu) -> None:
         """Discover plugins via entry points, initialize them, and register pages/menus."""
@@ -93,7 +93,7 @@ class PluginManager:
             except Exception:
                 logger.exception(f"Plugin '{plugin.plugin_id}' failed on_vault_closed")
 
-    def get_plugin(self, plugin_id: str) -> PluginBase | None:
+    def get_plugin(self, plugin_id: str) -> VaultPlugin | None:
         """Return a plugin by its ID, or None if not found."""
         return self._plugins.get(plugin_id)
 

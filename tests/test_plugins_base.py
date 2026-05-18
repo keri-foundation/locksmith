@@ -71,6 +71,7 @@ def test_app_and_vault_can_be_combined():
     assert isinstance(h, VaultPlugin)
 
 
-def test_plugin_base_alias_still_resolves():
-    # Backward-compat alias so legacy imports don't break before Task 3 migrates them.
-    assert plugins_base.PluginBase is plugins_base.VaultPlugin
+def test_plugin_base_alias_removed():
+    # Task 3 removed the PluginBase alias. VaultPlugin is the canonical name.
+    assert not hasattr(plugins_base, "PluginBase"), "PluginBase alias should be gone"
+    assert hasattr(plugins_base, "VaultPlugin")
