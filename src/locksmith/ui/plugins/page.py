@@ -32,11 +32,12 @@ logger = help.ogler.getLogger(__name__)
 
 
 _STATUS_COPY = {
-    "loaded":         ("● Loaded",                "#1c8a3a"),
-    "excluded":       ("○ Excluded (this wallet)", "#777"),
-    "incompatible":   ("⚠ Incompatible",          "#a8770a"),
-    "files_missing":  ("⚠ Files missing",         "#a8770a"),
-    "failed":         ("⚠ Failed to load",        "#c8341c"),
+    "loaded":           ("● Loaded",                "#1c8a3a"),
+    "excluded":         ("○ Excluded (this wallet)", "#777"),
+    "incompatible":     ("⚠ Incompatible",          "#a8770a"),
+    "files_missing":    ("⚠ Files missing",         "#a8770a"),
+    "failed":           ("⚠ Failed to load",        "#c8341c"),
+    "pending_restart":  ("○ Pending restart",        "#a8770a"),
 }
 
 
@@ -124,7 +125,29 @@ class PluginsPage(QWidget):
             if w is not None:
                 w.deleteLater()
 
+        from locksmith.plugins import storage
+        from locksmith.plugins.manager import PluginState
+
         states = list(self.app.plugin_manager.all_states())
+        loaded_ids = {s.plugin_id for s in states}
+        # Surface plugins installed on disk but not yet loaded by this
+        # wallet instance — they need a restart to actually run, and the
+        # user expects to see something here after Trust & install fires.
+        try:
+            index = storage.read_index()
+        except Exception:
+            index = {"plugins": []}
+        for record in index.get("plugins", []):
+            pid = record.get("plugin_id")
+            if not pid or pid in loaded_ids:
+                continue
+            states.append(PluginState(
+                plugin_id=pid,
+                status="pending_restart",
+                source=record.get("source", {}),
+                manifest_snapshot=record.get("manifest_snapshot", {}),
+            ))
+
         if not states:
             empty = self.EmptyStateLabel(
                 "No plugins installed yet.\nClick + Install plugin to add one."
@@ -165,7 +188,7 @@ class PluginsPage(QWidget):
             v_label.setStyleSheet("color:#777; padding-left:8px;")
             top_row.addWidget(v_label)
         if state.in_tree:
-            in_tree = self.InTreeBadge("[ in-tree ]")
+            in_tree = self.InTreeBadge("[ Built-in ]")
             in_tree.setStyleSheet("color:#777; padding-left:8px;")
             top_row.addWidget(in_tree)
         elif state.source:
@@ -194,7 +217,17 @@ class PluginsPage(QWidget):
             err.setWordWrap(True)
             bottom_row.addWidget(err, stretch=1)
         bottom_row.addStretch(1)
-        if not state.in_tree:
+        if state.in_tree:
+            pass  # built-in plugins: no per-row actions
+        elif state.status == "pending_restart":
+            remove_btn = QPushButton("Remove pending install")
+            remove_btn.clicked.connect(
+                lambda _=False, pid=state.plugin_id:
+                self.uninstall_clicked.emit(pid)
+            )
+            bottom_row.addWidget(remove_btn)
+        else:
+            # existing Exclude + Uninstall buttons
             exclude_btn = QPushButton(
                 "Include on this wallet" if state.status == "excluded"
                 else "Exclude on this wallet"
