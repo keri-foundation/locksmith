@@ -214,6 +214,14 @@ class PluginsPage(QWidget):
         for state in states:
             self._list_layout.addWidget(self._make_row(state))
 
+        # Size the scroll area to its content. QScrollArea's default sizeHint
+        # is small (~150px) regardless of inner content, so Echo App scrolled
+        # out of view when more than one row was present. Cap at 600px to
+        # preserve scrolling when many plugins are installed.
+        self._list_container.adjustSize()
+        content_height = self._list_container.sizeHint().height()
+        self._list_scroll.setFixedHeight(min(content_height + 4, 600))
+
     def _make_row(self, state) -> QWidget:
         card = QFrame()
         card.setObjectName("PluginRowCard")
