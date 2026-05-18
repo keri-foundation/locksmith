@@ -11,7 +11,9 @@ from unittest.mock import MagicMock
 import pytest
 from PySide6.QtTest import QTest
 
+from locksmith.plugins.installer import SourceDescriptor
 from locksmith.plugins.manager import PluginState
+from locksmith.ui.plugins.install_panel import InstallPanel
 from locksmith.ui.plugins.page import PluginsPage
 
 
@@ -89,166 +91,168 @@ def test_empty_state(qapp):
     page.grab().save(str(SCREENSHOT_DIR / "plugins_page_empty.png"))
 
 
-def test_install_button_emits_signal(qapp, fake_app_with_states):
-    page = PluginsPage(fake_app_with_states)
-    page.show()
-    QTest.qWait(250)
-    qapp.processEvents()
+_FIXTURE_TRUST = {
+    "manifest_snapshot": {
+        "plugin_id": "dev_control",
+        "name": "Dev Control Harness",
+        "version": "0.1.0",
+        "description": "JSON-over-unix-socket harness for driving the live UI",
+        "author": "Joseph Hunsaker",
+        "capabilities": ["app.shortcut", "app.service", "window.full_access",
+                          "fs.write", "net.listen"],
+        "capabilities_detail": {
+            "fs.write": "Writes screenshot PNGs",
+            "net.listen": "Unix socket at $XDG_RUNTIME_DIR/...",
+        },
+    },
+    "source": {"type": "github", "user_repo": "acme/dev-control", "ref": None},
+    "commit": "a3f9c1dabe7c0f5e8b7a2b9d0c4e1f2a3b4c5d6e",
+}
 
+
+def test_install_panel_starts_in_source_mode(qapp):
+    panel = InstallPanel()
+    panel.show()
+    QTest.qWait(150)
+    qapp.processEvents()
+    assert panel.github_radio.isChecked()
+    assert not panel.fetch_button.isEnabled()
+
+
+def test_install_panel_github_validation(qapp):
+    panel = InstallPanel()
+    panel.show()
+    QTest.qWait(150)
+    panel.user_repo_input.setText("bad format")
+    qapp.processEvents()
+    assert not panel.fetch_button.isEnabled()
+    panel.user_repo_input.setText("acme/echo")
+    qapp.processEvents()
+    assert panel.fetch_button.isEnabled()
+
+
+def test_install_panel_fetch_emits_source_descriptor(qapp):
+    panel = InstallPanel()
+    panel.show()
+    QTest.qWait(150)
+    captured = {}
+    panel.source_chosen.connect(lambda src: captured.update(src=src))
+    panel.user_repo_input.setText("acme/echo")
+    panel.ref_input.setText("main")
+    qapp.processEvents()
+    panel.fetch_button.click()
+    qapp.processEvents()
+    assert captured["src"] == SourceDescriptor(type="github", user_repo="acme/echo", ref="main")
+
+
+def test_install_panel_trust_mode_populates(qapp):
+    panel = InstallPanel()
+    panel.show()
+    QTest.qWait(150)
+    panel.set_trust_mode(**_FIXTURE_TRUST)
+    qapp.processEvents()
+    QTest.qWait(150)
+    assert "Dev Control Harness" in panel.trust_headline.text()
+    assert "acme/dev-control" in panel.trust_source_line.text()
+    assert "a3f9c1d" in panel.trust_source_line.text()
+    text = panel.trust_capability_block.toPlainText()
+    for needle in ("keyboard shortcuts", "background services",
+                   "full main window", "write", "listening socket"):
+        assert needle in text.lower(), f"missing capability copy: {needle}"
+    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    panel.grab().save(str(SCREENSHOT_DIR / "install_panel_trust.png"))
+
+
+def test_install_panel_trust_emits_with_plugin_id(qapp):
+    panel = InstallPanel()
+    panel.show()
+    QTest.qWait(150)
+    panel.set_trust_mode(**_FIXTURE_TRUST)
+    qapp.processEvents()
+    fired = {}
+    panel.trusted.connect(lambda pid: fired.update(pid=pid))
+    panel.trust_accept_button.click()
+    qapp.processEvents()
+    assert fired["pid"] == "dev_control"
+
+
+def test_install_panel_cancel_emits(qapp):
+    panel = InstallPanel()
+    panel.show()
+    QTest.qWait(150)
     fired = {"count": 0}
-    page.install_clicked.connect(lambda: fired.update(count=fired["count"] + 1))
-    page._install_button.click()
+    panel.cancelled.connect(lambda: fired.update(count=fired["count"] + 1))
+    panel.cancel_button.click()
     qapp.processEvents()
     assert fired["count"] == 1
 
 
-from locksmith.plugins.installer import SourceDescriptor
-from locksmith.ui.plugins.install_dialog import InstallSourceDialog
-
-
-def test_install_dialog_default_state(qapp):
-    dlg = InstallSourceDialog()
-    dlg.show()
-    QTest.qWait(200)
-    qapp.processEvents()
-    # GitHub radio selected by default.
-    assert dlg.github_radio.isChecked()
-    assert not dlg.local_radio.isChecked()
-    # Fetch button starts disabled (no input yet).
-    assert not dlg.fetch_button.isEnabled()
-    dlg.grab().save(str(SCREENSHOT_DIR / "install_dialog_default.png"))
-
-
-def test_github_userrepo_validation(qapp):
-    dlg = InstallSourceDialog()
-    dlg.show()
+def test_install_panel_inline_error_renders(qapp):
+    panel = InstallPanel()
+    panel.show()
     QTest.qWait(150)
-
-    # Bad format.
-    dlg.user_repo_input.setText("not a valid format")
+    panel.set_inline_error("plugin 'echo_app' is already installed (from local). Uninstall it first.")
     qapp.processEvents()
-    assert not dlg.fetch_button.isEnabled()
-    err = dlg.error_label.text().lower()
-    assert "must be" in err or "format" in err
-
-    # Good format.
-    dlg.user_repo_input.setText("acme/echo")
-    qapp.processEvents()
-    assert dlg.fetch_button.isEnabled()
-    assert dlg.error_label.text() == ""
+    assert "already installed" in panel.error_label.text()
 
 
-def test_local_path_validation(qapp, tmp_path):
-    dlg = InstallSourceDialog()
-    dlg.show()
-    QTest.qWait(150)
-    dlg.local_radio.setChecked(True)
-    qapp.processEvents()
-
-    # Path doesn't exist.
-    dlg.local_path_input.setText(str(tmp_path / "nope"))
-    qapp.processEvents()
-    assert not dlg.fetch_button.isEnabled()
-
-    # Path exists but no manifest.
-    (tmp_path / "no-manifest").mkdir()
-    dlg.local_path_input.setText(str(tmp_path / "no-manifest"))
-    qapp.processEvents()
-    assert not dlg.fetch_button.isEnabled()
-    assert "locksmith-plugin.toml" in dlg.error_label.text()
-
-    # Path with manifest.
-    plug = tmp_path / "with-manifest"
-    plug.mkdir()
-    (plug / "locksmith-plugin.toml").write_text("placeholder\n")
-    dlg.local_path_input.setText(str(plug))
-    qapp.processEvents()
-    assert dlg.fetch_button.isEnabled()
-
-
-def test_fetch_emits_source_descriptor(qapp):
-    dlg = InstallSourceDialog()
-    dlg.show()
-    QTest.qWait(150)
-    captured = {}
-    dlg.source_chosen.connect(lambda src: captured.update(src=src))
-
-    dlg.user_repo_input.setText("acme/echo")
-    dlg.ref_input.setText("main")
-    qapp.processEvents()
-    dlg.fetch_button.click()
-    qapp.processEvents()
-
-    assert captured["src"] == SourceDescriptor(
-        type="github", user_repo="acme/echo", ref="main",
-    )
-
-
-from locksmith.ui.plugins.trust_dialog import PluginTrustDialog
-
-
-_FIXTURE_PARSED = {
-    "plugin_id": "dev_control",
-    "name": "Dev Control Harness",
-    "version": "0.1.0",
-    "description": "JSON-over-unix-socket harness for driving the live UI",
-    "author": "Joseph Hunsaker",
-    "capabilities": ["app.shortcut", "app.service", "window.full_access",
-                     "fs.write", "net.listen"],
-    "capabilities_detail": {
-        "fs.write": "Writes screenshot PNGs",
-        "net.listen": "Unix socket at $XDG_RUNTIME_DIR/...",
-    },
-}
-_FIXTURE_SOURCE = {"type": "github", "user_repo": "acme/dev-control", "ref": None}
-_FIXTURE_COMMIT = "a3f9c1dabe7c0f5e8b7a2b9d0c4e1f2a3b4c5d6e"
-
-
-def test_trust_dialog_populates_from_manifest(qapp):
-    dlg = PluginTrustDialog(
-        manifest_snapshot=_FIXTURE_PARSED,
-        source=_FIXTURE_SOURCE,
-        commit=_FIXTURE_COMMIT,
-    )
-    dlg.show()
+def test_plugins_page_opens_panel_on_install_click(qapp, fake_app_with_states):
+    page = PluginsPage(fake_app_with_states)
+    page.resize(900, 700)
+    page.show()
     QTest.qWait(250)
     qapp.processEvents()
-    assert "Dev Control Harness" in dlg.headline.text()
-    assert "0.1.0" in dlg.headline.text()
-    assert "acme/dev-control" in dlg.source_line.text()
-    assert "a3f9c1d" in dlg.source_line.text()
-    bullet_text = dlg.capability_block.toPlainText() if hasattr(dlg.capability_block, "toPlainText") else dlg.capability_block.text()
-    for cap in ("keyboard shortcuts", "background services",
-                "full main window", "write", "listening socket"):
-        assert cap in bullet_text.lower(), f"missing capability copy: {cap}"
-    dlg.grab().save(str(SCREENSHOT_DIR / "trust_dialog_populated.png"))
-
-
-def test_trust_dialog_accept_emits(qapp):
-    dlg = PluginTrustDialog(
-        manifest_snapshot=_FIXTURE_PARSED,
-        source=_FIXTURE_SOURCE,
-        commit=_FIXTURE_COMMIT,
-    )
-    fired = {"accepted": False}
-    dlg.trusted.connect(lambda: fired.update(accepted=True))
-    dlg.show()
-    QTest.qWait(150)
-    dlg.accept_button.click()
+    assert not page._install_panel.isVisible()
+    page._install_button.click()
     qapp.processEvents()
-    assert fired["accepted"]
-
-
-def test_trust_dialog_cancel_does_not_emit(qapp):
-    dlg = PluginTrustDialog(
-        manifest_snapshot=_FIXTURE_PARSED,
-        source=_FIXTURE_SOURCE,
-        commit=_FIXTURE_COMMIT,
-    )
-    fired = {"accepted": False}
-    dlg.trusted.connect(lambda: fired.update(accepted=True))
-    dlg.show()
     QTest.qWait(150)
-    dlg.cancel_button.click()
+    assert page._install_panel.isVisible()
+    # Install button hides when the panel is open.
+    assert not page._install_button.isVisible()
+    page.grab().save(str(SCREENSHOT_DIR / "plugins_page_install_panel_open.png"))
+
+
+def test_plugins_page_emits_install_requested(qapp, fake_app_with_states):
+    page = PluginsPage(fake_app_with_states)
+    page.show()
+    QTest.qWait(200)
     qapp.processEvents()
-    assert not fired["accepted"]
+    page._install_button.click()
+    qapp.processEvents()
+    panel = page._install_panel
+    panel.user_repo_input.setText("acme/echo")
+    qapp.processEvents()
+    fired = {}
+    page.install_requested.connect(lambda src: fired.update(src=src))
+    panel.fetch_button.click()
+    qapp.processEvents()
+    assert fired["src"].user_repo == "acme/echo"
+
+
+def test_plugins_page_show_trust_step(qapp, fake_app_with_states):
+    page = PluginsPage(fake_app_with_states)
+    page.show()
+    QTest.qWait(200)
+    page._install_button.click()
+    qapp.processEvents()
+    QTest.qWait(150)
+    page.show_trust_step(**_FIXTURE_TRUST)
+    qapp.processEvents()
+    QTest.qWait(150)
+    # Now the panel should be in trust mode.
+    text = page._install_panel.trust_capability_block.toPlainText().lower()
+    assert "keyboard shortcuts" in text
+    page.grab().save(str(SCREENSHOT_DIR / "plugins_page_trust_step.png"))
+
+
+def test_plugins_page_collapse_install_panel(qapp, fake_app_with_states):
+    page = PluginsPage(fake_app_with_states)
+    page.show()
+    QTest.qWait(200)
+    page._install_button.click()
+    qapp.processEvents()
+    assert page._install_panel.isVisible()
+    page.collapse_install_panel()
+    qapp.processEvents()
+    assert not page._install_panel.isVisible()
+    assert page._install_button.isVisible()
