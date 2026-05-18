@@ -17,8 +17,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QPushButton,
-    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -27,6 +25,7 @@ from keri import help
 
 from locksmith.plugins.installer import SourceDescriptor
 from locksmith.ui.plugins.install_panel import InstallPanel
+from locksmith.ui.toolkit.widgets import LocksmithInvertedButton
 
 logger = help.ogler.getLogger(__name__)
 
@@ -271,7 +270,7 @@ class PluginsPage(QWidget):
         if state.in_tree:
             pass  # built-in plugins: no per-row actions
         elif state.status == "pending_restart":
-            remove_btn = QPushButton("Remove pending install")
+            remove_btn = LocksmithInvertedButton("Remove pending install")
             remove_btn.clicked.connect(
                 lambda _=False, pid=state.plugin_id:
                 self.uninstall_clicked.emit(pid)
@@ -279,7 +278,7 @@ class PluginsPage(QWidget):
             bottom_row.addWidget(remove_btn)
         else:
             # existing Exclude + Uninstall buttons
-            exclude_btn = QPushButton(
+            exclude_btn = LocksmithInvertedButton(
                 "Include on this wallet" if state.status == "excluded"
                 else "Exclude on this wallet"
             )
@@ -288,7 +287,7 @@ class PluginsPage(QWidget):
                 self.exclude_toggled.emit(pid, not was)
             )
             bottom_row.addWidget(exclude_btn)
-            uninstall_btn = QPushButton("Uninstall")
+            uninstall_btn = LocksmithInvertedButton("Uninstall")
             uninstall_btn.clicked.connect(
                 lambda _=False, pid=state.plugin_id:
                 self.uninstall_clicked.emit(pid)
