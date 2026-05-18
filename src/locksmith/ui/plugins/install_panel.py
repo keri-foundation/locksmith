@@ -377,7 +377,9 @@ class InstallPanel(QWidget):
         trust_cancel = LocksmithInvertedButton("Cancel")
         trust_cancel.clicked.connect(self._on_cancel)
         button_row.addWidget(trust_cancel)
-        self.trust_accept_button = LocksmithButton("Trust & install")
+        # Double-ampersand escapes Qt's mnemonic so the label renders as
+        # "Trust & install" instead of "Trust  install".
+        self.trust_accept_button = LocksmithButton("Trust && install")
         self.trust_accept_button.clicked.connect(self._on_trust_accept)
         button_row.addWidget(self.trust_accept_button)
         vbox.addLayout(button_row)
