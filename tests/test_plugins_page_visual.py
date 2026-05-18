@@ -449,3 +449,41 @@ def test_install_tile_shows_install_label(qapp, fake_app_with_states):
     label = page._install_button.findChild(QLabel, "plugins_install_tile_label")
     assert label is not None
     assert "+ Install plugin" in label.text()
+
+
+# ---------------------------------------------------------------------------
+# Polish #6: back button + toggle + sub-page restore
+# ---------------------------------------------------------------------------
+
+def test_plugins_page_back_button_present(qapp, fake_app_with_states):
+    page = PluginsPage(fake_app_with_states)
+    page.show()
+    QTest.qWait(200)
+    qapp.processEvents()
+    assert page._back_button is not None
+
+
+def test_plugins_page_back_emits_signal(qapp, fake_app_with_states):
+    page = PluginsPage(fake_app_with_states)
+    page.show()
+    QTest.qWait(200)
+    qapp.processEvents()
+    fired = {"count": 0}
+    page.back_clicked.connect(lambda: fired.update(count=fired["count"] + 1))
+    page._back_button.click()
+    qapp.processEvents()
+    assert fired["count"] == 1
+
+
+def test_plugins_page_set_back_visible_toggles(qapp, fake_app_with_states):
+    page = PluginsPage(fake_app_with_states)
+    page.show()
+    QTest.qWait(200)
+    # set_back_visible(False) calls set_hidden(True) which sets opacity to 0
+    # and disables the button — assert the disabled state.
+    page.set_back_visible(False)
+    qapp.processEvents()
+    assert not page._back_button.isEnabled()
+    page.set_back_visible(True)
+    qapp.processEvents()
+    assert page._back_button.isEnabled()

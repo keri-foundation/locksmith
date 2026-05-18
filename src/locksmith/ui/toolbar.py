@@ -180,6 +180,11 @@ class LocksmithToolbar(QToolBar):
         if hasattr(self, 'vaults_button'):
             self.vaults_button.set_active(active)
 
+    def set_plugins_active(self, active: bool):
+        """Set the active state of the Plugins toolbar button."""
+        if hasattr(self, 'plugins_button'):
+            self.plugins_button.set_active(active)
+
     def update_for_config(self, config: dict):
         """
         Update toolbar buttons based on configuration from current page.
