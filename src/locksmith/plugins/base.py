@@ -11,10 +11,6 @@ Three base classes:
 
 A plugin can inherit one, the other, or both. PluginManager dispatches
 hooks based on isinstance() checks against AppPlugin / VaultPlugin.
-
-``PluginBase`` is kept as a deprecated alias for VaultPlugin so existing
-in-tree imports continue to resolve while Task 3 migrates them. Remove
-the alias once kerifoundation has been migrated.
 """
 from __future__ import annotations
 
@@ -158,9 +154,6 @@ class VaultPlugin(PluginCore):
         """
         pass
 
-
-# Backward-compat alias. Remove after Task 3 (kerifoundation migration).
-PluginBase = VaultPlugin
 
 
 # Existing capability mixins — keep their shape; they now apply only to VaultPlugin.
