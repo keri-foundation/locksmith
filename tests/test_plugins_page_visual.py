@@ -63,11 +63,12 @@ def test_page_renders_all_states(qapp, fake_app_with_states):
     assert "Echo App" in rendered_names
     assert "Future Plugin" in rendered_names
 
-    # In-tree badge present on kerifoundation only.
+    # Built-in badge present on kerifoundation only.
     in_tree_labels = [
         w for w in page.findChildren(type(page).InTreeBadge) if w.isVisible()
     ]
     assert len(in_tree_labels) == 1
+    assert in_tree_labels[0].text() == "[ Built-in ]"
 
     # Status badge text correct.
     statuses = [b.text() for b in page.findChildren(type(page).StatusBadge)]
@@ -256,3 +257,92 @@ def test_plugins_page_collapse_install_panel(qapp, fake_app_with_states):
     qapp.processEvents()
     assert not page._install_panel.isVisible()
     assert page._install_button.isVisible()
+
+
+def test_pending_install_appears_when_disk_has_plugin_not_in_manager(qapp, tmp_path, monkeypatch):
+    """After install, the page surfaces the new plugin even before restart."""
+    from locksmith.plugins import storage
+    from unittest.mock import MagicMock
+    monkeypatch.setattr(storage, "_user_home", lambda: tmp_path)
+    # Seed an installed plugin on disk that the manager hasn't loaded.
+    storage.write_index({
+        "format": 1,
+        "plugins": [{
+            "plugin_id": "echo_app",
+            "source": {"type": "local", "path": "/x"},
+            "commit": "local:2026-05-18T00:00:00",
+            "installed_at": "2026-05-18T00:00:00Z",
+            "manifest_snapshot": {
+                "plugin_id": "echo_app",
+                "name": "Echo App",
+                "version": "0.1.0",
+                "description": "Test fixture",
+            },
+        }],
+    })
+    app = MagicMock()
+    app.plugin_manager.all_states.return_value = []  # nothing loaded in-memory
+    page = PluginsPage(app)
+    page.resize(900, 700)
+    page.show()
+    QTest.qWait(250)
+    qapp.processEvents()
+    names = [w.text() for w in page.findChildren(type(page).PluginNameLabel)]
+    assert "Echo App" in names
+    statuses = [b.text() for b in page.findChildren(type(page).StatusBadge)]
+    assert any("Pending restart" in s for s in statuses)
+
+
+def test_pending_row_has_only_remove_button(qapp, tmp_path, monkeypatch):
+    from locksmith.plugins import storage
+    from unittest.mock import MagicMock
+    from PySide6.QtWidgets import QPushButton
+    monkeypatch.setattr(storage, "_user_home", lambda: tmp_path)
+    storage.write_index({
+        "format": 1,
+        "plugins": [{
+            "plugin_id": "echo_app",
+            "source": {"type": "local", "path": "/x"},
+            "manifest_snapshot": {"plugin_id": "echo_app", "name": "Echo App",
+                                  "version": "0.1.0", "description": "fixture"},
+        }],
+    })
+    app = MagicMock()
+    app.plugin_manager.all_states.return_value = []
+    page = PluginsPage(app)
+    page.show()
+    QTest.qWait(200)
+    qapp.processEvents()
+    button_texts = [b.text() for b in page.findChildren(QPushButton)
+                    if b.isVisible() and b.objectName() != "plugins_install_button"]
+    assert "Remove pending install" in button_texts
+    assert "Uninstall" not in button_texts
+    assert all("Exclude" not in t and "Include" not in t for t in button_texts)
+
+
+def test_pending_row_emits_uninstall_signal(qapp, tmp_path, monkeypatch):
+    from locksmith.plugins import storage
+    from unittest.mock import MagicMock
+    from PySide6.QtWidgets import QPushButton
+    monkeypatch.setattr(storage, "_user_home", lambda: tmp_path)
+    storage.write_index({
+        "format": 1,
+        "plugins": [{
+            "plugin_id": "echo_app",
+            "source": {"type": "local", "path": "/x"},
+            "manifest_snapshot": {"plugin_id": "echo_app", "name": "Echo App",
+                                  "version": "0.1.0", "description": "fixture"},
+        }],
+    })
+    app = MagicMock()
+    app.plugin_manager.all_states.return_value = []
+    page = PluginsPage(app)
+    page.show()
+    QTest.qWait(200)
+    captured = {}
+    page.uninstall_clicked.connect(lambda pid: captured.update(pid=pid))
+    remove_btn = next(b for b in page.findChildren(QPushButton)
+                      if b.text() == "Remove pending install")
+    remove_btn.click()
+    qapp.processEvents()
+    assert captured["pid"] == "echo_app"
