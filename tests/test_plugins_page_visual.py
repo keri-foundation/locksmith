@@ -182,3 +182,73 @@ def test_fetch_emits_source_descriptor(qapp):
     assert captured["src"] == SourceDescriptor(
         type="github", user_repo="acme/echo", ref="main",
     )
+
+
+from locksmith.ui.plugins.trust_dialog import PluginTrustDialog
+
+
+_FIXTURE_PARSED = {
+    "plugin_id": "dev_control",
+    "name": "Dev Control Harness",
+    "version": "0.1.0",
+    "description": "JSON-over-unix-socket harness for driving the live UI",
+    "author": "Joseph Hunsaker",
+    "capabilities": ["app.shortcut", "app.service", "window.full_access",
+                     "fs.write", "net.listen"],
+    "capabilities_detail": {
+        "fs.write": "Writes screenshot PNGs",
+        "net.listen": "Unix socket at $XDG_RUNTIME_DIR/...",
+    },
+}
+_FIXTURE_SOURCE = {"type": "github", "user_repo": "acme/dev-control", "ref": None}
+_FIXTURE_COMMIT = "a3f9c1dabe7c0f5e8b7a2b9d0c4e1f2a3b4c5d6e"
+
+
+def test_trust_dialog_populates_from_manifest(qapp):
+    dlg = PluginTrustDialog(
+        manifest_snapshot=_FIXTURE_PARSED,
+        source=_FIXTURE_SOURCE,
+        commit=_FIXTURE_COMMIT,
+    )
+    dlg.show()
+    QTest.qWait(250)
+    qapp.processEvents()
+    assert "Dev Control Harness" in dlg.headline.text()
+    assert "0.1.0" in dlg.headline.text()
+    assert "acme/dev-control" in dlg.source_line.text()
+    assert "a3f9c1d" in dlg.source_line.text()
+    bullet_text = dlg.capability_block.toPlainText() if hasattr(dlg.capability_block, "toPlainText") else dlg.capability_block.text()
+    for cap in ("keyboard shortcuts", "background services",
+                "full main window", "write", "listening socket"):
+        assert cap in bullet_text.lower(), f"missing capability copy: {cap}"
+    dlg.grab().save(str(SCREENSHOT_DIR / "trust_dialog_populated.png"))
+
+
+def test_trust_dialog_accept_emits(qapp):
+    dlg = PluginTrustDialog(
+        manifest_snapshot=_FIXTURE_PARSED,
+        source=_FIXTURE_SOURCE,
+        commit=_FIXTURE_COMMIT,
+    )
+    fired = {"accepted": False}
+    dlg.trusted.connect(lambda: fired.update(accepted=True))
+    dlg.show()
+    QTest.qWait(150)
+    dlg.accept_button.click()
+    qapp.processEvents()
+    assert fired["accepted"]
+
+
+def test_trust_dialog_cancel_does_not_emit(qapp):
+    dlg = PluginTrustDialog(
+        manifest_snapshot=_FIXTURE_PARSED,
+        source=_FIXTURE_SOURCE,
+        commit=_FIXTURE_COMMIT,
+    )
+    fired = {"accepted": False}
+    dlg.trusted.connect(lambda: fired.update(accepted=True))
+    dlg.show()
+    QTest.qWait(150)
+    dlg.cancel_button.click()
+    qapp.processEvents()
+    assert not fired["accepted"]
