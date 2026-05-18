@@ -31,6 +31,26 @@ from locksmith.ui.plugins.install_panel import InstallPanel
 logger = help.ogler.getLogger(__name__)
 
 
+class _ClickableFrame(QFrame):
+    """A QFrame that emits a ``clicked`` signal on left mouse-button press.
+
+    Also exposes a ``click()`` helper that emits the signal directly, mirroring
+    the ``QAbstractButton.click()`` API so that test code can drive the tile
+    with the same pattern as a QPushButton.
+    """
+
+    clicked = Signal()
+
+    def mousePressEvent(self, event):  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+    def click(self) -> None:
+        """Emit ``clicked`` — mirrors QPushButton.click() for test ergonomics."""
+        self.clicked.emit()
+
+
 _STATUS_COPY = {
     "loaded":           ("● Loaded",                "#1c8a3a"),
     "excluded":         ("○ Excluded (this wallet)", "#777"),
@@ -100,9 +120,12 @@ class PluginsPage(QWidget):
             "QScrollArea > QWidget > QWidget { background: transparent; }"
         )
         self._list_container.setAutoFillBackground(False)
-        outer.addWidget(self._list_scroll, stretch=1)
+        # No stretch=1 — the scroll area sizes to its content; remaining space
+        # is absorbed by the explicit stretch we add below the panel.
+        outer.addWidget(self._list_scroll)
 
-        # Inline install panel (hidden by default)
+        # Inline install panel (hidden by default).  Sits below the list;
+        # when the tile is clicked the tile hides and this becomes visible.
         self._install_panel = InstallPanel()
         self._install_panel.setVisible(False)
         self._install_panel.cancelled.connect(self._on_panel_cancelled)
@@ -110,13 +133,44 @@ class PluginsPage(QWidget):
         self._install_panel.trusted.connect(self.install_trusted)
         outer.addWidget(self._install_panel)
 
-        button_row = QHBoxLayout()
-        button_row.addStretch(1)
-        self._install_button = QPushButton("+ Install plugin")
-        self._install_button.setObjectName("plugins_install_button")
+        # Dashed-border install tile — rendered as a sibling of the scroll area
+        # so it always appears immediately below the last plugin card.
+        self._install_button = self._make_install_tile()
         self._install_button.clicked.connect(self._on_install_button_clicked)
-        button_row.addWidget(self._install_button)
-        outer.addLayout(button_row)
+        outer.addWidget(self._install_button)
+
+        # Absorb remaining vertical space so the list + tile don't float.
+        outer.addStretch(1)
+
+    def _make_install_tile(self) -> _ClickableFrame:
+        """Return the dashed-border tile that replaces the old floating button."""
+        tile = _ClickableFrame()
+        tile.setObjectName("PluginInstallTile")
+        tile.setStyleSheet(
+            "QFrame#PluginInstallTile { "
+            "  border: 2px dashed #BBBBBB; "
+            "  border-radius: 6px; "
+            "  background: transparent; "
+            "  padding: 16px; "
+            "}"
+            "QFrame#PluginInstallTile:hover { "
+            "  border-color: #888888; "
+            "  background: #FAFAFA; "
+            "}"
+        )
+        tile.setCursor(Qt.CursorShape.PointingHandCursor)
+        tile.setMinimumHeight(64)
+
+        layout = QHBoxLayout(tile)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label = QLabel("+ Install plugin")
+        label.setStyleSheet(
+            "QLabel { color: #666666; font-size: 14px; font-weight: 500; "
+            "background: transparent; border: none; }"
+        )
+        label.setObjectName("plugins_install_tile_label")
+        layout.addWidget(label)
+        return tile
 
     def _refresh(self) -> None:
         while self._list_layout.count():
@@ -254,6 +308,9 @@ class PluginsPage(QWidget):
         self._install_panel.set_source_mode()
         self._install_panel.setVisible(True)
         self._install_button.setVisible(False)
+
+    # Alias so the tile's signal can connect to the same method
+    _on_install_tile_clicked = _on_install_button_clicked
 
     def _on_panel_cancelled(self) -> None:
         self._install_panel.setVisible(False)
