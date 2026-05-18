@@ -149,8 +149,8 @@ class LocksmithToolbar(QToolBar):
 
         # Plugins button with hover effect
         self.plugins_button = HoverIconButton(
-            icon_normal="assets/material-icons/schema.svg",
-            icon_hover="assets/material-icons/schema.svg",
+            icon_normal="assets/material-icons/extension.svg",
+            icon_hover="assets/material-icons/extension-hover.svg",
             tooltip="Plugins"
         )
         self.plugins_button.setObjectName("toolbar_plugins_button")
