@@ -507,29 +507,47 @@ class LocksmithWindow(QMainWindow):
 
     # ------------------- Plugin install/uninstall/exclude handlers ---
 
-    def _refresh_all_plugin_views(self, restart_required: bool = True) -> None:
-        """Refresh both the top-level PluginsPage and the vault sub-page PluginsContent."""
-        self.pages[Pages.PLUGINS]._refresh()
-        if restart_required:
-            self.pages[Pages.PLUGINS].set_restart_required(True)
+    def _refresh_all_plugin_views(self, restart_required: bool | None = True) -> None:
+        """Refresh both the top-level PluginsPage and the vault sub-page PluginsContent.
+
+        ``restart_required`` semantics:
+        - True  → turn the banner on.
+        - False → clear the banner.
+        - None  → leave the banner state alone (just re-render rows).
+        """
+        surfaces = [self.pages[Pages.PLUGINS]]
         vault_page = self.pages.get(Pages.VAULT)
         if vault_page is not None and hasattr(vault_page, "get_plugins_content"):
             content = vault_page.get_plugins_content()
             if content is not None:
-                content._refresh()
-                if restart_required:
-                    content.set_restart_required(True)
+                surfaces.append(content)
+        for surface in surfaces:
+            surface._refresh()
+            if restart_required is not None:
+                surface.set_restart_required(restart_required)
+
+    def _surface_for_signal(self):
+        """Return the PluginsPage / PluginsContent that emitted the current signal.
+
+        Falls back to the top-level page if the sender can't service the API
+        (e.g. tests calling these handlers directly with no signal context).
+        """
+        s = self.sender()
+        if s is not None and hasattr(s, "show_trust_step"):
+            return s
+        return self.pages[Pages.PLUGINS]
 
     def _handle_install_requested(self, source) -> None:
         from locksmith.plugins.installer import InstallError, PluginInstaller
+        surface = self._surface_for_signal()
         installer = PluginInstaller()
         try:
             record = installer.install(source)
         except InstallError as e:
             # Stay in source mode, render error inline. No popup.
-            self.pages[Pages.PLUGINS].show_install_error(str(e))
+            surface.show_install_error(str(e))
             return
-        self.pages[Pages.PLUGINS].show_trust_step(
+        surface.show_trust_step(
             manifest_snapshot=record["manifest_snapshot"],
             source=record["source"],
             commit=record["commit"],
@@ -540,7 +558,7 @@ class LocksmithWindow(QMainWindow):
     def _handle_install_trusted(self, plugin_id: str) -> None:
         logger.info("plugin.trust.accepted plugin_id=%s", plugin_id)
         self._pending_trust_install = None
-        self.pages[Pages.PLUGINS].collapse_install_panel()
+        self._surface_for_signal().collapse_install_panel()
         self._refresh_all_plugin_views(restart_required=True)
 
     def _handle_install_cancelled(self) -> None:
@@ -554,7 +572,12 @@ class LocksmithWindow(QMainWindow):
             except InstallError:
                 logger.exception("plugin.rollback_failed plugin_id=%s", pid)
             self._pending_trust_install = None
-        self._refresh_all_plugin_views(restart_required=True)
+            # Rollback restored on-disk state to match the running manager —
+            # no pending changes, clear the restart banner.
+            self._refresh_all_plugin_views(restart_required=False)
+        else:
+            # Source-mode cancel: nothing changed on disk, leave banner alone.
+            self._refresh_all_plugin_views(restart_required=None)
 
     def _handle_uninstall(self, plugin_id: str) -> None:
         from locksmith.plugins.installer import InstallError, PluginInstaller
