@@ -255,11 +255,18 @@ class VaultPage(BasePage):
         }
 
     def on_show(self, **params):
+        # Capture the sub-page to restore BEFORE any menu-reset side effects.
+        # nav_menu.pop_to_vault_menu() below triggers _show_page("identifiers")
+        # as part of resetting the menu's active state, which clobbers
+        # _current_page_key. Read it first so back-navigation from Plugins
+        # returns to the exact sub-page the user left.
+        restore_key = self._current_page_key or "identifiers"
+
         super().on_show(**params)
         self.vault_name = params.get('vault_name', 'Unknown Vault')
         logger.info(f"VaultPage showing for vault: {self.vault_name}")
 
-        # Reset nav menu to vault menu
+        # Reset nav menu to vault menu (side-effect: clobbers _current_page_key)
         self.nav_menu.pop_to_vault_menu()
 
         # Update nav menu with vault name
@@ -270,11 +277,8 @@ class VaultPage(BasePage):
             if hasattr(page, "set_vault_name"):
                 page.set_vault_name(self.vault_name)
 
-        # Restore the user's last sub-page rather than always defaulting to
-        # "identifiers". Falls back to "identifiers" only on first show /
-        # after vault open (when _current_page_key is None).
-        key = self._current_page_key or "identifiers"
-        self._show_page(key)
+        # Apply the captured restore key, overriding whatever pop_to_vault_menu set.
+        self._show_page(restore_key)
 
     def on_hide(self):
         super().on_hide()
