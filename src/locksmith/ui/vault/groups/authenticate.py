@@ -4,6 +4,7 @@ locksmith.ui.vault.groups.authenticate module
 
 Dialog for authenticating witnesses during group identifier rotation
 """
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QHBoxLayout
@@ -16,7 +17,10 @@ from locksmith.ui.toolkit.widgets import (
     LocksmithButton,
     LocksmithInvertedButton
 )
-from locksmith.ui.vault.shared.witness_auth_mixin import WitnessAuthenticationMixin
+from locksmith.ui.vault.shared.witness_auth_mixin import (
+    WitnessAuthenticationMixin,
+    witness_auth_dialog_height
+)
 
 logger = help.ogler.getLogger(__name__)
 
@@ -43,6 +47,7 @@ class GroupWitnessAuthenticationDialog(WitnessAuthenticationMixin, LocksmithDial
         self.witness_info = {}  # Maps witness_id -> witness record dict
         self.batch_groups = []  # List of (batch_label, [witness_ids]) for batch auth
         self.individual_witnesses = []  # List of witness_ids for individual auth
+        self._signals_connected = False
 
         # Look up witness information (aliases) from org contacts
         self._load_witness_info()
@@ -96,42 +101,28 @@ class GroupWitnessAuthenticationDialog(WitnessAuthenticationMixin, LocksmithDial
         )
 
         self.rotate_button.clicked.connect(self._on_rotate)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
-        # Calculate dialog height based on number of UI entries
-        # Base height for title, buttons, padding
-        base_height = 180
-        
-        # Height for individual witness entries (label + field + spacing)
-        individual_entry_height = 110
-        individual_height = len(self.individual_witnesses) * individual_entry_height
-        
-        # Height for batch entries (batch label + witness list + field + spacing)
-        batch_base_height = 100  # Base height for batch label and passcode field
-        batch_per_witness_height = 10  # Additional height per witness in the batch list
-        batch_height = sum(
-            batch_base_height + (len(batch_witness_ids) * batch_per_witness_height)
-            for _, batch_witness_ids in self.batch_groups
-        )
-        
-        dialog_height = base_height + individual_height + batch_height
-        # Cap at reasonable max height
-        dialog_height = min(dialog_height, 700)
-
-        self.setFixedSize(700, dialog_height)
+        self.setFixedSize(700, witness_auth_dialog_height(self.individual_witnesses, self.batch_groups))
 
         # Connect to vault signal bridge for doer events
         if hasattr(self.app, 'vault') and hasattr(self.app.vault, 'signals'):
             self.app.vault.signals.doer_event.connect(self._on_doer_event)
+            self._signals_connected = True
 
         self.finished.connect(self._cleanup_signal_connection)
 
     def _cleanup_signal_connection(self):
         self._set_auth_submit_enabled(True)
+        if not self._signals_connected:
+            return
+
         if hasattr(self.app, 'vault') and hasattr(self.app.vault, 'signals'):
             try:
                 self.app.vault.signals.doer_event.disconnect(self._on_doer_event)
             except RuntimeError:
                 pass
+        self._signals_connected = False
 
     def closeEvent(self, event):
         self._cleanup_signal_connection()

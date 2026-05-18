@@ -4,7 +4,7 @@ locksmith.ui.vault.credentials.issued.issue module
 
 Dialog for issuing credentials
 """
-from PySide6.QtCore import QDateTime
+from PySide6.QtCore import Qt, QDateTime
 from PySide6.QtGui import QIcon, QIntValidator, QDoubleValidator
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QButtonGroup, QDateTimeEdit, QCheckBox
 from keri import help
@@ -20,7 +20,10 @@ from locksmith.ui.toolkit.widgets import (
 )
 from locksmith.ui.toolkit.widgets.buttons import LocksmithRadioButton
 from locksmith.ui.toolkit.widgets.fields import FloatingLabelComboBox, FloatingLabelLineEdit
-from locksmith.ui.vault.shared.witness_auth_mixin import WitnessAuthenticationPanel
+from locksmith.ui.vault.shared.witness_auth_mixin import (
+    WitnessAuthenticationPanel,
+    witness_auth_dialog_height
+)
 
 logger = help.ogler.getLogger(__name__)
 
@@ -205,6 +208,7 @@ class IssueCredentialDialog(LocksmithDialog):
         self.content_layout.addWidget(self._auth_panel)
 
         self._workflow_mode = "auth"
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.cancel_button.setText("Back")
         self.cancel_button.setEnabled(True)
         self.issue_button.setText("Authenticate")
@@ -214,16 +218,12 @@ class IssueCredentialDialog(LocksmithDialog):
 
     def _auth_step_height(self) -> int:
         if self._auth_panel is None:
-            return 420
+            return 440
 
-        base_height = 180
-        individual_height = len(self._auth_panel.individual_witnesses) * 110
-        batch_height = sum(
-            100 + len(batch_witness_ids) * 10
-            for _, batch_witness_ids in self._auth_panel.batch_groups
+        return witness_auth_dialog_height(
+            self._auth_panel.individual_witnesses,
+            self._auth_panel.batch_groups
         )
-
-        return min(max(base_height + individual_height + batch_height, 360), 700)
 
     def _show_issue_step(self):
         self.clear_error()

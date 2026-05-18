@@ -265,6 +265,7 @@ class IdentifierListPage(BaseListPage):
                 dialog = WitnessAuthenticationDialog(app=self.app,
                                                      hab=hab,
                                                      witness_ids=hab.kever.wits,
+                                                     auth_only=True,
                                                      parent=self.parent)
             else:
                 dialog = RotateIdentifierDialog(

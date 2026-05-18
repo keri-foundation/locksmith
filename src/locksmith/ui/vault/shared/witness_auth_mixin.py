@@ -7,13 +7,33 @@ Shared mixin for witness authentication dialogs.
 import re
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QFrame
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QFrame, QSizePolicy
 from keri import help
 
 from locksmith.ui import colors
 from locksmith.ui.toolkit.widgets.fields import FloatingLabelLineEdit
 
 logger = help.ogler.getLogger(__name__)
+
+
+def _compact_witness_display(alias: str, witness_id: str) -> str:
+    """Return a short witness label for auth rows."""
+    if alias and alias != f"{witness_id[:12]}...":
+        return alias if len(alias) <= 28 else f"{alias[:25]}..."
+
+    return f"{witness_id[:16]}..."
+
+
+def witness_auth_dialog_height(individual_witnesses: list, batch_groups: list) -> int:
+    """Return a dialog height that fits the common witness auth layout."""
+    base_height = 175
+    individual_height = len(individual_witnesses) * 95
+    batch_height = sum(
+        105 + len(batch_witness_ids) * 25
+        for _, batch_witness_ids in batch_groups
+    )
+
+    return min(max(base_height + individual_height + batch_height, 325), 700)
 
 
 class WitnessAuthenticationMixin:
@@ -86,9 +106,15 @@ class WitnessAuthenticationMixin:
         # First, add batch groups
         for batch_label, batch_witness_ids in self.batch_groups:
             batch_layout = QHBoxLayout()
+            batch_layout.setSpacing(15)
 
+            labels_widget = QWidget()
+            labels_widget.setMinimumWidth(0)
+            labels_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             labels_layout = QVBoxLayout()
+            labels_layout.setContentsMargins(0, 0, 0, 0)
             labels_layout.setSpacing(4)
+            labels_widget.setLayout(labels_layout)
 
             # Batch label
             batch_label_widget = QLabel(batch_label)
@@ -96,6 +122,8 @@ class WitnessAuthenticationMixin:
                 "font-size: 15px; color: #1A1C20; font-weight: 700;"
             )
             batch_label_widget.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            batch_label_widget.setMinimumWidth(0)
+            batch_label_widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             labels_layout.addWidget(batch_label_widget)
 
             # List each witness ID in the batch
@@ -103,14 +131,18 @@ class WitnessAuthenticationMixin:
                 witness_record = self.witness_info.get(wit_id, {})
                 alias = witness_record.get('alias', wit_id[:12] + '...')
 
-                wit_label = QLabel(f"• {alias} ({wit_id[:16]}...)")
+                wit_label = QLabel(f"• {_compact_witness_display(alias, wit_id)}")
                 wit_label.setStyleSheet(
                     "font-size: 12px; color: #666; font-weight: 400;"
                 )
+                wit_label.setToolTip(wit_id)
                 wit_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                wit_label.setWordWrap(False)
+                wit_label.setMinimumWidth(0)
+                wit_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
                 labels_layout.addWidget(wit_label)
 
-            batch_layout.addLayout(labels_layout)
+            batch_layout.addWidget(labels_widget, 1)
 
             # Add vertical divider
             v_divider = QFrame()
@@ -119,11 +151,10 @@ class WitnessAuthenticationMixin:
             v_divider.setStyleSheet("color: #D1D5DB;")
             batch_layout.addWidget(v_divider)
 
-            batch_layout.addSpacing(15)
-
             # Single passcode field for the batch
             passcode_field = FloatingLabelLineEdit(label_text="One Time Passcode")
-            passcode_field.setFixedWidth(220)
+            passcode_field.setFixedWidth(200)
+            passcode_field.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             batch_layout.addWidget(passcode_field, alignment=Qt.AlignmentFlag.AlignVCenter)
 
 
@@ -141,14 +172,23 @@ class WitnessAuthenticationMixin:
             alias = witness_record.get('alias', witness_id[:12] + '...')
 
             witness_layout = QHBoxLayout()
+            witness_layout.setSpacing(15)
 
+            labels_widget = QWidget()
+            labels_widget.setMinimumWidth(0)
+            labels_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             labels_layout = QVBoxLayout()
+            labels_layout.setContentsMargins(0, 0, 0, 0)
+            labels_widget.setLayout(labels_layout)
 
             witness_alias_label = QLabel(alias)
             witness_alias_label.setStyleSheet(
                 f"font-size: 15px; color: {colors.TEXT_DARK}; font-weight: 700;"
             )
             witness_alias_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            witness_alias_label.setWordWrap(True)
+            witness_alias_label.setMinimumWidth(0)
+            witness_alias_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             labels_layout.addWidget(witness_alias_label)
 
             witness_prefix_label = QLabel(witness_id)
@@ -156,9 +196,12 @@ class WitnessAuthenticationMixin:
                 f"font-size: 13px; color: {colors.TEXT_DARK}; font-weight: 400;"
             )
             witness_prefix_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            witness_prefix_label.setWordWrap(True)
+            witness_prefix_label.setMinimumWidth(0)
+            witness_prefix_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             labels_layout.addWidget(witness_prefix_label)
 
-            witness_layout.addLayout(labels_layout)
+            witness_layout.addWidget(labels_widget, 1)
 
             # Add vertical divider
             v_divider = QFrame()
@@ -167,11 +210,10 @@ class WitnessAuthenticationMixin:
             v_divider.setStyleSheet(f"color: {colors.BORDER};")  # Light gray color
             witness_layout.addWidget(v_divider)
 
-            witness_layout.addSpacing(15)
-
             # Passcode field
             passcode_field = FloatingLabelLineEdit(label_text="One Time Passcode")
             passcode_field.setFixedWidth(180)
+            passcode_field.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             witness_layout.addWidget(passcode_field)
 
             layout.addLayout(witness_layout)
@@ -241,7 +283,8 @@ class WitnessAuthenticationMixin:
             return False, [], "Invalid passcode format:\n" + "\n".join(error_messages)
 
         codes = self.get_authentication_codes()
-        logger.info(f"Authenticating {len([f for f in self.passcode_fields.values() if f.text().strip()])} witnesses")
+        passcode_count = len([field for field in self.passcode_fields.values() if field.text().strip()])
+        logger.info(f"Authenticating {len(codes)} witnesses with {passcode_count} passcode entries")
         return True, codes, ""
 
     def _on_rotate(self):
@@ -297,6 +340,8 @@ class WitnessAuthenticationPanel(WitnessAuthenticationMixin, QWidget):
         self._organize_witnesses_by_batch()
 
         self.setStyleSheet(f"background-color: {colors.BACKGROUND_CONTENT};")
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 20, 0, 0)
         layout.setSpacing(15)
