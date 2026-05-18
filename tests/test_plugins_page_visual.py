@@ -100,3 +100,85 @@ def test_install_button_emits_signal(qapp, fake_app_with_states):
     page._install_button.click()
     qapp.processEvents()
     assert fired["count"] == 1
+
+
+from locksmith.plugins.installer import SourceDescriptor
+from locksmith.ui.plugins.install_dialog import InstallSourceDialog
+
+
+def test_install_dialog_default_state(qapp):
+    dlg = InstallSourceDialog()
+    dlg.show()
+    QTest.qWait(200)
+    qapp.processEvents()
+    # GitHub radio selected by default.
+    assert dlg.github_radio.isChecked()
+    assert not dlg.local_radio.isChecked()
+    # Fetch button starts disabled (no input yet).
+    assert not dlg.fetch_button.isEnabled()
+    dlg.grab().save(str(SCREENSHOT_DIR / "install_dialog_default.png"))
+
+
+def test_github_userrepo_validation(qapp):
+    dlg = InstallSourceDialog()
+    dlg.show()
+    QTest.qWait(150)
+
+    # Bad format.
+    dlg.user_repo_input.setText("not a valid format")
+    qapp.processEvents()
+    assert not dlg.fetch_button.isEnabled()
+    err = dlg.error_label.text().lower()
+    assert "must be" in err or "format" in err
+
+    # Good format.
+    dlg.user_repo_input.setText("acme/echo")
+    qapp.processEvents()
+    assert dlg.fetch_button.isEnabled()
+    assert dlg.error_label.text() == ""
+
+
+def test_local_path_validation(qapp, tmp_path):
+    dlg = InstallSourceDialog()
+    dlg.show()
+    QTest.qWait(150)
+    dlg.local_radio.setChecked(True)
+    qapp.processEvents()
+
+    # Path doesn't exist.
+    dlg.local_path_input.setText(str(tmp_path / "nope"))
+    qapp.processEvents()
+    assert not dlg.fetch_button.isEnabled()
+
+    # Path exists but no manifest.
+    (tmp_path / "no-manifest").mkdir()
+    dlg.local_path_input.setText(str(tmp_path / "no-manifest"))
+    qapp.processEvents()
+    assert not dlg.fetch_button.isEnabled()
+    assert "locksmith-plugin.toml" in dlg.error_label.text()
+
+    # Path with manifest.
+    plug = tmp_path / "with-manifest"
+    plug.mkdir()
+    (plug / "locksmith-plugin.toml").write_text("placeholder\n")
+    dlg.local_path_input.setText(str(plug))
+    qapp.processEvents()
+    assert dlg.fetch_button.isEnabled()
+
+
+def test_fetch_emits_source_descriptor(qapp):
+    dlg = InstallSourceDialog()
+    dlg.show()
+    QTest.qWait(150)
+    captured = {}
+    dlg.source_chosen.connect(lambda src: captured.update(src=src))
+
+    dlg.user_repo_input.setText("acme/echo")
+    dlg.ref_input.setText("main")
+    qapp.processEvents()
+    dlg.fetch_button.click()
+    qapp.processEvents()
+
+    assert captured["src"] == SourceDescriptor(
+        type="github", user_repo="acme/echo", ref="main",
+    )
