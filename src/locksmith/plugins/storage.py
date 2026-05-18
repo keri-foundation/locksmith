@@ -15,6 +15,8 @@ file. Last writer wins; convergence on next restart.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import tempfile
@@ -49,6 +51,34 @@ def plugin_clone_dir(plugin_id: str) -> Path:
 def enable_list_path(keri_base: Path) -> Path:
     """Per-wallet plugin-enable.json under the given KERI base path."""
     return Path(keri_base) / "locksmith" / "plugin-enable.json"
+
+
+def index_lock_path() -> Path:
+    """Lockfile used to serialise concurrent read-modify-write operations on the index."""
+    return plugin_root() / "index.lock"
+
+
+@contextlib.contextmanager
+def index_write_lock():
+    """Acquire an exclusive file lock around index read-modify-write operations.
+
+    Uses ``fcntl.flock`` (POSIX, inherited by forked processes).  Safe for
+    concurrent threads **and** concurrent processes.  The lock is held only
+    for the duration of the read-modify-write cycle, not for the atomic
+    ``os.replace`` write itself (which is already atomic at the OS level).
+    """
+    plugin_root().mkdir(parents=True, exist_ok=True)
+    lock_path = index_lock_path()
+    # Open (or create) the lockfile.  Never hold a reference to its data.
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _default_index() -> dict[str, Any]:
