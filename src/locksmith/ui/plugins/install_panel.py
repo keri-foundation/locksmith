@@ -46,7 +46,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QPushButton,
     QSizePolicy,
     QStackedWidget,
     QTextBrowser,
@@ -55,7 +54,11 @@ from PySide6.QtWidgets import (
 )
 
 from locksmith.plugins.installer import SourceDescriptor
-from locksmith.ui.toolkit.widgets.buttons import LocksmithRadioButton
+from locksmith.ui.toolkit.widgets.buttons import (
+    LocksmithButton,
+    LocksmithInvertedButton,
+    LocksmithRadioButton,
+)
 
 
 _GITHUB_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -269,10 +272,10 @@ class InstallPanel(QWidget):
         # Button row
         button_row = QHBoxLayout()
         button_row.addStretch(1)
-        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button = LocksmithInvertedButton("Cancel")
         self.cancel_button.clicked.connect(self._on_cancel)
         button_row.addWidget(self.cancel_button)
-        self.fetch_button = QPushButton("Fetch")
+        self.fetch_button = LocksmithButton("Fetch")
         self.fetch_button.setEnabled(False)
         self.fetch_button.clicked.connect(self._on_fetch)
         button_row.addWidget(self.fetch_button)
@@ -371,10 +374,10 @@ class InstallPanel(QWidget):
         # 7. Button row.
         button_row = QHBoxLayout()
         button_row.addStretch(1)
-        trust_cancel = QPushButton("Cancel")
+        trust_cancel = LocksmithInvertedButton("Cancel")
         trust_cancel.clicked.connect(self._on_cancel)
         button_row.addWidget(trust_cancel)
-        self.trust_accept_button = QPushButton("Trust && install")
+        self.trust_accept_button = LocksmithButton("Trust & install")
         self.trust_accept_button.clicked.connect(self._on_trust_accept)
         button_row.addWidget(self.trust_accept_button)
         vbox.addLayout(button_row)
