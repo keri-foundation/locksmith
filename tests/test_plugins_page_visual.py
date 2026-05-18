@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 from PySide6.QtTest import QTest
 
+from PySide6.QtWidgets import QLabel
 from locksmith.plugins.installer import SourceDescriptor
 from locksmith.plugins.manager import PluginState
 from locksmith.ui.plugins.install_panel import InstallPanel
@@ -154,8 +155,12 @@ def test_install_panel_trust_mode_populates(qapp):
     qapp.processEvents()
     QTest.qWait(150)
     assert "Dev Control Harness" in panel.trust_headline.text()
-    assert "acme/dev-control" in panel.trust_source_line.text()
-    assert "a3f9c1d" in panel.trust_source_line.text()
+    # source value: "acme/dev-control" is 17 chars, well under the elide threshold —
+    # it should appear verbatim; full path is also in the tooltip.
+    assert "acme/dev-control" in panel.trust_source_value.text()
+    assert "acme/dev-control" in panel.trust_source_value.toolTip()
+    # commit[:7] rendered in commit value label
+    assert "a3f9c1d" in panel.trust_commit_value.text()
     text = panel.trust_capability_block.toPlainText()
     for needle in ("keyboard shortcuts", "background services",
                    "full main window", "write", "listening socket"):
@@ -346,3 +351,76 @@ def test_pending_row_emits_uninstall_signal(qapp, tmp_path, monkeypatch):
     remove_btn.click()
     qapp.processEvents()
     assert captured["pid"] == "echo_app"
+
+
+# ---------------------------------------------------------------------------
+# Polish #3: trust-step reorder + warning callout tests
+# ---------------------------------------------------------------------------
+
+def test_install_panel_trust_warning_renders_at_top(qapp):
+    panel = InstallPanel()
+    panel.show()
+    QTest.qWait(150)
+    panel.set_trust_mode(**_FIXTURE_TRUST)
+    qapp.processEvents()
+    QTest.qWait(150)
+    assert "full wallet permissions" in panel.trust_warning.text()
+    # Warning callout must be positioned above the headline in widget coordinates.
+    assert panel.trust_warning.y() < panel.trust_headline.y()
+
+
+def test_install_panel_trust_uses_requests_wording(qapp):
+    panel = InstallPanel()
+    panel.show()
+    QTest.qWait(150)
+    panel.set_trust_mode(**_FIXTURE_TRUST)
+    qapp.processEvents()
+    labels = [w.text() for w in panel.findChildren(QLabel) if w.isVisible()]
+    assert any("requests" in t.lower() for t in labels)
+    assert not any("declares it will" in t.lower() for t in labels)
+
+
+def test_install_panel_elides_long_source_path(qapp):
+    panel = InstallPanel()
+    panel.show()
+    QTest.qWait(150)
+    long_path = (
+        "/Users/very/deeply/nested/example/path/to/some/plugin/"
+        "that/should/elide-in-the-middle/echo-app"
+    )
+    panel.set_trust_mode(
+        manifest_snapshot={
+            "plugin_id": "x",
+            "name": "X",
+            "version": "0.0.1",
+            "description": "x",
+            "capabilities": [],
+        },
+        source={"type": "local", "path": long_path},
+        commit="local:2026-05-18T00:00:00",
+    )
+    qapp.processEvents()
+    visible = panel.trust_source_value.text()
+    assert "…" in visible
+    assert len(visible) < len(long_path)
+    assert panel.trust_source_value.toolTip() == long_path
+
+
+def test_install_panel_local_commit_renders_friendly(qapp):
+    panel = InstallPanel()
+    panel.show()
+    QTest.qWait(150)
+    panel.set_trust_mode(
+        manifest_snapshot={
+            "plugin_id": "x",
+            "name": "X",
+            "version": "0.0.1",
+            "description": "x",
+            "capabilities": [],
+        },
+        source={"type": "local", "path": "/some/path"},
+        commit="local:2026-05-18T12:34:56",
+    )
+    qapp.processEvents()
+    text = panel.trust_commit_value.text().lower()
+    assert "local" in text or "no commit" in text
