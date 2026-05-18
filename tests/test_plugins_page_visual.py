@@ -424,3 +424,28 @@ def test_install_panel_local_commit_renders_friendly(qapp):
     qapp.processEvents()
     text = panel.trust_commit_value.text().lower()
     assert "local" in text or "no commit" in text
+
+
+# ---------------------------------------------------------------------------
+# Polish #4: inline install tile + drop scroll stretch
+# ---------------------------------------------------------------------------
+
+def test_install_tile_uses_dashed_border_styling(qapp, fake_app_with_states):
+    page = PluginsPage(fake_app_with_states)
+    page.show()
+    QTest.qWait(200)
+    qapp.processEvents()
+    # The install button is now a clickable QFrame with a specific objectName.
+    assert page._install_button.objectName() == "PluginInstallTile"
+    # It carries a dashed-border stylesheet.
+    assert "dashed" in page._install_button.styleSheet().lower()
+
+
+def test_install_tile_shows_install_label(qapp, fake_app_with_states):
+    page = PluginsPage(fake_app_with_states)
+    page.show()
+    QTest.qWait(200)
+    qapp.processEvents()
+    label = page._install_button.findChild(QLabel, "plugins_install_tile_label")
+    assert label is not None
+    assert "+ Install plugin" in label.text()
