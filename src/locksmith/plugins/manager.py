@@ -36,6 +36,13 @@ class PluginManager:
     def discover_and_initialize(self, vault_page: VaultPage, nav_menu: VaultNavMenu) -> None:
         """Discover plugins via entry points, initialize them, and register pages/menus."""
         eps = importlib.metadata.entry_points(group=ENTRY_POINT_GROUP)
+        # TODO(Task 7, issue #50): VaultPlugin-only dispatch.
+        # This loop currently calls get_pages() and get_menu_entry() on every
+        # registered plugin. After the AppPlugin contract was introduced in
+        # Task 2 those calls are no longer safe for app-scoped plugins; Task 7
+        # rewrites this method with isinstance(plugin, VaultPlugin) guards.
+        # Until then this works in practice because only kerifoundation (a
+        # VaultPlugin) is registered.
         for ep in eps:
             try:
                 plugin_cls = ep.load()
