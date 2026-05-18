@@ -84,10 +84,11 @@ class VaultPlugin(PluginCore):
 
     @abstractmethod
     def on_vault_closed(self, vault: Any, *, clear: bool = False) -> None:
-        """Called when a vault is closed. Cleanup, close DB, etc.
+        """Called when a vault is closed.
 
-        When ``clear`` is True, plugin-local durable state tied to the
-        vault should also be deleted from disk.
+        Cleanup plugin_state, disconnect signals, close DB. When ``clear`` is
+        True, any plugin-local durable state tied to the vault should also be
+        deleted from disk (used when the user is deleting the vault entirely).
         """
 
     @abstractmethod
@@ -102,27 +103,59 @@ class VaultPlugin(PluginCore):
     def get_pages(self) -> dict[str, "QWidget"]:
         """page_key -> widget mappings to register in VaultPage."""
 
-    # Optional hooks — defaults are no-ops.
+    # Optional hooks — defaults are no-ops; override only when applicable.
 
     def get_doers(self) -> list["doing.Doer"]:
+        """Return background doers appended to vault.doers on open.
+
+        Default is an empty list. Override for plugins that need background
+        polling, heartbeats, or scheduled tasks.
+        """
         return []
 
     def prepare_vault_deletion(self, vault: Any) -> None:
+        """Called before a vault is permanently deleted.
+
+        Use this hook to revoke remote state while the local vault and habery
+        are still available. Raising aborts the deletion. Default is a no-op.
+        """
         pass
 
     def get_witness_batches(self, vault: Any, hab_pre: str) -> Any | None:
+        """Return batch data for witness authentication grouping.
+
+        Default returns None (no batch data). Override if the plugin manages
+        witness provisioning with batch groupings.
+        """
         return None
 
     def get_witness_state(self, vault: Any, wit_eid: str) -> Any | None:
+        """Return witness auth/reservation state for the given witness EID.
+
+        Default returns None. Override if the plugin manages witness state.
+        """
         return None
 
     def update_witness_state(self, vault: Any, wit_eid: str) -> None:
+        """Update witness state after rotation (typically: mark reserved=True).
+
+        Default is a no-op. Override if the plugin manages witness state.
+        """
         pass
 
     def update_witness_state_after_auth(self, vault: Any, wit_eid: str) -> None:
+        """Update witness state after authentication (typically: mark reserved=False).
+
+        Default is a no-op. Override if the plugin manages witness state.
+        """
         pass
 
     async def after_identifier_authenticated(self, vault: Any, hab: Any) -> None:
+        """Async hook called after an identifier's witnesses are authenticated.
+
+        Default is a no-op. Override to check keystate, spawn update dialogs,
+        send notifications, etc.
+        """
         pass
 
 
