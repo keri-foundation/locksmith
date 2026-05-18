@@ -69,10 +69,25 @@ class PluginInstaller:
                 )
 
             staging_dir.rename(final_dir)
-            staging_dir = None  # rename succeeded; don't clean up
+            staging_dir = None  # rename succeeded; don't clean up on finally
 
-            record = self._record_for(manifest, source, commit)
-            self._append_to_index(record)
+            try:
+                record = self._record_for(manifest, source, commit)
+                self._append_to_index(record)
+            except Exception:
+                # Roll back the rename so we don't leave an orphaned clone
+                # with no index entry. The plugin would otherwise be stuck
+                # in a half-installed state: next install attempt finds the
+                # clone dir present but `_check_not_already_installed` finds
+                # no index entry, leading to "plugin clone directory already
+                # exists".
+                logger.exception(
+                    "plugin.install.rollback plugin_id=%s",
+                    manifest.plugin_id,
+                )
+                shutil.rmtree(final_dir, ignore_errors=True)
+                raise
+
             logger.info(
                 "plugin.install.completed plugin_id=%s commit=%s",
                 manifest.plugin_id, commit,
