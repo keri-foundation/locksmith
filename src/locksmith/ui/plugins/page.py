@@ -106,23 +106,20 @@ class PluginsPage(QWidget):
         self._restart_banner.setVisible(False)
         outer.addWidget(self._restart_banner)
 
-        self._list_scroll = QScrollArea()
-        self._list_scroll.setWidgetResizable(True)
-        self._list_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        # Plugin list — flat QVBoxLayout, no QScrollArea. With <=5-ish
+        # plugins (the realistic case for Stage 1) the page has room. If
+        # we ever ship a marketplace with dozens of plugins, this gets
+        # wrapped in a QScrollArea then.
+        # _list_container / _list_scroll attribute names preserved for
+        # backwards-compat with existing tests.
         self._list_container = QWidget()
+        self._list_container.setStyleSheet("background: transparent;")
         self._list_layout = QVBoxLayout(self._list_container)
         self._list_layout.setSpacing(12)
         self._list_layout.setContentsMargins(0, 0, 0, 0)
         self._list_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self._list_scroll.setWidget(self._list_container)
-        self._list_scroll.setStyleSheet(
-            "QScrollArea { background: transparent; border: none; } "
-            "QScrollArea > QWidget > QWidget { background: transparent; }"
-        )
-        self._list_container.setAutoFillBackground(False)
-        # No stretch=1 — the scroll area sizes to its content; remaining space
-        # is absorbed by the explicit stretch we add below the panel.
-        outer.addWidget(self._list_scroll)
+        self._list_scroll = self._list_container  # alias for legacy tests
+        outer.addWidget(self._list_container)
 
         # Inline install panel (hidden by default).  Sits below the list;
         # when the tile is clicked the tile hides and this becomes visible.
@@ -213,14 +210,6 @@ class PluginsPage(QWidget):
 
         for state in states:
             self._list_layout.addWidget(self._make_row(state))
-
-        # Size the scroll area to its content. QScrollArea's default sizeHint
-        # is small (~150px) regardless of inner content, so Echo App scrolled
-        # out of view when more than one row was present. Cap at 600px to
-        # preserve scrolling when many plugins are installed.
-        self._list_container.adjustSize()
-        content_height = self._list_container.sizeHint().height()
-        self._list_scroll.setFixedHeight(min(content_height + 4, 600))
 
     def _make_row(self, state) -> QWidget:
         card = QFrame()
