@@ -452,44 +452,6 @@ def test_install_tile_shows_install_label(qapp, fake_app_with_states):
 
 
 # ---------------------------------------------------------------------------
-# Polish #6: back button + toggle + sub-page restore
-# ---------------------------------------------------------------------------
-
-def test_plugins_page_back_button_present(qapp, fake_app_with_states):
-    page = PluginsPage(fake_app_with_states)
-    page.show()
-    QTest.qWait(200)
-    qapp.processEvents()
-    assert page._back_button is not None
-
-
-def test_plugins_page_back_emits_signal(qapp, fake_app_with_states):
-    page = PluginsPage(fake_app_with_states)
-    page.show()
-    QTest.qWait(200)
-    qapp.processEvents()
-    fired = {"count": 0}
-    page.back_clicked.connect(lambda: fired.update(count=fired["count"] + 1))
-    page._back_button.click()
-    qapp.processEvents()
-    assert fired["count"] == 1
-
-
-def test_plugins_page_set_back_visible_toggles(qapp, fake_app_with_states):
-    page = PluginsPage(fake_app_with_states)
-    page.show()
-    QTest.qWait(200)
-    # set_back_visible(False) calls set_hidden(True) which sets opacity to 0
-    # and disables the button — assert the disabled state.
-    page.set_back_visible(False)
-    qapp.processEvents()
-    assert not page._back_button.isEnabled()
-    page.set_back_visible(True)
-    qapp.processEvents()
-    assert page._back_button.isEnabled()
-
-
-# ---------------------------------------------------------------------------
 # Polish #7: PluginsContent standalone + vault sub-page registration
 # ---------------------------------------------------------------------------
 
@@ -540,3 +502,60 @@ def test_vault_page_registers_plugins_sub_page():
     # The import used to register the sub-page must be at the module level.
     from locksmith.ui.plugins.page import PluginsContent  # noqa: F401 — confirms importable
     assert "PluginsContent" in dir(vp_mod)
+
+
+# ---------------------------------------------------------------------------
+# Polish #8: Restart now button in banner
+# ---------------------------------------------------------------------------
+
+def test_plugins_content_restart_button_in_banner(qapp, fake_app_with_states):
+    from locksmith.ui.plugins.page import PluginsContent
+    content = PluginsContent(fake_app_with_states)
+    content.show()
+    QTest.qWait(150)
+    assert hasattr(content, "_restart_button")
+    # The button is part of the banner; banner hidden by default.
+    assert not content._restart_banner.isVisible()
+
+
+def test_plugins_content_restart_banner_visible_after_set(qapp, fake_app_with_states):
+    from locksmith.ui.plugins.page import PluginsContent
+    content = PluginsContent(fake_app_with_states)
+    content.resize(900, 700)
+    content.show()
+    QTest.qWait(150)
+    content.set_restart_required(True)
+    qapp.processEvents()
+    QTest.qWait(100)
+    assert content._restart_banner.isVisible()
+    assert content._restart_button.isVisible()
+
+
+def test_plugins_content_restart_button_emits_signal(qapp, fake_app_with_states):
+    from locksmith.ui.plugins.page import PluginsContent
+    content = PluginsContent(fake_app_with_states)
+    content.resize(900, 700)
+    content.show()
+    QTest.qWait(150)
+    content.set_restart_required(True)
+    qapp.processEvents()
+    fired = {"count": 0}
+    content.restart_requested.connect(lambda: fired.update(count=fired["count"] + 1))
+    content._restart_button.click()
+    qapp.processEvents()
+    assert fired["count"] == 1
+
+
+def test_plugins_page_forwards_restart_requested(qapp, fake_app_with_states):
+    page = PluginsPage(fake_app_with_states)
+    page.resize(900, 700)
+    page.show()
+    QTest.qWait(150)
+    page._content.set_restart_required(True)
+    qapp.processEvents()
+    fired = {"count": 0}
+    page.restart_requested.connect(lambda: fired.update(count=fired["count"] + 1))
+    # Click the underlying content's restart button.
+    page._content._restart_button.click()
+    qapp.processEvents()
+    assert fired["count"] == 1

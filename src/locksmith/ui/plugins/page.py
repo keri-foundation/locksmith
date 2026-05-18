@@ -25,7 +25,7 @@ from keri import help
 
 from locksmith.plugins.installer import SourceDescriptor
 from locksmith.ui.plugins.install_panel import InstallPanel
-from locksmith.ui.toolkit.widgets import LocksmithInvertedButton
+from locksmith.ui.toolkit.widgets import LocksmithButton, LocksmithInvertedButton
 
 logger = help.ogler.getLogger(__name__)
 
@@ -72,6 +72,7 @@ class PluginsContent(QWidget):
     install_trusted = Signal(str)                  # user clicked Trust&Install, arg is plugin_id
     uninstall_clicked = Signal(str)                # plugin_id
     exclude_toggled = Signal(str, bool)            # plugin_id, now_excluded
+    restart_requested = Signal()                   # user clicked "Restart now"
 
     # Marker sub-classes used by tests to find specific widgets via findChildren().
     # Defined here so tests that construct PluginsContent directly can access them.
@@ -99,12 +100,30 @@ class PluginsContent(QWidget):
         outer.setContentsMargins(24, 24, 24, 24)
         outer.setSpacing(16)
 
-        self._restart_banner = QLabel(
-            "⚠ Restart required to finish applying changes."
-        )
+        # Restart-required banner (hidden by default). Layout:
+        #   [⚠ icon-text]                 [Restart now]
+        self._restart_banner = QFrame()
+        self._restart_banner.setObjectName("PluginsRestartBanner")
         self._restart_banner.setStyleSheet(
-            "background:#fff4d6; padding:8px 12px; border:1px solid #d6b15a;"
+            "QFrame#PluginsRestartBanner { "
+            "  background: #fff4d6; "
+            "  border: 1px solid #d6b15a; "
+            "  border-radius: 4px; "
+            "  padding: 4px; "
+            "}"
+            "QFrame#PluginsRestartBanner QLabel { "
+            "  background: transparent; border: none; color: #5A4500; "
+            "}"
         )
+        banner_row = QHBoxLayout(self._restart_banner)
+        banner_row.setContentsMargins(8, 4, 8, 4)
+        banner_row.setSpacing(12)
+        banner_label = QLabel("⚠ Restart required to finish applying changes.")
+        banner_label.setWordWrap(True)
+        banner_row.addWidget(banner_label, stretch=1)
+        self._restart_button = LocksmithButton("Restart now")
+        self._restart_button.clicked.connect(self.restart_requested.emit)
+        banner_row.addWidget(self._restart_button)
         self._restart_banner.setVisible(False)
         outer.addWidget(self._restart_banner)
 
@@ -357,7 +376,7 @@ class PluginsPage(QWidget):
     install_trusted = Signal(str)                  # user clicked Trust&Install, arg is plugin_id
     uninstall_clicked = Signal(str)                # plugin_id
     exclude_toggled = Signal(str, bool)            # plugin_id, now_excluded
-    back_clicked = Signal()                        # user clicked the in-page Back button
+    restart_requested = Signal()                   # user clicked "Restart now"
 
     # Re-export marker sub-classes so tests that reach in via
     # ``type(page).PluginNameLabel`` etc. continue to work.
@@ -380,13 +399,6 @@ class PluginsPage(QWidget):
         outer.setContentsMargins(24, 24, 24, 24)
         outer.setSpacing(16)
 
-        # Back button — only visible when navigation history exists.
-        # The window connects this to NavigationManager.go_back().
-        from locksmith.ui.toolkit.widgets.buttons import BackButton
-        self._back_button = BackButton(dark_mode=False)
-        self._back_button.clicked.connect(self.back_clicked.emit)
-        outer.addWidget(self._back_button)
-
         header = QLabel("Plugins")
         header.setStyleSheet("font-size: 22px; font-weight: 600;")
         outer.addWidget(header)
@@ -400,6 +412,7 @@ class PluginsPage(QWidget):
         self._content.install_trusted.connect(self.install_trusted.emit)
         self._content.uninstall_clicked.connect(self.uninstall_clicked.emit)
         self._content.exclude_toggled.connect(self.exclude_toggled.emit)
+        self._content.restart_requested.connect(self.restart_requested.emit)
 
         # Test-compat aliases — existing tests reach in via these attribute names.
         self._install_button = self._content._install_button
@@ -426,14 +439,6 @@ class PluginsPage(QWidget):
 
     def set_restart_required(self, required: bool) -> None:
         self._content.set_restart_required(required)
-
-    def set_back_visible(self, visible: bool) -> None:
-        """Show/hide the back button based on nav history.
-
-        Uses BackButton.set_hidden() (opacity-based) to preserve layout space
-        so the header doesn't jump when the button hides.
-        """
-        self._back_button.set_hidden(not visible)
 
     # ------------------------------------------------------------------
     # Toolbar / window protocol — every page implements this.

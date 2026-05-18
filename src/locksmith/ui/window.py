@@ -92,10 +92,9 @@ class LocksmithWindow(QMainWindow):
         plugins_page.install_trusted.connect(self._handle_install_trusted)
         plugins_page.uninstall_clicked.connect(self._handle_uninstall)
         plugins_page.exclude_toggled.connect(self._handle_exclude_toggle)
+        plugins_page.restart_requested.connect(self._handle_restart_requested)
         # Cancel: page collapses its panel, window rolls back pre-trust installs.
         plugins_page._install_panel.cancelled.connect(self._handle_install_cancelled)
-        # Back button inside PluginsPage routes through NavigationManager.
-        plugins_page.back_clicked.connect(self._handle_plugins_back)
 
         # Store VaultPage reference for plugin access
         vault_page = self.pages[Pages.VAULT]
@@ -110,6 +109,7 @@ class LocksmithWindow(QMainWindow):
             vault_plugins.install_trusted.connect(self._handle_install_trusted)
             vault_plugins.uninstall_clicked.connect(self._handle_uninstall)
             vault_plugins.exclude_toggled.connect(self._handle_exclude_toggle)
+            vault_plugins.restart_requested.connect(self._handle_restart_requested)
             vault_plugins._install_panel.cancelled.connect(self._handle_install_cancelled)
 
         # Discover plugins from the index + entry-points and call initialize on each.
@@ -214,12 +214,6 @@ class LocksmithWindow(QMainWindow):
 
             # Sync Plugins toolbar button active state.
             self.toolbar.set_plugins_active(page_enum == Pages.PLUGINS)
-
-            # Update in-page back button visibility based on nav history.
-            if Pages.PLUGINS in self.pages:
-                self.pages[Pages.PLUGINS].set_back_visible(
-                    self.nav_manager.can_navigate_back()
-                )
 
             # Update page-specific UI elements
             self._update_page_ui(page_enum)
@@ -474,12 +468,36 @@ class LocksmithWindow(QMainWindow):
         if vault_page and self.main_stack.currentWidget() == vault_page:
             vault_page.show_notifications()
 
-    def _handle_plugins_back(self) -> None:
-        """Handle back navigation from inside PluginsPage."""
-        if self.nav_manager.can_navigate_back():
-            self.nav_manager.go_back()
+    def _handle_restart_requested(self) -> None:
+        """Restart the wallet — close vault, spawn a new process, quit this one."""
+        import sys
+        from PySide6.QtCore import QProcess
+        from PySide6.QtWidgets import QApplication
+
+        logger.info("plugin.restart.initiated")
+
+        # Best-effort close-vault before relaunch. Plugin lifecycle hooks
+        # (on_app_stopping + service.stop) fire in closeEvent which Qt will
+        # invoke as part of QApplication.quit() below.
+        if self.app.vault is not None:
+            try:
+                self.app.close_vault()
+            except Exception:
+                logger.exception("plugin.restart.close_vault_failed")
+
+        # Spawn a new instance of ourselves with the same launch line. The
+        # `-m locksmith.main` form is used because that's how the wallet is
+        # currently launched in development; a frozen-binary path goes
+        # through sys.argv directly.
+        if getattr(sys, "frozen", False):
+            QProcess.startDetached(sys.executable, sys.argv[1:])
         else:
-            self.nav_manager.navigate_to(Pages.HOME)
+            QProcess.startDetached(sys.executable, ["-m", "locksmith.main"] + sys.argv[1:])
+        logger.info("plugin.restart.spawned_new_process")
+
+        # Quit this instance. Qt will call closeEvent on the window, which
+        # already calls plugin_manager.on_app_stopping().
+        QApplication.quit()
 
     # ------------------- Plugin install/uninstall/exclude handlers ---
 
