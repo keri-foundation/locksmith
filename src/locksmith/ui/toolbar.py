@@ -30,6 +30,7 @@ class LocksmithToolbar(QToolBar):
     lock_clicked = Signal()
     home_clicked = Signal()
     notifications_clicked = Signal()
+    plugins_clicked = Signal()
 
     def __init__(self, app, parent=None):
         """
@@ -134,6 +135,16 @@ class LocksmithToolbar(QToolBar):
         )
         self.vaults_button.clicked.connect(self.vaults_clicked.emit)
         self.vaults_action = self.addWidget(self.vaults_button)
+
+        # Plugins button with hover effect
+        self.plugins_button = HoverIconButton(
+            icon_normal="assets/material-icons/schema.svg",
+            icon_hover="assets/material-icons/schema.svg",
+            tooltip="Plugins"
+        )
+        self.plugins_button.setObjectName("toolbar_plugins_button")
+        self.plugins_button.clicked.connect(self.plugins_clicked.emit)
+        self.plugins_action = self.addWidget(self.plugins_button)
 
         # Lock button (close vault) - initially hidden
         self.lock_button = HoverIconButton(

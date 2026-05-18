@@ -4,7 +4,10 @@ locksmith.ui.window module
 
 This module contains the main window for the Locksmith application.
 """
+import os
+
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -59,6 +62,7 @@ class LocksmithWindow(QMainWindow):
         self.toolbar.lock_clicked.connect(self.on_lock_vault)
         self.toolbar.home_clicked.connect(self.on_home)
         self.toolbar.notifications_clicked.connect(self.on_notifications)
+        self.toolbar.plugins_clicked.connect(self.on_plugins)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.toolbar)
 
         # Create central widget and main layout
@@ -73,16 +77,28 @@ class LocksmithWindow(QMainWindow):
         self.main_stack.setContentsMargins(0, 0, 0, 0)
 
         # Create pages
+        from locksmith.ui.plugins.page import PluginsPage
         self.pages = {}
         self.pages[Pages.HOME] = HomePage(self)
+        self.pages[Pages.PLUGINS] = PluginsPage(self.app, self)
         self.pages[Pages.VAULT] = VaultPage(self)
+
+        # Wire PluginsPage signals
+        plugins_page = self.pages[Pages.PLUGINS]
+        plugins_page.install_clicked.connect(self._open_install_flow)
+        plugins_page.uninstall_clicked.connect(self._handle_uninstall)
+        plugins_page.exclude_toggled.connect(self._handle_exclude_toggle)
 
         # Store VaultPage reference for plugin access
         vault_page = self.pages[Pages.VAULT]
         self.app._vault_page = vault_page
 
-        # Discover and initialize plugins (registers pages and menus)
-        self.app.plugin_manager.discover_and_initialize(vault_page, vault_page.nav_menu)
+        # Discover plugins from the index + entry-points and call initialize on each.
+        self.app.plugin_manager.discover()
+        # Register vault-plugin pages and menus into the VaultPage.
+        self.app.plugin_manager.discover_and_initialize_vault_ui(
+            vault_page, vault_page.nav_menu,
+        )
 
         # Add pages to stack
         for page in self.pages.values():
@@ -103,7 +119,48 @@ class LocksmithWindow(QMainWindow):
         # Start on home page
         self.nav_manager.navigate_to(Pages.HOME)
 
+        # Dev-loop screenshot hotkey. Press Ctrl+Shift+G (Cmd+Shift+G on
+        # macOS — Qt maps Ctrl to Cmd) and the current main window is
+        # grabbed to /tmp/locksmith-screenshot.png so an external observer
+        # (or AI agent) can inspect the live UI. No-op cost when unused.
+        self._screenshot_shortcut = QShortcut(
+            QKeySequence("Ctrl+Shift+G"), self,
+        )
+        self._screenshot_shortcut.setContext(Qt.ApplicationShortcut)
+        self._screenshot_shortcut.activated.connect(self._grab_screenshot)
+
+        # Optional dev-only control server. Activated by setting
+        # LOCKSMITH_DEV_CONTROL=1 in the environment. Listens on a Unix
+        # socket at /tmp/locksmith-control.sock and lets local tooling
+        # (or an AI dev loop) drive the running UI via JSON commands.
+        # OFF in production by design.
+        self._dev_control_server = None
+        if os.environ.get("LOCKSMITH_DEV_CONTROL") == "1":
+            from locksmith.dev_control import DevControlServer
+            self._dev_control_server = DevControlServer(self, parent=self)
+            self._dev_control_server.start()
+
+        # Run app-lifecycle hooks for any AppPlugin instances loaded above.
+        # Done last so plugins see a fully-constructed window.
+        self.app.plugin_manager.on_app_started(window=self)
+
         logger.info("LocksmithHome initialized")
+
+    def _grab_screenshot(self) -> None:
+        """Save a PNG of the current main window to /tmp.
+
+        Path is fixed so external observers don't have to discover it.
+        Overwrites on every press — by design.
+        """
+        path = "/tmp/locksmith-screenshot.png"
+        pix = self.grab()
+        if pix.isNull():
+            logger.warning("Screenshot grab() returned a null pixmap")
+            return
+        if pix.save(path):
+            logger.info("Screenshot saved to %s", path)
+        else:
+            logger.warning("Screenshot save failed at %s", path)
 
     def on_page_changed(self, page_name: str, params: dict):
         """
@@ -163,6 +220,11 @@ class LocksmithWindow(QMainWindow):
                 self.toolbar.height()
             )
             # Disconnect toast signals when leaving vault
+            self._disconnect_toast_signals()
+
+        elif page == Pages.PLUGINS:
+            # Plugins page: hide vault drawer, no toast signals needed
+            self.vault_drawer.hide_drawer_widgets()
             self._disconnect_toast_signals()
 
         elif page == Pages.VAULT:
@@ -233,6 +295,10 @@ class LocksmithWindow(QMainWindow):
                 self.height(),
                 self.toolbar.height()
             )
+
+    def on_plugins(self) -> None:
+        """Handle plugins button click."""
+        self.nav_manager.navigate_to(Pages.PLUGINS)
 
     def on_settings(self):
         """Handle settings button click."""
@@ -358,3 +424,80 @@ class LocksmithWindow(QMainWindow):
         vault_page = self.pages.get(Pages.VAULT)
         if vault_page and self.main_stack.currentWidget() == vault_page:
             vault_page.show_notifications()
+
+    # ------------------- Plugin install/uninstall/exclude handlers ---
+
+    def _open_install_flow(self) -> None:
+        from locksmith.ui.plugins.install_dialog import InstallSourceDialog
+        dlg = InstallSourceDialog(self)
+        dlg.source_chosen.connect(self._handle_source_chosen)
+        dlg.exec()
+
+    def _handle_source_chosen(self, source) -> None:
+        from locksmith.plugins.installer import InstallError, PluginInstaller
+        from locksmith.ui.plugins.trust_dialog import PluginTrustDialog
+        # Fetch-then-confirm-with-rollback shape. Cleaner staging-area split
+        # is a follow-up (see plan Task 13 step 3 note).
+        installer = PluginInstaller()
+        try:
+            record = installer.install(source)
+        except InstallError as e:
+            self._show_error("Install failed", str(e))
+            return
+        snap = record["manifest_snapshot"]
+        dlg = PluginTrustDialog(
+            manifest_snapshot=snap,
+            source=record["source"],
+            commit=record["commit"],
+            parent=self,
+        )
+        dlg.trusted.connect(lambda pid=record["plugin_id"]: self._on_trust_accepted(pid))
+        result = dlg.exec()
+        if result != dlg.Accepted:
+            try:
+                installer.uninstall(record["plugin_id"])
+            except InstallError:
+                logger.exception("plugin.rollback_failed plugin_id=%s", record["plugin_id"])
+        self.pages[Pages.PLUGINS]._refresh()
+        self.pages[Pages.PLUGINS].set_restart_required(True)
+
+    def _on_trust_accepted(self, plugin_id: str) -> None:
+        logger.info("plugin.trust.accepted plugin_id=%s", plugin_id)
+        self.pages[Pages.PLUGINS].set_restart_required(True)
+
+    def _handle_uninstall(self, plugin_id: str) -> None:
+        from locksmith.plugins.installer import InstallError, PluginInstaller
+        try:
+            PluginInstaller().uninstall(plugin_id)
+        except InstallError as e:
+            self._show_error("Uninstall failed", str(e))
+            return
+        self.pages[Pages.PLUGINS]._refresh()
+        self.pages[Pages.PLUGINS].set_restart_required(True)
+
+    def _handle_exclude_toggle(self, plugin_id: str, now_excluded: bool) -> None:
+        from pathlib import Path
+        from locksmith.plugins import storage
+        keri_base = Path(getattr(self.app.config, "base", None) or (Path.home() / ".keri"))
+        current = storage.read_enable_list(keri_base)
+        excluded = set(current.get("excluded", []))
+        if now_excluded:
+            excluded.add(plugin_id)
+        else:
+            excluded.discard(plugin_id)
+        storage.write_enable_list(keri_base, {"format": 1, "excluded": sorted(excluded)})
+        self.pages[Pages.PLUGINS]._refresh()
+        self.pages[Pages.PLUGINS].set_restart_required(True)
+
+    def _show_error(self, title: str, message: str) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.warning(self, title, message)
+
+    # ------------------- Window lifecycle ----------------------------
+
+    def closeEvent(self, event) -> None:
+        try:
+            self.app.plugin_manager.on_app_stopping()
+        except Exception:
+            logger.exception("plugin.on_app_stopping.dispatch_failed")
+        super().closeEvent(event)
