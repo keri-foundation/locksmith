@@ -185,7 +185,8 @@ class PluginInstaller:
         }
 
     def _append_to_index(self, record: dict[str, Any]) -> None:
-        idx = storage.read_index()
-        idx.setdefault("format", 1)
-        idx.setdefault("plugins", []).append(record)
-        storage.write_index(idx)
+        with storage.index_write_lock():
+            idx = storage.read_index()
+            idx.setdefault("format", 1)
+            idx.setdefault("plugins", []).append(record)
+            storage.write_index(idx)
