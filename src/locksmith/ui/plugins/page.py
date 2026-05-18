@@ -448,7 +448,9 @@ class PluginsPage(QWidget):
         return {
             "title": "Plugins",
             "show_back": False,
-            "show_vaults_button": False,  # drawer is homepage-only
+            # Vaults drawer is also available on Plugins — users can switch
+            # vaults from anywhere.
+            "show_vaults_button": True,
         }
 
     def on_show(self) -> None:
