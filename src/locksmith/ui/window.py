@@ -245,8 +245,14 @@ class LocksmithWindow(QMainWindow):
             self._disconnect_toast_signals()
 
         elif page == Pages.PLUGINS:
-            # Plugins page: hide vault drawer, no toast signals needed
-            self.vault_drawer.hide_drawer_widgets()
+            # Plugins page (top-level): vault drawer is available so users
+            # can switch vaults from anywhere. Same geometry as home.
+            self.vault_drawer.show_drawer_widgets()
+            self.vault_drawer.handle_resize(
+                self.width(),
+                self.height(),
+                self.toolbar.height()
+            )
             self._disconnect_toast_signals()
 
         elif page == Pages.VAULT:
