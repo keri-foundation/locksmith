@@ -18,6 +18,7 @@ from locksmith.ui.vault.identifiers.list import IdentifierListPage
 from locksmith.ui.vault.groups.list import GroupIdentifierListPage
 from locksmith.ui.vault.menu import VaultNavMenu
 from locksmith.ui.vault.notifications import NotificationsListPage
+from locksmith.ui.plugins.page import PluginsContent
 from locksmith.ui.vault.remotes.list import RemoteIdentifierListPage
 from locksmith.ui.vault.settings.page import SettingsPage
 
@@ -94,6 +95,7 @@ class VaultPage(BasePage):
         self.register_page("received_credentials", ReceivedCredentialsListPage(self))
         self.register_page("schema", SchemaListPage(self))
         self.register_page("notifications", NotificationsListPage(self))
+        self.register_page("plugins", PluginsContent(self.app, parent=self))
 
     def register_page(self, key: str, widget: QWidget) -> None:
         """Register a page widget under a string key.
@@ -228,6 +230,18 @@ class VaultPage(BasePage):
         notifications_page = self._pages.get("notifications")
         if notifications_page and hasattr(notifications_page, "on_show"):
             notifications_page.on_show()
+
+    def show_plugins(self):
+        """Show plugins page as a vault sub-page — called from toolbar when vault is open."""
+        logger.info("Showing plugins sub-page")
+        self._show_page("plugins")
+        plugins_page = self._pages.get("plugins")
+        if plugins_page and hasattr(plugins_page, "on_show"):
+            plugins_page.on_show()
+
+    def get_plugins_content(self) -> "PluginsContent | None":
+        """Return the vault-hosted PluginsContent instance, or None if not registered."""
+        return self._pages.get("plugins")  # type: ignore[return-value]
 
     # -------------------------------------------------------------------------
     # Vault deletion

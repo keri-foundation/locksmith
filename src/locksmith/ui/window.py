@@ -105,6 +105,17 @@ class LocksmithWindow(QMainWindow):
         # Forward sidebar lock state to the toolbar's dock button
         vault_page.nav_menu.lock_state_changed.connect(self.toolbar.set_dock_active)
 
+        # Wire the vault-hosted PluginsContent signals to the same handlers as
+        # the top-level PluginsPage so install/uninstall/exclude work from both
+        # surfaces.
+        vault_plugins = vault_page.get_plugins_content()
+        if vault_plugins is not None:
+            vault_plugins.install_requested.connect(self._handle_install_requested)
+            vault_plugins.install_trusted.connect(self._handle_install_trusted)
+            vault_plugins.uninstall_clicked.connect(self._handle_uninstall)
+            vault_plugins.exclude_toggled.connect(self._handle_exclude_toggle)
+            vault_plugins._install_panel.cancelled.connect(self._handle_install_cancelled)
+
         # Discover plugins from the index + entry-points and call initialize on each.
         self.app.plugin_manager.discover()
         # Register vault-plugin pages and menus into the VaultPage.
@@ -318,10 +329,22 @@ class LocksmithWindow(QMainWindow):
             )
 
     def on_plugins(self) -> None:
-        """Handle plugins button click — toggles. If already on Plugins, go back."""
-        # Toggle: if already on Plugins, go back to where we came from.
-        # If there's no back history (rare; e.g. first launch landed on
-        # Plugins for some reason), fall back to HOME.
+        """Handle plugins button click.
+
+        When a vault is open AND we are on the vault page, show Plugins as a
+        vault sub-page (sidebar persists, toolbar config stays vault-config).
+        When logged out OR on Pages.HOME/PLUGINS top-level, use the existing
+        top-level toggle behavior.
+        """
+        vault_page = self.pages.get(Pages.VAULT)
+        if (
+            self.app.is_vault_open
+            and self.main_stack.currentWidget() is vault_page
+        ):
+            vault_page.show_plugins()
+            return
+
+        # Existing toggle behavior for top-level (no vault open).
         if self.nav_manager.get_current_page() == Pages.PLUGINS:
             if self.nav_manager.can_navigate_back():
                 self.nav_manager.go_back()
@@ -470,6 +493,19 @@ class LocksmithWindow(QMainWindow):
 
     # ------------------- Plugin install/uninstall/exclude handlers ---
 
+    def _refresh_all_plugin_views(self, restart_required: bool = True) -> None:
+        """Refresh both the top-level PluginsPage and the vault sub-page PluginsContent."""
+        self.pages[Pages.PLUGINS]._refresh()
+        if restart_required:
+            self.pages[Pages.PLUGINS].set_restart_required(True)
+        vault_page = self.pages.get(Pages.VAULT)
+        if vault_page is not None and hasattr(vault_page, "get_plugins_content"):
+            content = vault_page.get_plugins_content()
+            if content is not None:
+                content._refresh()
+                if restart_required:
+                    content.set_restart_required(True)
+
     def _handle_install_requested(self, source) -> None:
         from locksmith.plugins.installer import InstallError, PluginInstaller
         installer = PluginInstaller()
@@ -491,8 +527,7 @@ class LocksmithWindow(QMainWindow):
         logger.info("plugin.trust.accepted plugin_id=%s", plugin_id)
         self._pending_trust_install = None
         self.pages[Pages.PLUGINS].collapse_install_panel()
-        self.pages[Pages.PLUGINS]._refresh()
-        self.pages[Pages.PLUGINS].set_restart_required(True)
+        self._refresh_all_plugin_views(restart_required=True)
 
     def _handle_install_cancelled(self) -> None:
         # The page already collapsed its panel before emitting this.
@@ -505,8 +540,7 @@ class LocksmithWindow(QMainWindow):
             except InstallError:
                 logger.exception("plugin.rollback_failed plugin_id=%s", pid)
             self._pending_trust_install = None
-        self.pages[Pages.PLUGINS]._refresh()
-        self.pages[Pages.PLUGINS].set_restart_required(True)
+        self._refresh_all_plugin_views(restart_required=True)
 
     def _handle_uninstall(self, plugin_id: str) -> None:
         from locksmith.plugins.installer import InstallError, PluginInstaller
@@ -515,8 +549,7 @@ class LocksmithWindow(QMainWindow):
         except InstallError as e:
             self._show_error("Uninstall failed", str(e))
             return
-        self.pages[Pages.PLUGINS]._refresh()
-        self.pages[Pages.PLUGINS].set_restart_required(True)
+        self._refresh_all_plugin_views(restart_required=True)
 
     def _handle_exclude_toggle(self, plugin_id: str, now_excluded: bool) -> None:
         from pathlib import Path
@@ -529,8 +562,7 @@ class LocksmithWindow(QMainWindow):
         else:
             excluded.discard(plugin_id)
         storage.write_enable_list(keri_base, {"format": 1, "excluded": sorted(excluded)})
-        self.pages[Pages.PLUGINS]._refresh()
-        self.pages[Pages.PLUGINS].set_restart_required(True)
+        self._refresh_all_plugin_views(restart_required=True)
 
     def _show_error(self, title: str, message: str) -> None:
         from PySide6.QtWidgets import QMessageBox

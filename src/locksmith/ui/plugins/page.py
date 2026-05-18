@@ -60,15 +60,21 @@ _STATUS_COPY = {
 }
 
 
-class PluginsPage(QWidget):
-    """The Plugins management page."""
+class PluginsContent(QWidget):
+    """Data UI for the Plugins feature — owns rows, install panel, restart banner.
+
+    Can be embedded in either the top-level PluginsPage host (logged-out) or the
+    VaultPage content_stack (logged-in).  Two distinct instances are created; both
+    read from app.plugin_manager and are refreshed whenever the manager changes.
+    """
 
     install_requested = Signal(SourceDescriptor)   # user submitted Fetch
     install_trusted = Signal(str)                  # user clicked Trust&Install, arg is plugin_id
     uninstall_clicked = Signal(str)                # plugin_id
     exclude_toggled = Signal(str, bool)            # plugin_id, now_excluded
-    back_clicked = Signal()                        # user clicked the in-page Back button
 
+    # Marker sub-classes used by tests to find specific widgets via findChildren().
+    # Defined here so tests that construct PluginsContent directly can access them.
     class PluginNameLabel(QLabel):
         pass
 
@@ -84,7 +90,7 @@ class PluginsPage(QWidget):
     def __init__(self, app: Any, parent: QWidget | None = None):
         super().__init__(parent)
         self.app = app
-        self.setObjectName("PluginsPage")
+        self.setObjectName("PluginsContent")
         self._build_ui()
         self._refresh()
 
@@ -92,17 +98,6 @@ class PluginsPage(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 24, 24, 24)
         outer.setSpacing(16)
-
-        # Back button — only visible when navigation history exists.
-        # The window connects this to NavigationManager.go_back().
-        from locksmith.ui.toolkit.widgets.buttons import BackButton
-        self._back_button = BackButton(dark_mode=False)
-        self._back_button.clicked.connect(self.back_clicked.emit)
-        outer.addWidget(self._back_button)
-
-        header = QLabel("Plugins")
-        header.setStyleSheet("font-size: 22px; font-weight: 600;")
-        outer.addWidget(header)
 
         self._restart_banner = QLabel(
             "⚠ Restart required to finish applying changes."
@@ -342,6 +337,96 @@ class PluginsPage(QWidget):
         """Hide the panel and show the install button (called after success)."""
         self._on_panel_cancelled()
 
+    def set_restart_required(self, required: bool) -> None:
+        self._restart_banner.setVisible(required)
+
+    def on_show(self) -> None:
+        self._refresh()
+
+
+class PluginsPage(QWidget):
+    """Top-level Plugins page host — shown when no vault is open (Pages.PLUGINS).
+
+    Thin wrapper around PluginsContent that adds the back button and header label
+    needed for the top-level navigation context.  All data signals are forwarded
+    from the embedded PluginsContent, and test-compat attribute aliases keep the
+    existing 25 visual tests working without change.
+    """
+
+    install_requested = Signal(SourceDescriptor)   # user submitted Fetch
+    install_trusted = Signal(str)                  # user clicked Trust&Install, arg is plugin_id
+    uninstall_clicked = Signal(str)                # plugin_id
+    exclude_toggled = Signal(str, bool)            # plugin_id, now_excluded
+    back_clicked = Signal()                        # user clicked the in-page Back button
+
+    # Re-export marker sub-classes so tests that reach in via
+    # ``type(page).PluginNameLabel`` etc. continue to work.
+    # These must be the exact same class objects as the ones PluginsContent
+    # uses when it instantiates the labels — use direct aliases, not subclasses,
+    # so findChildren(type(page).PluginNameLabel) matches the real instances.
+    PluginNameLabel = PluginsContent.PluginNameLabel
+    StatusBadge     = PluginsContent.StatusBadge
+    InTreeBadge     = PluginsContent.InTreeBadge
+    EmptyStateLabel = PluginsContent.EmptyStateLabel
+
+    def __init__(self, app: Any, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.app = app
+        self.setObjectName("PluginsPage")
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.setSpacing(16)
+
+        # Back button — only visible when navigation history exists.
+        # The window connects this to NavigationManager.go_back().
+        from locksmith.ui.toolkit.widgets.buttons import BackButton
+        self._back_button = BackButton(dark_mode=False)
+        self._back_button.clicked.connect(self.back_clicked.emit)
+        outer.addWidget(self._back_button)
+
+        header = QLabel("Plugins")
+        header.setStyleSheet("font-size: 22px; font-weight: 600;")
+        outer.addWidget(header)
+
+        # Embedded content widget — owns all data UI.
+        self._content = PluginsContent(self.app, parent=self)
+        outer.addWidget(self._content)
+
+        # Forward signals from embedded content up to callers.
+        self._content.install_requested.connect(self.install_requested.emit)
+        self._content.install_trusted.connect(self.install_trusted.emit)
+        self._content.uninstall_clicked.connect(self.uninstall_clicked.emit)
+        self._content.exclude_toggled.connect(self.exclude_toggled.emit)
+
+        # Test-compat aliases — existing tests reach in via these attribute names.
+        self._install_button = self._content._install_button
+        self._install_panel  = self._content._install_panel
+        self._list_container = self._content._list_container
+        self._list_scroll    = self._content._list_scroll
+        self._restart_banner = self._content._restart_banner
+
+    # ------------------------------------------------------------------
+    # Public API forwarded to embedded content (window + tests use these)
+    # ------------------------------------------------------------------
+
+    def _refresh(self) -> None:
+        self._content._refresh()
+
+    def show_trust_step(self, **kw) -> None:
+        self._content.show_trust_step(**kw)
+
+    def show_install_error(self, message: str) -> None:
+        self._content.show_install_error(message)
+
+    def collapse_install_panel(self) -> None:
+        self._content.collapse_install_panel()
+
+    def set_restart_required(self, required: bool) -> None:
+        self._content.set_restart_required(required)
+
     def set_back_visible(self, visible: bool) -> None:
         """Show/hide the back button based on nav history.
 
@@ -362,10 +447,7 @@ class PluginsPage(QWidget):
         }
 
     def on_show(self) -> None:
-        self._refresh()
+        self._content._refresh()
 
     def on_hide(self) -> None:
         pass
-
-    def set_restart_required(self, required: bool) -> None:
-        self._restart_banner.setVisible(required)
