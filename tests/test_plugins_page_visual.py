@@ -487,3 +487,56 @@ def test_plugins_page_set_back_visible_toggles(qapp, fake_app_with_states):
     page.set_back_visible(True)
     qapp.processEvents()
     assert page._back_button.isEnabled()
+
+
+# ---------------------------------------------------------------------------
+# Polish #7: PluginsContent standalone + vault sub-page registration
+# ---------------------------------------------------------------------------
+
+def test_plugins_content_standalone(qapp, fake_app_with_states):
+    """PluginsContent can be instantiated standalone (no PluginsPage wrapper)."""
+    from locksmith.ui.plugins.page import PluginsContent
+    content = PluginsContent(fake_app_with_states)
+    content.resize(900, 700)
+    content.show()
+    QTest.qWait(200)
+    qapp.processEvents()
+    # Marker labels live on PluginsContent directly.
+    names = [w.text() for w in content.findChildren(PluginsContent.PluginNameLabel)]
+    assert "KERI Foundation" in names
+    assert "Echo App" in names
+    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    content.grab().save(str(SCREENSHOT_DIR / "plugins_content_standalone.png"))
+
+
+def test_plugins_content_on_show_refreshes(qapp, fake_app_with_states):
+    """PluginsContent.on_show() refreshes the list (mirrors NotificationsListPage)."""
+    from locksmith.ui.plugins.page import PluginsContent
+    content = PluginsContent(fake_app_with_states)
+    content.show()
+    QTest.qWait(200)
+    qapp.processEvents()
+    # Calling on_show() again must not raise and list should still be populated.
+    content.on_show()
+    qapp.processEvents()
+    names = [w.text() for w in content.findChildren(PluginsContent.PluginNameLabel)]
+    assert len(names) >= 2
+
+
+def test_vault_page_registers_plugins_sub_page():
+    """VaultPage API surface: show_plugins() and get_plugins_content() must exist.
+
+    We test the class-level API rather than constructing VaultPage with a fake
+    parent (PySide6 requires a real QWidget parent for construction, making
+    full instantiation hard to mock cheaply without a real QApplication context
+    and a real parent window).
+    """
+    import locksmith.ui.vault.page as vp_mod
+    vp_cls = vp_mod.VaultPage
+    # show_plugins() must exist and be callable (mirrors show_notifications()).
+    assert hasattr(vp_cls, "show_plugins") and callable(vp_cls.show_plugins)
+    # get_plugins_content() must exist and be callable.
+    assert hasattr(vp_cls, "get_plugins_content") and callable(vp_cls.get_plugins_content)
+    # The import used to register the sub-page must be at the module level.
+    from locksmith.ui.plugins.page import PluginsContent  # noqa: F401 — confirms importable
+    assert "PluginsContent" in dir(vp_mod)
