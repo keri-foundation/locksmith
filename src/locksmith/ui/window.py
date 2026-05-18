@@ -94,6 +94,8 @@ class LocksmithWindow(QMainWindow):
         plugins_page.exclude_toggled.connect(self._handle_exclude_toggle)
         # Cancel: page collapses its panel, window rolls back pre-trust installs.
         plugins_page._install_panel.cancelled.connect(self._handle_install_cancelled)
+        # Back button inside PluginsPage routes through NavigationManager.
+        plugins_page.back_clicked.connect(self._handle_plugins_back)
 
         # Store VaultPage reference for plugin access
         vault_page = self.pages[Pages.VAULT]
@@ -199,6 +201,15 @@ class LocksmithWindow(QMainWindow):
             logger.info(f"Toolbar config: {toolbar_config}")
             self.toolbar.update_for_config(toolbar_config)
 
+            # Sync Plugins toolbar button active state.
+            self.toolbar.set_plugins_active(page_enum == Pages.PLUGINS)
+
+            # Update in-page back button visibility based on nav history.
+            if Pages.PLUGINS in self.pages:
+                self.pages[Pages.PLUGINS].set_back_visible(
+                    self.nav_manager.can_navigate_back()
+                )
+
             # Update page-specific UI elements
             self._update_page_ui(page_enum)
 
@@ -303,7 +314,16 @@ class LocksmithWindow(QMainWindow):
             )
 
     def on_plugins(self) -> None:
-        """Handle plugins button click."""
+        """Handle plugins button click — toggles. If already on Plugins, go back."""
+        # Toggle: if already on Plugins, go back to where we came from.
+        # If there's no back history (rare; e.g. first launch landed on
+        # Plugins for some reason), fall back to HOME.
+        if self.nav_manager.get_current_page() == Pages.PLUGINS:
+            if self.nav_manager.can_navigate_back():
+                self.nav_manager.go_back()
+            else:
+                self.nav_manager.navigate_to(Pages.HOME)
+            return
         self.nav_manager.navigate_to(Pages.PLUGINS)
 
     def on_settings(self):
@@ -430,6 +450,13 @@ class LocksmithWindow(QMainWindow):
         vault_page = self.pages.get(Pages.VAULT)
         if vault_page and self.main_stack.currentWidget() == vault_page:
             vault_page.show_notifications()
+
+    def _handle_plugins_back(self) -> None:
+        """Handle back navigation from inside PluginsPage."""
+        if self.nav_manager.can_navigate_back():
+            self.nav_manager.go_back()
+        else:
+            self.nav_manager.navigate_to(Pages.HOME)
 
     # ------------------- Plugin install/uninstall/exclude handlers ---
 

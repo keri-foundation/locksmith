@@ -270,8 +270,11 @@ class VaultPage(BasePage):
             if hasattr(page, "set_vault_name"):
                 page.set_vault_name(self.vault_name)
 
-        # Show Identifiers sub-page by default
-        self._show_page("identifiers")
+        # Restore the user's last sub-page rather than always defaulting to
+        # "identifiers". Falls back to "identifiers" only on first show /
+        # after vault open (when _current_page_key is None).
+        key = self._current_page_key or "identifiers"
+        self._show_page(key)
 
     def on_hide(self):
         super().on_hide()

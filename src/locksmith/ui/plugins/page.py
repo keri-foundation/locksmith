@@ -67,6 +67,7 @@ class PluginsPage(QWidget):
     install_trusted = Signal(str)                  # user clicked Trust&Install, arg is plugin_id
     uninstall_clicked = Signal(str)                # plugin_id
     exclude_toggled = Signal(str, bool)            # plugin_id, now_excluded
+    back_clicked = Signal()                        # user clicked the in-page Back button
 
     class PluginNameLabel(QLabel):
         pass
@@ -91,6 +92,13 @@ class PluginsPage(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 24, 24, 24)
         outer.setSpacing(16)
+
+        # Back button — only visible when navigation history exists.
+        # The window connects this to NavigationManager.go_back().
+        from locksmith.ui.toolkit.widgets.buttons import BackButton
+        self._back_button = BackButton(dark_mode=False)
+        self._back_button.clicked.connect(self.back_clicked.emit)
+        outer.addWidget(self._back_button)
 
         header = QLabel("Plugins")
         header.setStyleSheet("font-size: 22px; font-weight: 600;")
@@ -334,12 +342,24 @@ class PluginsPage(QWidget):
         """Hide the panel and show the install button (called after success)."""
         self._on_panel_cancelled()
 
+    def set_back_visible(self, visible: bool) -> None:
+        """Show/hide the back button based on nav history.
+
+        Uses BackButton.set_hidden() (opacity-based) to preserve layout space
+        so the header doesn't jump when the button hides.
+        """
+        self._back_button.set_hidden(not visible)
+
     # ------------------------------------------------------------------
     # Toolbar / window protocol — every page implements this.
     # ------------------------------------------------------------------
 
     def get_toolbar_config(self) -> dict:
-        return {"title": "Plugins", "show_back": False}
+        return {
+            "title": "Plugins",
+            "show_back": False,
+            "show_vaults_button": False,  # drawer is homepage-only
+        }
 
     def on_show(self) -> None:
         self._refresh()
