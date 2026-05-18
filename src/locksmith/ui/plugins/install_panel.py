@@ -43,7 +43,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
-    QRadioButton,
     QSizePolicy,
     QStackedWidget,
     QTextBrowser,
@@ -52,6 +51,7 @@ from PySide6.QtWidgets import (
 )
 
 from locksmith.plugins.installer import SourceDescriptor
+from locksmith.ui.toolkit.widgets.buttons import LocksmithRadioButton
 
 
 _GITHUB_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -159,12 +159,32 @@ class InstallPanel(QWidget):
         frame = QFrame()
         frame.setObjectName("InstallPanelFrame")
         frame.setFrameShape(QFrame.Shape.StyledPanel)
-        frame.setStyleSheet(
-            "QFrame#InstallPanelFrame { "
-            "border:1px solid #ddd; border-radius:6px; "
-            "background:#fafafa; padding:0px; "
-            "}"
-        )
+        frame.setStyleSheet("""
+    QFrame#InstallPanelFrame {
+        border: 1px solid #DDDDDD;
+        border-radius: 6px;
+        background: #FAFAFA;
+    }
+    QFrame#InstallPanelFrame QLineEdit {
+        background: #FFFFFF;
+        color: #2D2F33;
+        border: 1px solid #D0D5DD;
+        border-radius: 4px;
+        padding: 6px 8px;
+        min-height: 24px;
+    }
+    QFrame#InstallPanelFrame QLineEdit:focus {
+        border: 1px solid #007AFF;
+    }
+    QFrame#InstallPanelFrame QLineEdit:disabled {
+        background: #EEEEEE;
+        color: #888888;
+    }
+    QFrame#InstallPanelFrame QLabel {
+        color: #2D2F33;
+        background: transparent;
+    }
+""")
         frame_layout = QVBoxLayout(frame)
         frame_layout.setContentsMargins(20, 16, 20, 16)
         frame_layout.setSpacing(12)
@@ -189,7 +209,7 @@ class InstallPanel(QWidget):
         vbox.addWidget(header)
 
         # GitHub radio + input
-        self.github_radio = QRadioButton("GitHub  user/repo")
+        self.github_radio = LocksmithRadioButton("GitHub  user/repo")
         self.github_radio.setChecked(True)
         self.github_radio.toggled.connect(self._on_source_kind_changed)
         vbox.addWidget(self.github_radio)
@@ -203,7 +223,7 @@ class InstallPanel(QWidget):
         vbox.addLayout(gh_row)
 
         # Local radio + input
-        self.local_radio = QRadioButton("Local path")
+        self.local_radio = LocksmithRadioButton("Local path")
         self.local_radio.toggled.connect(self._on_source_kind_changed)
         vbox.addWidget(self.local_radio)
 
@@ -275,7 +295,12 @@ class InstallPanel(QWidget):
         self.trust_capability_block.setReadOnly(True)
         self.trust_capability_block.setOpenLinks(False)
         self.trust_capability_block.setStyleSheet(
-            "QTextBrowser { background:#fafafa; border:1px solid #ddd; padding:8px; }"
+            "QTextBrowser { background: #FFFFFF; color: #2D2F33; "
+            "border: 1px solid #D0D5DD; border-radius: 4px; padding: 8px; }"
+        )
+        self.trust_capability_block.document().setDefaultStyleSheet(
+            "li { color: #2D2F33; margin: 4px 0; } "
+            ".detail { color: #666666; padding-left: 18px; display: block; }"
         )
         self.trust_capability_block.setMaximumHeight(160)
         self.trust_capability_block.setSizePolicy(
@@ -380,7 +405,7 @@ class InstallPanel(QWidget):
             rows.append(f"<li>{copy}")
             if cap in detail:
                 rows[-1] += (
-                    f"<br><span style='padding-left:18px; color:#666;'>"
+                    f"<br><span class='detail'>"
                     f"&#x21B3; {detail[cap]}</span>"
                 )
             rows[-1] += "</li>"

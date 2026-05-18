@@ -94,6 +94,11 @@ class PluginsPage(QWidget):
         self._list_layout.setContentsMargins(0, 0, 0, 0)
         self._list_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._list_scroll.setWidget(self._list_container)
+        self._list_scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; } "
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        self._list_container.setAutoFillBackground(False)
         outer.addWidget(self._list_scroll, stretch=1)
 
         # Inline install panel (hidden by default)
@@ -134,9 +139,10 @@ class PluginsPage(QWidget):
 
     def _make_row(self, state) -> QWidget:
         card = QFrame()
+        card.setObjectName("PluginRowCard")
         card.setFrameShape(QFrame.Shape.StyledPanel)
         card.setStyleSheet(
-            "QFrame { border:1px solid #ddd; border-radius:6px; "
+            "QFrame#PluginRowCard { border:1px solid #ddd; border-radius:6px; "
             "background:#fff; padding:12px; }"
         )
         card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
