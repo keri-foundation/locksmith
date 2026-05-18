@@ -22,7 +22,11 @@ Public attributes exposed for tests (keep stable):
   error_label, fetch_button, cancel_button
 
   -- trust mode --
-  trust_headline, trust_source_line
+  trust_headline
+  trust_warning                      — yellow callout at the top
+  trust_author_value                 — QLabel for author (form row)
+  trust_source_value                 — QLabel for source path/url (elided, tooltip=full)
+  trust_commit_value                 — QLabel for commit hash or friendly text
   trust_capability_block
   trust_accept_button
   (cancel_button is shared across both modes; it lives on the source stack page
@@ -35,7 +39,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
@@ -113,24 +117,27 @@ class InstallPanel(QWidget):
 
         self.trust_headline.setText(f"── Trust '{name}' v{version}? ──")
 
-        if source.get("type") == "github":
-            src_text = f"From: github.com/{source.get('user_repo')} @ {commit[:7]}"
-        else:
-            src_text = f"From: {source.get('path', '')}"
-        self.trust_source_line.setText(src_text)
+        # Metadata form rows
+        self.trust_author_value.setText(
+            manifest_snapshot.get("author") or "(unknown)"
+        )
 
-        # Author label — show only if present
-        author = manifest_snapshot.get("author", "")
-        if author:
-            self._trust_author_label.setText(f"Author: {author}")
-            self._trust_author_label.setVisible(True)
+        if source.get("type") == "github":
+            full_src = f"github.com/{source.get('user_repo')}"
         else:
-            self._trust_author_label.setVisible(False)
+            full_src = source.get("path") or "(unknown)"
+        self.trust_source_value.setText(self._elide(full_src, max_chars=64))
+        self.trust_source_value.setToolTip(full_src)
+
+        if commit and not commit.startswith("local:"):
+            self.trust_commit_value.setText(commit[:7])
+        else:
+            self.trust_commit_value.setText("(local source — no commit)")
 
         # Description
         desc = manifest_snapshot.get("description", "")
         if desc:
-            self._trust_desc_label.setText(f"“{desc}”")
+            self._trust_desc_label.setText(f'“{desc}”')
             self._trust_desc_label.setVisible(True)
         else:
             self._trust_desc_label.setVisible(False)
@@ -141,6 +148,15 @@ class InstallPanel(QWidget):
         )
 
         self._stack.setCurrentIndex(1)
+
+    @staticmethod
+    def _elide(text: str, max_chars: int) -> str:
+        """Middle-elide a string to at most max_chars characters."""
+        if len(text) <= max_chars:
+            return text
+        head = max_chars // 2 - 1
+        tail = max_chars - head - 1
+        return text[:head] + "…" + text[-tail:]
 
     def set_inline_error(self, text: str) -> None:
         """Render a red error message above the buttons in source mode."""
@@ -270,27 +286,71 @@ class InstallPanel(QWidget):
         vbox.setContentsMargins(0, 0, 0, 0)
         vbox.setSpacing(10)
 
+        # 1. Warning callout — top of the trust container so it's read first.
+        self.trust_warning = QLabel(
+            "⚠  Plugins run with full wallet permissions. "
+            "Only install plugins you trust."
+        )
+        self.trust_warning.setWordWrap(True)
+        self.trust_warning.setStyleSheet(
+            "QLabel { background:#FFF4D6; padding:10px 14px; "
+            "border:1px solid #D6B15A; border-radius:6px; "
+            "color:#5A4500; font-weight:600; }"
+        )
+        vbox.addWidget(self.trust_warning)
+
+        # 2. Headline.
         self.trust_headline = QLabel("")
         self.trust_headline.setStyleSheet("font-size:16px; font-weight:600; color:#333;")
         self.trust_headline.setWordWrap(True)
         vbox.addWidget(self.trust_headline)
 
-        self.trust_source_line = QLabel("")
-        self.trust_source_line.setStyleSheet("color:#444;")
-        vbox.addWidget(self.trust_source_line)
+        # 3. Metadata key-value table.
+        def _meta_value(monospace: bool = False) -> QLabel:
+            lab = QLabel("")
+            lab.setWordWrap(False)
+            lab.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            style = "QLabel { color:#2D2F33; "
+            if monospace:
+                style += "font-family:'SF Mono','Menlo',monospace; "
+            style += "}"
+            lab.setStyleSheet(style)
+            return lab
 
-        self._trust_author_label = QLabel("")
-        self._trust_author_label.setVisible(False)
-        vbox.addWidget(self._trust_author_label)
+        def _meta_key(text: str) -> QLabel:
+            lab = QLabel(text)
+            lab.setStyleSheet("QLabel { color:#666666; }")
+            return lab
 
+        self.trust_author_value = _meta_value()
+        self.trust_source_value = _meta_value()
+        self.trust_commit_value = _meta_value(monospace=True)
+
+        meta_layout = QFormLayout()
+        meta_layout.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop
+        )
+        meta_layout.setFormAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        meta_layout.setSpacing(4)
+        meta_layout.setContentsMargins(0, 4, 0, 4)
+        meta_layout.addRow(_meta_key("Author"), self.trust_author_value)
+        meta_layout.addRow(_meta_key("Source"), self.trust_source_value)
+        meta_layout.addRow(_meta_key("Commit"), self.trust_commit_value)
+        vbox.addLayout(meta_layout)
+
+        # 4. Description quote.
         self._trust_desc_label = QLabel("")
         self._trust_desc_label.setWordWrap(True)
         self._trust_desc_label.setStyleSheet("color:#222; padding:6px 0;")
         self._trust_desc_label.setVisible(False)
         vbox.addWidget(self._trust_desc_label)
 
-        vbox.addWidget(QLabel("This plugin declares it will:"))
+        # 5. Capability lead-in label.
+        vbox.addWidget(QLabel("This plugin requests:"))
 
+        # 6. Capability block.
         self.trust_capability_block = QTextBrowser()
         self.trust_capability_block.setReadOnly(True)
         self.trust_capability_block.setOpenLinks(False)
@@ -308,14 +368,7 @@ class InstallPanel(QWidget):
         )
         vbox.addWidget(self.trust_capability_block)
 
-        warn = QLabel(
-            "Plugins run with full wallet permissions.  "
-            "Only install plugins you trust."
-        )
-        warn.setStyleSheet("color:#a8770a; font-style:italic; padding:4px 0;")
-        warn.setWordWrap(True)
-        vbox.addWidget(warn)
-
+        # 7. Button row.
         button_row = QHBoxLayout()
         button_row.addStretch(1)
         trust_cancel = QPushButton("Cancel")
