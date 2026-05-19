@@ -4,8 +4,6 @@ locksmith.ui.window module
 
 This module contains the main window for the Locksmith application.
 """
-import os
-
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
@@ -147,17 +145,6 @@ class LocksmithWindow(QMainWindow):
         )
         self._screenshot_shortcut.setContext(Qt.ApplicationShortcut)
         self._screenshot_shortcut.activated.connect(self._grab_screenshot)
-
-        # Optional dev-only control server. Activated by setting
-        # LOCKSMITH_DEV_CONTROL=1 in the environment. Listens on a Unix
-        # socket at /tmp/locksmith-control.sock and lets local tooling
-        # (or an AI dev loop) drive the running UI via JSON commands.
-        # OFF in production by design.
-        self._dev_control_server = None
-        if os.environ.get("LOCKSMITH_DEV_CONTROL") == "1":
-            from locksmith.dev_control import DevControlServer
-            self._dev_control_server = DevControlServer(self, parent=self)
-            self._dev_control_server.start()
 
         # Run app-lifecycle hooks for any AppPlugin instances loaded above.
         # Done last so plugins see a fully-constructed window.
