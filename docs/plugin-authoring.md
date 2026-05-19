@@ -148,3 +148,15 @@ when applicable so the install dialog renders friendly copy:
 Unknown strings are shown verbatim with "(unrecognized)" — feel free to
 add new ones; they just don't get pretty copy until the wallet learns
 about them.
+
+## Reference plugin: locksmith-ui-tester
+
+A working `AppPlugin` you can install via the in-app Plugins UI:
+
+- **GitHub source:** `seriouscoderone/locksmith-ui-tester`
+- **What it does:** opens a JSON-over-unix-socket control surface so test scripts and dev loops can drive the running UI.
+- **Why it exists:** validates the `AppPlugin` contract end-to-end and serves as a reference implementation for anyone writing an app-lifecycle plugin.
+
+Read its `plugin.py` (~30 lines) for the minimal shape of an `AppPlugin` that owns a long-lived service. Read its `locksmith-plugin.toml` for an example manifest with a security warning in the description (the install confirmation is where users see that text).
+
+**Security note:** the plugin opens a local control socket. Install only on a development machine.
