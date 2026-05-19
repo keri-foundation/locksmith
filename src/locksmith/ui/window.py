@@ -5,7 +5,6 @@ locksmith.ui.window module
 This module contains the main window for the Locksmith application.
 """
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -136,37 +135,11 @@ class LocksmithWindow(QMainWindow):
         # Start on home page
         self.nav_manager.navigate_to(Pages.HOME)
 
-        # Dev-loop screenshot hotkey. Press Ctrl+Shift+G (Cmd+Shift+G on
-        # macOS — Qt maps Ctrl to Cmd) and the current main window is
-        # grabbed to /tmp/locksmith-screenshot.png so an external observer
-        # (or AI agent) can inspect the live UI. No-op cost when unused.
-        self._screenshot_shortcut = QShortcut(
-            QKeySequence("Ctrl+Shift+G"), self,
-        )
-        self._screenshot_shortcut.setContext(Qt.ApplicationShortcut)
-        self._screenshot_shortcut.activated.connect(self._grab_screenshot)
-
         # Run app-lifecycle hooks for any AppPlugin instances loaded above.
         # Done last so plugins see a fully-constructed window.
         self.app.plugin_manager.on_app_started(window=self)
 
         logger.info("LocksmithHome initialized")
-
-    def _grab_screenshot(self) -> None:
-        """Save a PNG of the current main window to /tmp.
-
-        Path is fixed so external observers don't have to discover it.
-        Overwrites on every press — by design.
-        """
-        path = "/tmp/locksmith-screenshot.png"
-        pix = self.grab()
-        if pix.isNull():
-            logger.warning("Screenshot grab() returned a null pixmap")
-            return
-        if pix.save(path):
-            logger.info("Screenshot saved to %s", path)
-        else:
-            logger.warning("Screenshot save failed at %s", path)
 
     def on_page_changed(self, page_name: str, params: dict):
         """
