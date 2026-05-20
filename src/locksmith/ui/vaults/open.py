@@ -106,6 +106,12 @@ class OpenVaultDialog(LocksmithDialog):
         self.cancel_button.clicked.connect(self.close)
         self.open_button.clicked.connect(self.open_vault)
 
+    def showEvent(self, event):
+        """Focus the passcode field when the dialog becomes visible."""
+        super().showEvent(event)
+        self.passcode_field.line_edit.setFocus()
+        logger.info(f"OpenVaultDialog shown; focused passcode field for vault={self.vault_name}")
+
     def _check_otp_configured(self):
         """Check if the vault has OTP configured and show OTP field if needed."""
         try:
