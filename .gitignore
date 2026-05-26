@@ -177,3 +177,6 @@ cython_debug/
 
 # proxy stuff
 *.pem
+
+# Git worktrees (linked worktrees under the project root)
+.worktrees/
