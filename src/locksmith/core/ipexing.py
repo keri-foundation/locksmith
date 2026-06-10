@@ -84,7 +84,6 @@ class Granter:
         if recp is None:
             raise ValueError("unable to find recipient")
     
-        reg = self.rgy.reger.cloneTvtAt(creder.regid)
         iss = self.rgy.reger.cloneTvtAt(creder.said)
 
         iserder = serdering.SerderKERI(raw=bytes(iss))
@@ -94,7 +93,7 @@ class Granter:
                                                               seal=dict(i=iserder.pre, s=seqner.snh, d=iserder.said))
         anc = self.hby.db.cloneEvtMsg(pre=serder.pre, fn=0, dig=serder.said)
     
-        exn, atc = protocoling.ipexGrantExn(hab=self.hab, recp=recp, message=message, acdc=acdc, reg=reg,
+        exn, atc = protocoling.ipexGrantExn(hab=self.hab, recp=recp, message=message, acdc=acdc,
                                             iss=iss, anc=anc, dt=timestamp)
         msg = bytearray(exn.raw)
         msg.extend(atc)
@@ -323,9 +322,6 @@ class SendGrantDoer(doing.DoDoer):
             )
             anc = self.hby.db.cloneEvtMsg(pre=serder.pre, fn=0, dig=serder.said)
 
-            # Get registry info
-            reg = self.rgy.reger.cloneTvtAt(creder.regid)
-
             # Create grant exchange message
             timestamp = helping.nowIso8601()
             exn, atc = protocoling.ipexGrantExn(
@@ -333,7 +329,6 @@ class SendGrantDoer(doing.DoDoer):
                 recp=recp,
                 message=self.message,
                 acdc=acdc,
-                reg=reg,
                 iss=iss,
                 anc=anc,
                 dt=timestamp
