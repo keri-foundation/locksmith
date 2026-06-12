@@ -485,7 +485,11 @@ def test_single_witness_rotation_posts_direct_receipt(tmp_path, monkeypatch):
                 toader=SimpleNamespace(num=0),
                 serder=SimpleNamespace(said="SAID_ROT_1"),
             )
-            self.psr = SimpleNamespace(parseOne=lambda ims: fake_db.wigs.append(bytes(ims)))
+            self.psr = SimpleNamespace(parseOne=self.parse_one)
+
+        def parse_one(self, ims, version=None):
+            calls.append(("parseOne", bytes(ims), version))
+            fake_db.wigs.append(bytes(ims))
 
         def rotate(self, *, toad, cuts, adds):
             calls.append(("rotate", toad, list(cuts), list(adds)))
@@ -558,6 +562,7 @@ def test_single_witness_rotation_posts_direct_receipt(tmp_path, monkeypatch):
             b"RAW",
             15,
         ),
+        ("parseOne", b"receipt", kering.Vrsn_2_0),
     ]
     assert auth_header
     assert fake_db.wigs.get(keys=None) == [b"receipt"]

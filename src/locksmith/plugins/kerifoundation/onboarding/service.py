@@ -14,7 +14,7 @@ from uuid import uuid4
 
 import pyotp
 import requests
-from keri import help
+from keri import help, kering
 from keri.app import agenting
 from keri.app.httping import CESR_ATTACHMENT_HEADER, CESR_CONTENT_TYPE, CESR_DESTINATION_HEADER
 from keri.core import exchange, parsing
@@ -1414,7 +1414,7 @@ class KFOnboardingService:
                 f"Witness {witness_eid} rejected the rotation event with status {response.status_code}"
             )
 
-        hab.psr.parseOne(ims=bytearray(response.content))
+        hab.psr.parseOne(ims=bytearray(response.content), version=kering.Vrsn_2_0)
         dgkey = dbing.dgKey(hab.pre, hab.kever.serder.said)
         wigs = hab.db.wigs.get(keys=dgkey)
         if len(wigs) < hab.kever.toader.num:
