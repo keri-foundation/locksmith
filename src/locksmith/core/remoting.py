@@ -254,7 +254,7 @@ async def resolve_oobi(
         timeout_seconds: float = 15.0,
 ):
     """
-    Resolves an OOBI with the connected Vault's Habery and recreates the full Remote ID data in Organizer.
+    Resolves an OOBI with the connected Vault's Habery using a vault doer.
     This includes a workaround because resolving an OOBI resets all attributes for a Remote ID including the alias.
 
     Parameters:
@@ -265,6 +265,7 @@ async def resolve_oobi(
         alias (str): The alias of the target AID to resolve the OOBI against
         cid (str): The controller AID of the target
         tag (str): The tag of the target
+        timeout_seconds (float): Maximum time to wait for the resolver doer
 
     Returns:
         bool: True if OOBI resolved successfully, False otherwise
