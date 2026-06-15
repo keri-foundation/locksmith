@@ -522,6 +522,10 @@ def test_single_witness_rotation_posts_direct_receipt(tmp_path, monkeypatch):
         "locksmith.plugins.kerifoundation.onboarding.service.agenting.Receiptor",
         fail_receiptor,
     )
+    monkeypatch.setattr(
+        "locksmith.plugins.kerifoundation.onboarding.service.message_version",
+        lambda ims: kering.Vrsn_2_0,
+    )
 
     hab = RotHab()
     registration = HostedWitnessRegistration(
