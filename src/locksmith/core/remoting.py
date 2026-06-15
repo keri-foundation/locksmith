@@ -481,7 +481,6 @@ class ResolveOobiDoer(doing.DoDoer):
         self.signal_bridge = signal_bridge
         self.timeout_seconds = timeout_seconds
         self.resolved = False
-        self.completed = False
 
         doers = [doing.doify(self.resolve_do)]
 
@@ -536,7 +535,6 @@ class ResolveOobiDoer(doing.DoDoer):
                                 'success': False
                             }
                         )
-                    self.completed = True
                     return
 
                 yield self.tock
@@ -561,7 +559,6 @@ class ResolveOobiDoer(doing.DoDoer):
                             'success': False
                         }
                     )
-                self.completed = True
                 return
 
             upsert_remote_id_metadata(
@@ -592,7 +589,6 @@ class ResolveOobiDoer(doing.DoDoer):
 
             logger.info(f'OOBI resolved successfully: {self.alias} ({self.oobi})')
             self.resolved = True
-            self.completed = True
             return
 
         except Exception as e:
@@ -611,7 +607,6 @@ class ResolveOobiDoer(doing.DoDoer):
                         'success': False
                         }
                     )
-            self.completed = True
             return
 
 
