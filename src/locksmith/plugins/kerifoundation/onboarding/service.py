@@ -15,18 +15,20 @@ from uuid import uuid4
 import pyotp
 import requests
 from keri import help
-from keri.app import agenting
 from keri.app.httping import CESR_ATTACHMENT_HEADER, CESR_CONTENT_TYPE, CESR_DESTINATION_HEADER
 from keri.core import exchange, parsing
 from keri.core.serdering import SerderKERI
 from keri.db import dbing
 from keri.help import helping
+from keri.kering import Kinds, Vrsn_2_0
 from hio.base import doing
 
+from locksmith.core.receipting import LocksmithReceiptor
 from locksmith.core.remoting import (
     introduce_watcher_observed_aid,
     message_version,
     purge_oobi_resolution_state,
+    replayKELMessages,
     resolve_oobi,
 )
 from locksmith.plugins.kerifoundation.db.basing import (
@@ -51,6 +53,8 @@ logger = help.ogler.getLogger(__name__)
 ProgressFn = Callable[..., None] | None
 ONBOARDING_AUTH_NAMESPACE = "kf_onboarding"
 ONBOARDING_AUTH_ALIAS_PREFIX = "kf-onboarding"
+SESSION_PROVISION_POLL_INTERVAL_SECONDS = 1.0
+SESSION_PROVISION_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -392,6 +396,10 @@ class KFBootClient:
             attributes=payload,
             sender=hab.pre,
             receiver=dest or "",
+            version=Vrsn_2_0,
+            pvrsn=Vrsn_2_0,
+            gvrsn=Vrsn_2_0,
+            kind=Kinds.json,
         )
         ims = hab.endorse(serder=serder, last=False, framed=True)
         attachment = bytearray(ims)
@@ -499,18 +507,16 @@ class KFBootClient:
     @staticmethod
     def _iter_surface_keystate_messages(*, hab: Any, start_sn: int, end_sn: int):
         """Replay fully attached KEL events so remote auth surfaces see witnessed rotations."""
-
-        messages = {}
-        for msg in hab.db.clonePreIter(pre=hab.pre):
-            raw = bytes(msg)
-            serder = SerderKERI(raw=raw)
-            sn = int(getattr(serder, "sn", serder.ked.get("s", 0)) or 0)
-            if sn < start_sn or sn > end_sn or sn in messages:
-                continue
-            messages[sn] = raw
-
-        for sn in range(start_sn, end_sn + 1):
-            yield sn, messages.get(sn, bytes(hab.msgOwnEvent(sn=sn)))
+        for sn, msg in zip(
+            range(start_sn, end_sn + 1),
+            replayKELMessages(
+                hab,
+                start_sn=start_sn,
+                end_sn=end_sn,
+                framed=True,
+            ),
+        ):
+            yield sn, bytes(msg)
 
     def _normalize_start_reply(
         self,
@@ -778,6 +784,34 @@ class KFOnboardingService:
                 boot_verified=True,
             )
 
+            if self._allocated_profile_complete(
+                start=start,
+                watcher_required=bootstrap.watcher_required,
+            ):
+                self._validate_allocated_profile(
+                    start=start,
+                    option=option,
+                    watcher_required=bootstrap.watcher_required,
+                )
+
+            if not self._allocated_profile_ready(
+                start=start,
+                option=option,
+                watcher_required=bootstrap.watcher_required,
+            ):
+                self._emit(
+                    progress,
+                    stage="session_provisioning",
+                    detail="Waiting for hosted resources",
+                )
+                start = await self._await_allocated_profile_async(
+                    ehab=ehab,
+                    start=start,
+                    option=option,
+                    watcher_required=bootstrap.watcher_required,
+                    fallback_region_id=bootstrap.region_id,
+                )
+
             self._validate_allocated_profile(
                 start=start,
                 option=option,
@@ -828,18 +862,22 @@ class KFOnboardingService:
                     detail="Reusing persisted witness registration state from the prior attempt",
                 )
 
-            if needs_rotation:
-                self._emit(
-                    progress,
-                    stage="witness_rotation",
-                    detail="Rotating the local account AID onto the hosted witness set",
-                )
-                await self._rotate_account_to_allocated_witnesses_async(
-                    hab=account_hab,
-                    registration=witness_registration,
-                    allocated_witness_eids=[witness.eid for witness in start.witnesses],
-                    toad=start.toad or option.toad,
-                )
+            self._emit(
+                progress,
+                stage="witness_rotation",
+                detail=(
+                    "Rotating the local account AID onto the hosted witness set"
+                    if needs_rotation
+                    else "Completing hosted witness receipts for the existing rotation"
+                ),
+            )
+            await self._rotate_account_to_allocated_witnesses_async(
+                hab=account_hab,
+                registration=witness_registration,
+                allocated_witness_eids=[witness.eid for witness in start.witnesses],
+                toad=start.toad or option.toad,
+                rotate=needs_rotation,
+            )
 
             if start.watcher is not None:
                 self._emit(progress, stage="watcher_resolution", detail="Resolving the required hosted watcher OOBI")
@@ -1315,13 +1353,15 @@ class KFOnboardingService:
         registration: HostedWitnessRegistration,
         allocated_witness_eids: list[str],
         toad: int,
+        rotate: bool = True,
     ) -> None:
         auths = self._build_witness_auths(registration)
         if len(allocated_witness_eids) == 1:
             witness_eid = allocated_witness_eids[0]
             witness_url = self._single_witness_url(registration=registration, witness_eid=witness_eid)
             try:
-                hab.rotate(toad=toad, cuts=[], adds=list(allocated_witness_eids))
+                if rotate:
+                    hab.rotate(toad=toad, cuts=[], adds=list(allocated_witness_eids))
                 self._receipt_single_witness_rotation(
                     hab=hab,
                     witness_eid=witness_eid,
@@ -1332,14 +1372,15 @@ class KFOnboardingService:
                 raise KFBootError(f"Failed rotating the local account AID onto hosted witnesses: {exc}") from exc
             return
 
-        receiptor = agenting.Receiptor(hby=self._app.vault.hby)
+        receiptor = LocksmithReceiptor(hby=self._app.vault.hby)
 
         def rotate_and_receipt(tymth, tock=0.0, **opts):
             _ = opts
             receiptor.wind(tymth)
             _ = (yield tock)
             try:
-                hab.rotate(toad=toad, cuts=[], adds=list(allocated_witness_eids))
+                if rotate:
+                    hab.rotate(toad=toad, cuts=[], adds=list(allocated_witness_eids))
                 yield from receiptor.receipt(hab.pre, sn=hab.kever.sn, auths=auths)
             finally:
                 receiptor.remove(list(receiptor.doers))
@@ -1351,6 +1392,13 @@ class KFOnboardingService:
         except Exception as exc:
             raise KFBootError(f"Failed rotating the local account AID onto hosted witnesses: {exc}") from exc
 
+        dgkey = dbing.dgKey(hab.pre, hab.kever.serder.said)
+        wigs = hab.db.wigs.get(keys=dgkey) or []
+        if len(wigs) < toad:
+            raise KFBootError(
+                f"Insufficient witness receipts after rotation: got {len(wigs)}, need {toad}"
+            )
+
     async def _rotate_account_to_allocated_witnesses_async(
         self,
         *,
@@ -1358,13 +1406,15 @@ class KFOnboardingService:
         registration: HostedWitnessRegistration,
         allocated_witness_eids: list[str],
         toad: int,
+        rotate: bool = True,
     ) -> None:
         if len(allocated_witness_eids) == 1:
             auths = self._build_witness_auths(registration)
             witness_eid = allocated_witness_eids[0]
             witness_url = self._single_witness_url(registration=registration, witness_eid=witness_eid)
             try:
-                hab.rotate(toad=toad, cuts=[], adds=list(allocated_witness_eids))
+                if rotate:
+                    hab.rotate(toad=toad, cuts=[], adds=list(allocated_witness_eids))
                 await self._await_blocking_result(
                     self._receipt_single_witness_rotation,
                     hab=hab,
@@ -1382,6 +1432,7 @@ class KFOnboardingService:
             registration=registration,
             allocated_witness_eids=allocated_witness_eids,
             toad=toad,
+            rotate=rotate,
         )
 
     def _receipt_single_witness_rotation(
@@ -1473,6 +1524,77 @@ class KFOnboardingService:
             raise KFBootError("Allocated witness profile contains invalid witness identifiers")
         if watcher_required and start.watcher is None:
             raise KFBootError("Onboarding reply did not include the required hosted watcher")
+
+    async def _await_allocated_profile_async(
+        self,
+        *,
+        ehab: Any,
+        start: OnboardingStartReply,
+        option: BootstrapOption,
+        watcher_required: bool,
+        fallback_region_id: str,
+    ) -> OnboardingStartReply:
+        deadline = asyncio.get_running_loop().time() + SESSION_PROVISION_TIMEOUT_SECONDS
+        current = start
+
+        while not self._allocated_profile_ready(
+            start=current,
+            option=option,
+            watcher_required=watcher_required,
+        ):
+            if current.state in {"failed", "cancelled", "expired"}:
+                raise KFBootError(
+                    current.failure_reason
+                    or f"Onboarding session {current.session_id} closed before hosted resources were allocated"
+                )
+
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise KFBootError("Timed out waiting for hosted witness allocation")
+
+            current = await self._await_blocking_result(
+                self._boot_client.session_status,
+                ehab,
+                session_id=start.session_id,
+                fallback_region_id=fallback_region_id,
+            )
+            if not self._allocated_profile_ready(
+                start=current,
+                option=option,
+                watcher_required=watcher_required,
+            ):
+                await asyncio.sleep(
+                    min(SESSION_PROVISION_POLL_INTERVAL_SECONDS, remaining)
+                )
+
+        return current
+
+    @staticmethod
+    def _allocated_profile_ready(
+        *,
+        start: OnboardingStartReply,
+        option: BootstrapOption,
+        watcher_required: bool,
+    ) -> bool:
+        if start.state in {"failed", "cancelled", "expired"}:
+            return False
+        if len(start.witnesses) != option.witness_count:
+            return False
+        if start.witness_count and start.witness_count != option.witness_count:
+            return False
+        if (start.toad or option.toad) != option.toad:
+            return False
+        return not watcher_required or start.watcher is not None
+
+    @staticmethod
+    def _allocated_profile_complete(
+        *,
+        start: OnboardingStartReply,
+        watcher_required: bool,
+    ) -> bool:
+        if not start.witness_count or len(start.witnesses) != start.witness_count:
+            return False
+        return not watcher_required or start.watcher is not None
 
     async def _abandon_onboarding_run_async(
         self,
