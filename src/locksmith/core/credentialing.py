@@ -16,6 +16,8 @@ from keri.help import helping
 from keri.kering import Kinds
 from keri.vdr import credentialing, verifying
 
+from locksmith.core.receipting import LocksmithReceiptor
+
 logger = help.ogler.getLogger(__name__)
 
 
@@ -205,7 +207,13 @@ class LoadSchemaDoer(doing.DoDoer):
 
         self.extend([counselor, registrar, postman])
 
-        kwa = dict(nonce=core_signing.Salter().qb64)
+        # Keripy's legacy VDR registry still emits KERI v1 TEL events. Keep this
+        # boundary explicit until the registry lifecycle moves to ACDC v2.
+        kwa = dict(
+            nonce=core_signing.Salter().qb64,
+            version=kering.Vrsn_1_0,
+            kind=Kinds.json,
+        )
         registry = self.rgy.makeRegistry(name=registry_name, prefix=hab.pre, **kwa)
 
         rseal = SealEvent(registry.regk, "0", registry.regd)
@@ -562,7 +570,7 @@ class Registrar(doing.DoDoer):
         self.rgy = rgy
         self.counselor = counselor
         self.auth = auth
-        self.receiptor = agenting.Receiptor(hby=self.hby)
+        self.receiptor = LocksmithReceiptor(hby=self.hby)
         self.witPub = agenting.WitnessPublisher(hby=self.hby)
 
         doers = [self.receiptor, self.witPub, doing.doify(self.escrowDo)]
