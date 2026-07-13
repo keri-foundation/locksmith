@@ -241,6 +241,10 @@ def test_introduce_watcher_observed_aid_sends_kel_and_add_reply(monkeypatch):
     monkeypatch.setattr(remoting, "SerderKERI", FakeSerder)
     monkeypatch.setattr(remoting.doing, "DoDoer", FakeDoDoer)
     monkeypatch.setattr(remoting.doing, "Doist", FakeDoist)
+    monkeypatch.setattr(
+        remoting, "replayDelegationMessages", lambda hab, kever: [b"delegation"]
+    )
+    monkeypatch.setattr(remoting, "replayKELMessages", lambda hab: [b"icp", b"rot"])
 
     remoting.introduce_watcher_observed_aid(
         app,
@@ -350,6 +354,8 @@ def test_introduce_watcher_observed_aid_skips_role_add_when_already_allowed(monk
     monkeypatch.setattr(remoting, "SerderKERI", FakeSerder)
     monkeypatch.setattr(remoting.doing, "DoDoer", FakeDoDoer)
     monkeypatch.setattr(remoting.doing, "Doist", FakeDoist)
+    monkeypatch.setattr(remoting, "replayDelegationMessages", lambda hab, kever: [])
+    monkeypatch.setattr(remoting, "replayKELMessages", lambda hab: [b"icp"])
 
     remoting.introduce_watcher_observed_aid(
         app,
@@ -438,6 +444,8 @@ def test_introduce_watcher_observed_aid_wraps_delivery_failures(monkeypatch):
     monkeypatch.setattr(remoting, "SerderKERI", FakeSerder)
     monkeypatch.setattr(remoting.doing, "DoDoer", FakeDoDoer)
     monkeypatch.setattr(remoting.doing, "Doist", FakeDoist)
+    monkeypatch.setattr(remoting, "replayDelegationMessages", lambda hab, kever: [])
+    monkeypatch.setattr(remoting, "replayKELMessages", lambda hab: [])
 
     with pytest.raises(
         ValueError,

@@ -10,7 +10,7 @@ from keri.core import coring, eventing, parsing
 from keri.db import dbing
 from keri.vdr import credentialing
 
-from locksmith.core.remoting import message_version
+from locksmith.core.remoting import message_version, replayKEL
 from locksmith.db.basing import (
     BrowserPluginSettings,
     IdentifierMetaInfo,
@@ -191,7 +191,12 @@ def test_parse_cesr_http_reply_uses_detected_parser_version(monkeypatch):
 
 
 def test_message_version_detects_existing_keri10_event():
-    with habbing.openHab(name="v1-sender", temp=True) as (_hby, hab):
+    with habbing.openHab(
+        name="v1-sender",
+        temp=True,
+        version=kering.Vrsn_1_0,
+        kind=kering.Kinds.json,
+    ) as (_hby, hab):
         msg = bytes(hab.msgOwnEvent(sn=0))
 
     assert b"KERI10" in msg[:32]
@@ -209,6 +214,27 @@ def test_keri_v2_parser_accepts_existing_keri10_event_with_detected_version():
         )
 
         assert hab.pre in kvy.kevers
+
+
+def test_replay_kel_rebuilds_rotated_v2_json_stream_for_parser():
+    with habbing.openHab(
+        name="v2-replay-sender",
+        temp=True,
+        version=kering.Vrsn_2_0,
+        kind=kering.Kinds.json,
+    ) as (_hby, hab):
+        hab.rotate()
+        stream = replayKEL(hab)
+
+        with habbing.openHby(name="v2-replay-receiver", temp=True) as hby:
+            kvy = eventing.Kevery(db=hby.db, lax=True)
+            parsing.Parser(kvy=kvy, local=False, version=kering.Vrsn_2_0).parse(
+                ims=stream
+            )
+
+            assert not stream
+            assert kvy.kevers[hab.pre].sn == 1
+            assert kvy.kevers[hab.pre].serder.kind == kering.Kinds.json
 
 
 def test_vault_constructs_with_real_keri_v2_stores(monkeypatch, tmp_path):
@@ -318,32 +344,11 @@ def test_locksmith_config_resalt_uses_keri_v2_salter():
         config.salt = old_salt
 
 
-def test_registry_creation_uses_keri_v2_nonce(monkeypatch):
+def test_registry_creation_requests_legacy_v1_tel(monkeypatch):
     from locksmith.core import credentialing as locksmith_credentialing
 
-    class StopAfterNonce(Exception):
+    class StopAfterRegistryCreation(Exception):
         pass
-
-    captured = {}
-    doer = locksmith_credentialing.LoadSchemaDoer.__new__(
-        locksmith_credentialing.LoadSchemaDoer
-    )
-    doer.hby = SimpleNamespace(
-        habs={"ISSUER_AID": SimpleNamespace(name="issuer", pre="ISSUER_AID")}
-    )
-    doer.issuer_aid = "ISSUER_AID"
-    doer.auth_codes = None
-    doer.tock = 0.0
-    doer.extend = lambda doers: None
-
-    def make_registry(name, prefix, **kwa):
-        captured.update(name=name, prefix=prefix, nonce=kwa["nonce"])
-        raise StopAfterNonce
-
-    doer.rgy = SimpleNamespace(
-        registryByName=lambda name: None,
-        makeRegistry=make_registry,
-    )
 
     monkeypatch.setattr(
         locksmith_credentialing.grouping,
@@ -361,15 +366,39 @@ def test_registry_creation_uses_keri_v2_nonce(monkeypatch):
         lambda **kwargs: object(),
     )
 
-    with pytest.raises(StopAfterNonce):
+    captured = {}
+
+    def make_registry(name, prefix, **kwa):
+        captured.update(name=name, prefix=prefix, **kwa)
+        raise StopAfterRegistryCreation
+
+    doer = locksmith_credentialing.LoadSchemaDoer.__new__(
+        locksmith_credentialing.LoadSchemaDoer
+    )
+    doer.hby = SimpleNamespace(
+        habs={"ISSUER_AID": SimpleNamespace(name="issuer", pre="ISSUER_AID")}
+    )
+    doer.rgy = SimpleNamespace(
+        registryByName=lambda name: None,
+        makeRegistry=make_registry,
+    )
+    doer.issuer_aid = "ISSUER_AID"
+    doer.auth_codes = None
+    doer.tock = 0.0
+    doer.extend = lambda doers: None
+
+    with pytest.raises(StopAfterRegistryCreation):
         next(doer._create_registry("SCHEMA_SAID", "Schema Title"))
 
     assert captured["name"] == "SCHEMA_SAID"
     assert captured["prefix"] == "ISSUER_AID"
+    assert captured["version"] == kering.Vrsn_1_0
+    assert captured["kind"] == kering.Kinds.json
     assert len(captured["nonce"]) == 24
 
 
-def test_locksmith_receiptor_uses_keri_v2_httping(monkeypatch):
+@pytest.mark.parametrize("receiptor_name", ["LocksmithReceiptor", "LocksmithWitnessReceiptor"])
+def test_locksmith_receiptor_uses_keri_v2_httping(monkeypatch, receiptor_name):
     from locksmith.core import receipting
 
     class FakeClient:
@@ -381,15 +410,11 @@ def test_locksmith_receiptor_uses_keri_v2_httping(monkeypatch):
             self.responses.pop(0)
             self.responded += 1
 
-    class FakeHab:
-        def replay(self, pre):
-            assert pre == "AID"
-            return b"replayed-kel"
-
     client = FakeClient()
     captured = {}
-    hby = SimpleNamespace(prefixes={"AID"}, habs={"AID": FakeHab()})
-    receiptor = receipting.LocksmithReceiptor(hby=hby)
+    hab = object()
+    hby = SimpleNamespace(prefixes={"AID"}, habs={"AID": hab})
+    receiptor = getattr(receipting, receiptor_name)(hby=hby)
     receiptor.tock = 0.0
     receiptor.extend = lambda doers: captured.update(extended=len(doers))
     receiptor.remove = lambda doers: captured.update(removed=len(doers))
@@ -408,6 +433,13 @@ def test_locksmith_receiptor_uses_keri_v2_httping(monkeypatch):
         receipting.httping,
         "streamCESRRequests",
         stream_cesr_requests,
+    )
+    monkeypatch.setattr(
+        receipting,
+        "replayKEL",
+        lambda replay_hab, pre: b"replayed-kel"
+        if replay_hab is hab and pre == "AID"
+        else pytest.fail("unexpected replay input"),
     )
 
     list(receiptor.catchup(pre="AID", wit="WIT"))
@@ -432,8 +464,8 @@ def test_watcher_inquisitor_treats_204_as_accepted(monkeypatch, caplog):
             return self.responses.pop(0)
 
     class FakeHab:
-        def query(self, target, *, src, route, query):
-            captured.update(target=target, src=src, route=route, query=query)
+        def query(self, target, *, src, route, query, **kwa):
+            captured.update(target=target, src=src, route=route, query=query, **kwa)
             return b"qry"
 
     class FakeHby:
@@ -469,6 +501,9 @@ def test_watcher_inquisitor_treats_204_as_accepted(monkeypatch, caplog):
     assert captured["stream"]["client"] is client
     assert captured["stream"]["dest"] == "WATCHER"
     assert captured["stream"]["ims"] == bytearray(b"qry")
+    assert captured["version"] == kering.Vrsn_2_0
+    assert captured["gvrsn"] == kering.Vrsn_2_0
+    assert captured["kind"] == kering.Kinds.json
     assert captured["removed"] == [client_doer]
     assert "invalid response" not in caplog.text
 
