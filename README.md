@@ -42,3 +42,6 @@ python ./src/locksmith/main.py
 
 KERI Foundation plugin documentation lives in
 [`docs/kerifoundation-plugin.rst`](docs/kerifoundation-plugin.rst).
+
+Third-party plugin authors should start with
+[`docs/plugin-authoring.rst`](docs/plugin-authoring.rst).
