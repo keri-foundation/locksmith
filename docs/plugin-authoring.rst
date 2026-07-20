@@ -557,8 +557,8 @@ signing, rotation, receipts, OOBI resolution, or parsing matter. Tests should
 cover observable behavior, especially recovery after partial failure. Tests
 that only assert helper calls do not protect the plugin contract.
 
-Before proposing a plugin for inclusion, run its focused tests, Ruff on changed
-Python, the Sphinx build, and a local end-to-end test against the real provider
+Before proposing a plugin for inclusion, run its focused tests, build the
+documentation, and run a local end-to-end test against the real provider
 services.
 
 AI Agent Context
