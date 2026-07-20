@@ -191,7 +191,9 @@ def test_parse_cesr_http_reply_uses_detected_parser_version(monkeypatch):
 
 
 def test_message_version_detects_existing_keri10_event():
-    with habbing.openHab(name="v1-sender", temp=True) as (_hby, hab):
+    with habbing.openHab(
+        name="v1-sender", temp=True, version=kering.Vrsn_1_0
+    ) as (_hby, hab):
         msg = bytes(hab.msgOwnEvent(sn=0))
 
     assert b"KERI10" in msg[:32]
@@ -199,7 +201,9 @@ def test_message_version_detects_existing_keri10_event():
 
 
 def test_keri_v2_parser_accepts_existing_keri10_event_with_detected_version():
-    with habbing.openHab(name="v1-sender", temp=True) as (_hby, hab):
+    with habbing.openHab(
+        name="v1-sender", temp=True, version=kering.Vrsn_1_0
+    ) as (_hby, hab):
         msg = bytes(hab.msgOwnEvent(sn=0))
 
     with habbing.openHby(name="v1-receiver", temp=True) as hby:
