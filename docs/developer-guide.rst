@@ -40,11 +40,10 @@ Once the editable install is in place:
 
    python -m locksmith.main
 
-Building The Docs
+Building the Docs
 -----------------
 
-This repo now has a narrow Sphinx scaffold for developer-oriented documentation. Additional
-topic guides can be layered onto that scaffold without changing the local docs workflow.
+Build the local HTML documentation with Sphinx:
 
 .. code-block:: bash
 
@@ -54,19 +53,9 @@ topic guides can be layered onto that scaffold without changing the local docs w
 Plugin Lifecycle
 ----------------
 
-The first plugin touchpoint happens when ``LocksmithWindow`` creates
-``LocksmithApplication`` and calls ``PluginManager.discover_and_initialize(...)``.
+Locksmith discovers provider integrations from the ``locksmith.plugins``
+entry-point group and coordinates their UI, vault lifecycle, background work,
+and optional witness hooks.
 
-Each plugin is:
-
-#. discovered from the ``locksmith.plugins`` entry-point group
-#. instantiated with no constructor arguments
-#. initialized once with the application object
-#. asked to register its pages and navigation menu section
-
-Later, when a vault opens, the application calls ``PluginManager.on_vault_opened(vault)``.
-That callback lets a plugin bind to vault-local state and return background doers that are
-added to ``vault.doers``.
-
-When a vault closes, ``PluginManager.on_vault_closed(vault)`` gives plugins a teardown hook
-before the application closes LMDB-backed resources.
+See :doc:`plugin-authoring` for the complete host contract and a walkthrough of
+the bundled KERI Foundation reference implementation.
