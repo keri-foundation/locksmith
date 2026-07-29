@@ -65,7 +65,7 @@ class PluginManager:
         for plugin in self._plugins.values():
             try:
                 plugin.on_vault_opened(vault)
-                vault.doers.extend(plugin.get_doers())
+                vault.extend(plugin.get_doers())
             except Exception:
                 logger.exception(f"Plugin '{plugin.plugin_id}' failed on_vault_opened")
 
