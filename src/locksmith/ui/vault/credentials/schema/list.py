@@ -9,6 +9,7 @@ from typing import Dict, Any, TYPE_CHECKING
 
 from PySide6.QtWidgets import QVBoxLayout, QSizePolicy
 
+from locksmith.core.credentialing import registry_is_complete
 from locksmith.ui.toolkit.tables import PaginatedTableWidget
 from locksmith.ui.vault.shared.base_list_page import BaseListPage
 from locksmith.ui.vault.credentials.schema.add import AddSchemaDialog
@@ -101,7 +102,13 @@ class SchemaListPage(BaseListPage):
                 # Determine issuer name
                 issuer_name = "N/A"
                 registry = self.app.vault.rgy.registryByName(said)
+                issuable = "No"
                 if registry:
+                    issuable = (
+                        "Yes"
+                        if registry_is_complete(self.app.vault.rgy, registry)
+                        else "Pending"
+                    )
                     try:
                         # Get the issuer prefix from the registry
                         issuer_pre = registry.hab.pre
@@ -116,7 +123,7 @@ class SchemaListPage(BaseListPage):
                 schema_dict = {
                     "Schema Name": sed.get("title", ""),
                     "Version": sed.get("version", ""),
-                    "Issuable": "Yes" if registry else "No",
+                    "Issuable": issuable,
                     "Issuer": issuer_name,
                     "Description": sed.get("description", ""),
                     "SAID": said  # Store SAID for delete operation

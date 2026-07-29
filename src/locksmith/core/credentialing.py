@@ -21,6 +21,14 @@ from locksmith.core.receipting import LocksmithReceiptor
 logger = help.ogler.getLogger(__name__)
 
 
+def registry_is_complete(rgy, registry):
+    if registry is None:
+        return False
+
+    seqner = coring.Seqner(sn=0)
+    return rgy.reger.ctel.get(keys=(registry.regk, seqner.qb64)) is not None
+
+
 class LoadSchemaDoer(doing.DoDoer):
     """Doer for asynchronous schema loading and registry creation."""
 
@@ -167,30 +175,29 @@ class LoadSchemaDoer(doing.DoDoer):
             str: Name of the created registry
         """
         registry_name = schema_said
+        seqner = coring.Seqner(sn=0)
 
-        # Check if registry already exists
-        existing_registry = self.rgy.registryByName(registry_name)
-        if existing_registry is not None:
-            seqner = coring.Seqner(sn=0)
-            if self.rgy.reger.ctel.get(keys=(existing_registry.regk, seqner.qb64)) is None:
+        registry = self.rgy.registryByName(registry_name)
+        pending = None
+        if registry is not None:
+            if registry_is_complete(self.rgy, registry):
+                logger.info(f"Registry already exists and is complete: {registry_name}")
+                return registry_name
+
+            pending = self.rgy.reger.tpwe.get(keys=(registry.regk, seqner.qb64))
+            if len(pending) != 1:
                 raise kering.MissingEntryError(
                     f"Registry {registry_name} already exists but is not complete; "
-                    "witness receipts may still be pending"
+                    "no pending witness escrow is available to resume"
                 )
-            logger.info(f"Registry already exists and is complete: {registry_name}")
-            return registry_name
 
-        # Validate that issuer AID was provided
-        if not self.issuer_aid:
-            raise Exception("Issuer AID is required for registry creation")
-
-        # Get the hab for the issuer AID
-        if self.issuer_aid not in self.hby.habs:
-            raise Exception(f"Issuer identifier {self.issuer_aid} not found")
-
-        hab = self.hby.habs[self.issuer_aid]
-
-        logger.info(f"Creating credential registry: {registry_name} for issuer {hab.name} ({hab.pre})")
+            hab = registry.hab
+        else:
+            if not self.issuer_aid:
+                raise Exception("Issuer AID is required for registry creation")
+            if self.issuer_aid not in self.hby.habs:
+                raise Exception(f"Issuer identifier {self.issuer_aid} not found")
+            hab = self.hby.habs[self.issuer_aid]
 
         counselor = grouping.Counselor(hby=self.hby)
 
@@ -205,45 +212,77 @@ class LoadSchemaDoer(doing.DoDoer):
         registrar = Registrar(hby=self.hby, rgy=self.rgy, counselor=counselor, auth=auths)
         postman = forwarding.Poster(hby=self.hby)
 
-        self.extend([counselor, registrar, postman])
+        doers = [counselor, registrar, postman]
+        self.extend(doers)
 
-        # Keripy's legacy VDR registry still emits KERI v1 TEL events. Keep this
-        # boundary explicit until the registry lifecycle moves to ACDC v2.
-        kwa = dict(
-            nonce=core_signing.Salter().qb64,
-            version=kering.Vrsn_1_0,
-            kind=Kinds.json,
-        )
-        registry = self.rgy.makeRegistry(name=registry_name, prefix=hab.pre, **kwa)
+        if pending is not None:
+            current_prefixer, current_number, _ = pending[0]
+            pending_events = {
+                number.sn: prefixer.qb64
+                for _, (prefixer, number, _) in self.rgy.reger.tpwe.getTopItemIter(keys=())
+                if prefixer.qb64 == current_prefixer.qb64 and number.sn <= current_number.sn
+            }
+            for sn in sorted(pending_events):
+                msg = dict(pre=pending_events[sn], sn=sn)
+                if auths:
+                    msg["auths"] = auths
+                registrar.receiptor.msgs.append(msg)
+            logger.info(f"Retrying pending witness receipts for registry: {registry_name}")
+        else:
+            logger.info(f"Creating credential registry: {registry_name} for issuer {hab.name} ({hab.pre})")
 
-        rseal = SealEvent(registry.regk, "0", registry.regd)
-        rseal = dict(i=rseal.i, s=rseal.s, d=rseal.d)
+            # Keripy's legacy VDR registry still emits KERI v1 TEL events. Keep this
+            # boundary explicit until the registry lifecycle moves to ACDC v2.
+            kwa = dict(
+                nonce=core_signing.Salter().qb64,
+                version=kering.Vrsn_1_0,
+                kind=Kinds.json,
+            )
+            registry = self.rgy.makeRegistry(name=registry_name, prefix=hab.pre, **kwa)
 
-        anc = hab.interact(data=[rseal])
+            rseal = SealEvent(registry.regk, "0", registry.regd)
+            rseal = dict(i=rseal.i, s=rseal.s, d=rseal.d)
 
-        aserder = serdering.SerderKERI(raw=bytes(anc))
-        registrar.incept(iserder=registry.vcp, anc=aserder)
+            anc = hab.interact(data=[rseal])
 
-        if isinstance(hab, GroupHab):
-            smids = hab.db.signingMembers(pre=hab.pre)
-            smids.remove(hab.mhab.pre)
+            aserder = serdering.SerderKERI(raw=bytes(anc))
+            registrar.incept(iserder=registry.vcp, anc=aserder)
+            if not isinstance(hab, GroupHab):
+                pending = self.rgy.reger.tpwe.get(keys=(registry.regk, seqner.qb64))
 
-            for recp in smids:  # this goes to other participants only as a signaling mechanism
-                exn, atc = grouping.multisigRegistryInceptExn(ghab=hab, vcp=registry.vcp.raw, anc=anc,
-                                                              usage=f"Registry for schema {schema_title}")
-                postman.send(src=hab.mhab.pre,
-                             dest=recp,
-                             topic="multisig",
-                             serder=exn,
-                             attachment=atc)
+            if isinstance(hab, GroupHab):
+                smids = hab.db.signingMembers(pre=hab.pre)
+                smids.remove(hab.mhab.pre)
+
+                for recp in smids:  # this goes to other participants only as a signaling mechanism
+                    exn, atc = grouping.multisigRegistryInceptExn(ghab=hab, vcp=registry.vcp.raw, anc=anc,
+                                                                  usage=f"Registry for schema {schema_title}")
+                    postman.send(src=hab.mhab.pre,
+                                 dest=recp,
+                                 topic="multisig",
+                                 serder=exn,
+                                 attachment=atc)
 
         while not registrar.complete(pre=registry.regk, sn=0):
             self.rgy.processEscrows()
+            if pending:
+                prefixer, number, diger = pending[0]
+                attempted = any(
+                    cue["pre"] == prefixer.qb64 and cue["sn"] == number.sn
+                    for cue in registrar.receiptor.cues
+                )
+                if attempted:
+                    wigs = self.hby.db.wigs.get(keys=(prefixer.qb64b, diger.qb64))
+                    if len(wigs) < len(hab.kever.wits):
+                        self.remove(doers)
+                        raise kering.AuthError(
+                            "Witness receipt request failed. Check the OTP and try again."
+                        )
             yield self.tock
 
         logger.info(f"Registry {registry_name}({registry.regk}) created for Identifier Prefix: {hab.pre}")
 
-        self.remove([counselor, registrar, postman])
+        self.remove(doers)
 
         return registry_name
 

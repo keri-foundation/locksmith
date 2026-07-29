@@ -7,8 +7,6 @@ Locksmith-local witness receipting compatibility helpers.
 from keri.app import agenting, httping
 from keri import kering
 
-from locksmith.core.remoting import replayKEL
-
 
 class LocksmithReceiptor(agenting.Receiptor):
     """Receiptor with fixed witness catch-up behavior.
@@ -35,33 +33,7 @@ class LocksmithReceiptor(agenting.Receiptor):
             sent = httping.streamCESRRequests(
                 client=client,
                 dest=wit,
-                ims=replayKEL(hab, pre=pre),
-            )
-            while len(client.responses) < sent:
-                yield self.tock
-
-            while client.responses:
-                client.respond()
-        finally:
-            self.remove([client_doer])
-
-
-class LocksmithWitnessReceiptor(agenting.WitnessReceiptor):
-    """Witness receiptor with version-correct, fully drained KEL catch-up."""
-
-    def catchup(self, pre, wit):
-        if pre not in self.hby.prefixes:
-            raise kering.MissingEntryError(f"{pre} not a valid AID")
-
-        hab = self.hby.habs[pre]
-        client, client_doer = agenting.httpClient(hab, wit)
-        self.extend([client_doer])
-
-        try:
-            sent = httping.streamCESRRequests(
-                client=client,
-                dest=wit,
-                ims=replayKEL(hab, pre=pre),
+                ims=hab.replay(pre=pre),
             )
             while len(client.responses) < sent:
                 yield self.tock

@@ -14,7 +14,6 @@ from keri.vdr import credentialing
 
 from locksmith.core.vaulting import run_vault_controller
 from locksmith.core.grouping import GroupMultisigInceptDoer
-from locksmith.core.receipting import LocksmithWitnessReceiptor
 
 logger = help.ogler.getLogger(__name__)
 
@@ -1100,7 +1099,7 @@ class ConfirmDoer(doing.DoDoer):
         """
         from keri.db import dbing
         from keri.core import serdering, coring
-        from keri.app import habbing, grouping
+        from keri.app import agenting, habbing, grouping
         from ordered_set import OrderedSet as oset
         from keri import core
 
@@ -1197,7 +1196,7 @@ class ConfirmDoer(doing.DoDoer):
                                     (wit, code) = arg.split(":")
                                     auths[wit] = f"{code}#{codeTime}"
 
-                            witDoer = LocksmithWitnessReceiptor(hby=self.hby, auths=auths)
+                            witDoer = agenting.WitnessReceiptor(hby=self.hby, auths=auths)
                             self.extend(doers=[witDoer])
                             self.toRemove.append(witDoer)  # type: ignore
                             yield self.tock

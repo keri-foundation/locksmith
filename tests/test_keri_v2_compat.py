@@ -6,7 +6,7 @@ import pytest
 from hio.base import doing
 from keri import kering
 from keri.app import habbing
-from keri.core import coring, eventing, parsing
+from keri.core import Codens, Counter, coring, eventing, parsing
 from keri.db import dbing
 from keri.vdr import credentialing
 
@@ -216,17 +216,28 @@ def test_keri_v2_parser_accepts_existing_keri10_event_with_detected_version():
         assert hab.pre in kvy.kevers
 
 
-def test_replay_kel_rebuilds_rotated_v2_json_stream_for_parser():
+def test_replay_kel_defaults_v2_attachments_for_mixed_version_stream():
     with habbing.openHab(
-        name="v2-replay-sender",
+        name="mixed-replay-sender",
         temp=True,
-        version=kering.Vrsn_2_0,
+        version=kering.Vrsn_1_0,
         kind=kering.Kinds.json,
     ) as (_hby, hab):
-        hab.rotate()
+        v1_stream = replayKEL(hab)
+        counter = Counter(
+            qb64b=v1_stream[hab.kever.serder.size:],
+            version=kering.Vrsn_2_0,
+        )
+        assert counter.name == Codens.AttachmentGroup
+
+        hab.rotate(version=kering.Vrsn_2_0, kind=kering.Kinds.json)
         stream = replayKEL(hab)
 
-        with habbing.openHby(name="v2-replay-receiver", temp=True) as hby:
+        with habbing.openHby(
+            name="v2-replay-receiver",
+            temp=True,
+            version=kering.Vrsn_2_0,
+        ) as hby:
             kvy = eventing.Kevery(db=hby.db, lax=True)
             parsing.Parser(kvy=kvy, local=False, version=kering.Vrsn_2_0).parse(
                 ims=stream
@@ -397,8 +408,7 @@ def test_registry_creation_requests_legacy_v1_tel(monkeypatch):
     assert len(captured["nonce"]) == 24
 
 
-@pytest.mark.parametrize("receiptor_name", ["LocksmithReceiptor", "LocksmithWitnessReceiptor"])
-def test_locksmith_receiptor_uses_keri_v2_httping(monkeypatch, receiptor_name):
+def test_locksmith_receiptor_uses_keri_v2_httping(monkeypatch):
     from locksmith.core import receipting
 
     class FakeClient:
@@ -412,9 +422,15 @@ def test_locksmith_receiptor_uses_keri_v2_httping(monkeypatch, receiptor_name):
 
     client = FakeClient()
     captured = {}
-    hab = object()
+    hab = SimpleNamespace()
+
+    def replay(*, pre):
+        captured.update(replay_pre=pre)
+        return b"replayed-kel"
+
+    hab.replay = replay
     hby = SimpleNamespace(prefixes={"AID"}, habs={"AID": hab})
-    receiptor = getattr(receipting, receiptor_name)(hby=hby)
+    receiptor = receipting.LocksmithReceiptor(hby=hby)
     receiptor.tock = 0.0
     receiptor.extend = lambda doers: captured.update(extended=len(doers))
     receiptor.remove = lambda doers: captured.update(removed=len(doers))
@@ -434,14 +450,6 @@ def test_locksmith_receiptor_uses_keri_v2_httping(monkeypatch, receiptor_name):
         "streamCESRRequests",
         stream_cesr_requests,
     )
-    monkeypatch.setattr(
-        receipting,
-        "replayKEL",
-        lambda replay_hab, pre: b"replayed-kel"
-        if replay_hab is hab and pre == "AID"
-        else pytest.fail("unexpected replay input"),
-    )
-
     list(receiptor.catchup(pre="AID", wit="WIT"))
 
     assert captured == {
@@ -450,6 +458,7 @@ def test_locksmith_receiptor_uses_keri_v2_httping(monkeypatch, receiptor_name):
         "ims": b"replayed-kel",
         "extended": 1,
         "removed": 1,
+        "replay_pre": "AID",
     }
     assert client.responded == 2
 

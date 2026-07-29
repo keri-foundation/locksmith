@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QButton
 from keri import help
 from keri.core import coring
 
-from locksmith.core.credentialing import IssueCredentialDoer
+from locksmith.core.credentialing import IssueCredentialDoer, registry_is_complete
 from locksmith.core.habbing import list_eligible_local_identifiers
 from locksmith.ui.toolkit.widgets import (
     LocksmithDialog,
@@ -276,7 +276,8 @@ class IssueCredentialDialog(LocksmithDialog):
             # Get all schemas from the database
             for (said,), schemer in self.app.vault.hby.db.schema.getTopItemIter():
                 logger.info(f"Found schema {said} checking with {self.app.vault.rgy.regs}")
-                if not self.app.vault.rgy.registryByName(said):
+                registry = self.app.vault.rgy.registryByName(said)
+                if not registry_is_complete(self.app.vault.rgy, registry):
                     continue
 
                 sed = schemer.sed

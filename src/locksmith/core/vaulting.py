@@ -30,7 +30,7 @@ from locksmith.core.adjudication import Watchmen, KeyStateVarianceAuthority
 from locksmith.core.credentialing import Registrar
 from locksmith.core.configing import ENABLE_TURRET_BROWSER_PLUGIN
 from locksmith.core.grouping import CounselingCompletionDoer
-from locksmith.core.receipting import LocksmithReceiptor, LocksmithWitnessReceiptor
+from locksmith.core.receipting import LocksmithReceiptor
 from locksmith.core.signals import DoerSignalBridge
 from locksmith.core.tasking import QtTask
 from locksmith.core.turretting import TurretDoer
@@ -98,7 +98,7 @@ class Vault(doing.DoDoer):
         self.receiptor = LocksmithReceiptor(hby=hby)
         self.postman = forwarding.Poster(hby=hby)
         self.witPub = agenting.WitnessPublisher(hby=self.hby)
-        self.witDoer = LocksmithWitnessReceiptor(hby=self.hby)
+        self.witDoer = agenting.WitnessReceiptor(hby=self.hby)
 
         # Mailbox and storage
         from keri.app import storing
