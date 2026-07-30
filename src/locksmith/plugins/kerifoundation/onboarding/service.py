@@ -20,7 +20,7 @@ from keri.core import exchange, parsing
 from keri.core.serdering import SerderKERI
 from keri.db import dbing
 from keri.help import helping
-from keri.kering import Kinds, Vrsn_2_0
+from keri.kering import Kinds, Version, Vrsn_2_0
 from hio.base import doing
 
 from locksmith.core.receipting import LocksmithReceiptor
@@ -28,7 +28,6 @@ from locksmith.core.remoting import (
     introduce_watcher_observed_aid,
     message_version,
     purge_oobi_resolution_state,
-    replayKELMessages,
     resolve_oobi,
 )
 from locksmith.plugins.kerifoundation.db.basing import (
@@ -507,16 +506,18 @@ class KFBootClient:
     @staticmethod
     def _iter_surface_keystate_messages(*, hab: Any, start_sn: int, end_sn: int):
         """Replay fully attached KEL events so remote auth surfaces see witnessed rotations."""
-        for sn, msg in zip(
-            range(start_sn, end_sn + 1),
-            replayKELMessages(
-                hab,
-                start_sn=start_sn,
-                end_sn=end_sn,
-                framed=True,
-            ),
-        ):
-            yield sn, bytes(msg)
+        messages = {}
+        for msg in hab.db.clonePreIter(pre=hab.pre, gvrsn=Version):
+            raw = bytes(msg)
+            serder = SerderKERI(raw=raw)
+            sn = int(getattr(serder, "sn", serder.ked.get("s", 0)) or 0)
+            if start_sn <= sn <= end_sn and sn not in messages:
+                messages[sn] = raw
+
+        for sn in range(start_sn, end_sn + 1):
+            if sn not in messages:
+                raise KFBootError(f"Missing KEL replay event for {hab.pre} at sn={sn}")
+            yield sn, messages[sn]
 
     def _normalize_start_reply(
         self,

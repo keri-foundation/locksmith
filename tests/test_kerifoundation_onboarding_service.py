@@ -49,7 +49,9 @@ class FakeHab:
             wits=list(wits or []),
             toader=SimpleNamespace(num=toad),
         )
-        self.db = SimpleNamespace(clonePreIter=lambda pre: list(self._cloned_messages))
+        self.db = SimpleNamespace(
+            clonePreIter=lambda pre, *, gvrsn: list(self._cloned_messages)
+        )
 
     def msgOwnEvent(self, sn=0, allowPartiallySigned=False):
         return f"evt-{self.pre}-{sn}".encode("utf-8")
@@ -1529,8 +1531,8 @@ def test_boot_client_syncs_account_keystate_once_per_surface(monkeypatch):
 
     monkeypatch.setattr(client, "_post_cesr", fake_post_cesr)
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.replayKELMessages",
-        lambda replay_hab, **kwa: iter(replay_hab.db.clonePreIter(pre=replay_hab.pre)),
+        "locksmith.plugins.kerifoundation.onboarding.service.SerderKERI",
+        FakeSerder,
     )
 
     client._ensure_surface_keystate(surface="account", hab=hab, destination="BOOT_SERVER_AID")

@@ -8,11 +8,9 @@ KERI Foundation witnesses.
 from urllib.parse import urljoin
 
 import requests
-from keri import help
+from keri import help, kering
 from keri.core import coring
 from keri.app.httping import CESR_DESTINATION_HEADER
-
-from locksmith.core.remoting import replayDelegationKEL, replayKEL
 
 logger = help.ogler.getLogger(__name__)
 
@@ -65,7 +63,10 @@ def register_with_witness(hab, witness_eid, witness_url, secret=None):
         requests.HTTPError: If the witness returns a non-200 response
         ValueError: If the response is missing expected fields
     """
-    fargs = {"kel": replayKEL(hab).decode("utf-8")}
+    kel = bytearray()
+    for msg in hab.db.clonePreIter(pre=hab.pre, gvrsn=kering.Version):
+        kel.extend(msg)
+    fargs = {"kel": kel.decode("utf-8")}
 
     # Include shared secret for batch mode
     if secret is not None:
@@ -73,7 +74,10 @@ def register_with_witness(hab, witness_eid, witness_url, secret=None):
 
     # Include delegator KEL if identifier is delegated
     if hab.kever.delegated:
-        fargs["delkel"] = replayDelegationKEL(hab, hab.kever).decode("utf-8")
+        delkel = bytearray()
+        for msg in hab.db.cloneDelegation(hab.kever, gvrsn=kering.Version):
+            delkel.extend(msg)
+        fargs["delkel"] = delkel.decode("utf-8")
 
     headers = {CESR_DESTINATION_HEADER: witness_eid}
 

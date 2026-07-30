@@ -10,7 +10,7 @@ from keri.core import Codens, Counter, coring, eventing, parsing
 from keri.db import dbing
 from keri.vdr import credentialing
 
-from locksmith.core.remoting import message_version, replayKEL
+from locksmith.core.remoting import message_version
 from locksmith.db.basing import (
     BrowserPluginSettings,
     IdentifierMetaInfo,
@@ -218,14 +218,14 @@ def test_keri_v2_parser_accepts_existing_keri10_event_with_detected_version():
         assert hab.pre in kvy.kevers
 
 
-def test_replay_kel_defaults_v2_attachments_for_mixed_version_stream():
+def test_hab_replay_uses_v2_attachments_for_mixed_version_stream():
     with habbing.openHab(
         name="mixed-replay-sender",
         temp=True,
         version=kering.Vrsn_1_0,
         kind=kering.Kinds.json,
     ) as (_hby, hab):
-        v1_stream = replayKEL(hab)
+        v1_stream = hab.replay(gvrsn=kering.Version)
         counter = Counter(
             qb64b=v1_stream[hab.kever.serder.size:],
             version=kering.Vrsn_2_0,
@@ -233,7 +233,7 @@ def test_replay_kel_defaults_v2_attachments_for_mixed_version_stream():
         assert counter.name == Codens.AttachmentGroup
 
         hab.rotate(version=kering.Vrsn_2_0, kind=kering.Kinds.json)
-        stream = replayKEL(hab)
+        stream = hab.replay(gvrsn=kering.Version)
 
         with habbing.openHby(
             name="v2-replay-receiver",

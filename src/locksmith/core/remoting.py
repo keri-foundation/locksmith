@@ -18,7 +18,7 @@ from hio.base import doing
 from keri import help, kering
 from keri.app import organizing, forwarding
 from keri.app.habbing import GroupHab
-from keri.core import SealSource, eventing, exchange, parsing, serdering
+from keri.core import exchange, parsing, serdering
 from keri.core.serdering import SerderKERI
 from keri.db import basing
 from keri.help import helping
@@ -33,103 +33,6 @@ def message_version(ims: bytes | bytearray) -> kering.Versionage:
         return kering.smell(ims).pvrsn
 
     return kering.Vrsn_2_0
-
-
-def replayKELMessages(
-    hab,
-    pre=None,
-    *,
-    start_sn=0,
-    end_sn=None,
-    framed=False,
-    gvrsn=kering.Version,
-):
-    """Yield KEL events with one attachment genus, defaulting to v2."""
-    pre = pre or hab.pre
-    if pre not in hab.kevers:
-        raise kering.MissingEntryError(f"Missing KEL for {pre}")
-
-    gvrsn = gvrsn if gvrsn is not None else kering.Version
-    end_sn = hab.kevers[pre].sn if end_sn is None else end_sn
-    for sn in range(start_sn, end_sn + 1):
-        dig = hab.db.kels.getLast(keys=pre, on=sn)
-        if dig is None:
-            raise kering.MissingEntryError(f"Missing event for pre={pre} at sn={sn}")
-
-        serder = hab.db.evts.get(keys=(pre, dig))
-        sigers = hab.db.sigs.get(keys=(pre, dig))
-        if serder is None or not sigers:
-            raise kering.MissingEntryError(f"Missing event material for pre={pre} at sn={sn}")
-
-        wigers = hab.db.wigs.get(keys=(pre, dig)) or []
-        duple = hab.db.aess.get(keys=(pre, dig))
-        seal = None
-        if duple is not None:
-            number, diger = duple
-            seal = SealSource(s=number.snh, d=diger.qb64)
-
-        yield eventing.messagize(
-            serder,
-            sigers=sigers,
-            bonds=seal,
-            wigers=wigers,
-            framed=framed,
-            gvrsn=gvrsn,
-        )
-
-
-def replayKEL(
-    hab,
-    pre=None,
-    *,
-    start_sn=0,
-    end_sn=None,
-    framed=False,
-    gvrsn=kering.Version,
-):
-    stream = bytearray()
-    for msg in replayKELMessages(
-        hab,
-        pre=pre,
-        start_sn=start_sn,
-        end_sn=end_sn,
-        framed=framed,
-        gvrsn=gvrsn,
-    ):
-        stream.extend(msg)
-    return stream
-
-
-def replayDelegationMessages(hab, kever, *, framed=False, gvrsn=kering.Version):
-    if not getattr(kever, "delegated", False) or kever.delpre not in hab.kevers:
-        return
-
-    gvrsn = gvrsn if gvrsn is not None else kering.Version
-    dkever = hab.kevers[kever.delpre]
-    yield from replayDelegationMessages(
-        hab,
-        dkever,
-        framed=framed,
-        gvrsn=gvrsn,
-    )
-    yield from replayKELMessages(
-        hab,
-        pre=kever.delpre,
-        framed=framed,
-        gvrsn=gvrsn,
-    )
-
-
-def replayDelegationKEL(hab, kever, *, framed=False, gvrsn=kering.Version):
-    stream = bytearray()
-    for msg in replayDelegationMessages(
-        hab,
-        kever,
-        framed=framed,
-        gvrsn=gvrsn,
-    ):
-        stream.extend(msg)
-    return stream
 
 
 def upsert_remote_id_metadata(app, pre: str, *, alias=None, cid=None, tag=None, oobi=None):
@@ -315,11 +218,11 @@ def introduce_watcher_observed_aid(
         topic="reply",
     )
 
-    for msg in replayDelegationMessages(hab, hab.kever):
+    for msg in hab.db.cloneDelegation(hab.kever, gvrsn=kering.Version):
         serder = serdering.SerderKERI(raw=msg)
         postman.send(serder=serder, attachment=msg[serder.size:])
 
-    for msg in replayKELMessages(hab):
+    for msg in hab.db.clonePreIter(pre=hab.pre, gvrsn=kering.Version):
         serder = serdering.SerderKERI(raw=msg)
         postman.send(serder=serder, attachment=msg[serder.size:])
 
@@ -1218,12 +1121,12 @@ class SetRoleDoer(doing.DoDoer):
             )
 
             # Send delegation messages
-            for msg in hab.db.cloneDelegation(hab.kever):
+            for msg in hab.db.cloneDelegation(hab.kever, gvrsn=kering.Version):
                 serder = serdering.SerderKERI(raw=msg)
                 postman.send(serder=serder, attachment=msg[serder.size:])
 
             # Send identifier messages
-            for msg in hab.db.clonePreIter(pre=hab.pre):
+            for msg in hab.db.clonePreIter(pre=hab.pre, gvrsn=kering.Version):
                 serder = serdering.SerderKERI(raw=msg)
                 postman.send(serder=serder, attachment=msg[serder.size:])
 
