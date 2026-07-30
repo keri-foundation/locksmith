@@ -157,7 +157,7 @@ class KFBootClient:
         self._app = app
         self._surfaces = surfaces or load_kf_surfaces(app)
         self._boot_server_aid = ""
-        self._surface_keystate: dict[tuple[str, str], int] = {}
+        self._surface_keystate: dict[tuple[str, str], tuple[int, str]] = {}
 
     @property
     def boot_server_aid(self) -> str:
@@ -221,7 +221,10 @@ class KFBootClient:
             destination=self._destination(surface="onboarding"),
             require_reply=False,
         )
-        self._surface_keystate[("onboarding", hab.pre)] = 0
+        self._surface_keystate[("onboarding", hab.pre)] = (
+            hab.kever.sn,
+            hab.kever.serder.said,
+        )
 
     def start_onboarding(
         self,
@@ -483,15 +486,24 @@ class KFBootClient:
         return f"Boot service request failed: {status} for {response.url}"
 
     def _ensure_surface_keystate(self, *, surface: str, hab: Any, destination: str = "") -> None:
-        current_sn = int(getattr(getattr(hab, "kever", None), "sn", 0) or 0)
+        current_sn = hab.kever.sn
+        current = (current_sn, hab.kever.serder.said)
         cache_key = (surface, hab.pre)
-        synced_sn = self._surface_keystate.get(cache_key, -1)
-        if synced_sn >= current_sn:
-            return
+        synced = self._surface_keystate.get(cache_key)
+        start_sn = 0
+        if synced is not None:
+            synced_sn, synced_said = synced
+            if (
+                synced_sn <= current_sn
+                and hab.db.kels.getLast(keys=hab.pre, on=synced_sn) == synced_said
+            ):
+                if synced == current:
+                    return
+                start_sn = synced_sn + 1
 
-        for _, msg in self._iter_surface_keystate_messages(
+        for msg in self._iter_surface_keystate_messages(
             hab=hab,
-            start_sn=synced_sn + 1,
+            start_sn=start_sn,
             end_sn=current_sn,
         ):
             self._post_cesr(
@@ -501,23 +513,22 @@ class KFBootClient:
                 require_reply=False,
             )
 
-        self._surface_keystate[cache_key] = current_sn
+        self._surface_keystate[cache_key] = current
 
     @staticmethod
     def _iter_surface_keystate_messages(*, hab: Any, start_sn: int, end_sn: int):
         """Replay fully attached KEL events so remote auth surfaces see witnessed rotations."""
-        messages = {}
-        for msg in hab.db.clonePreIter(pre=hab.pre, gvrsn=Version):
-            raw = bytes(msg)
-            serder = SerderKERI(raw=raw)
-            sn = int(getattr(serder, "sn", serder.ked.get("s", 0)) or 0)
-            if start_sn <= sn <= end_sn and sn not in messages:
-                messages[sn] = raw
-
         for sn in range(start_sn, end_sn + 1):
-            if sn not in messages:
-                raise KFBootError(f"Missing KEL replay event for {hab.pre} at sn={sn}")
-            yield sn, messages[sn]
+            dig = hab.db.kels.getLast(keys=hab.pre, on=sn)
+            fner = hab.db.fons.get(keys=(hab.pre, dig))
+            yield bytes(
+                hab.db.cloneEvtMsg(
+                    pre=hab.pre,
+                    fn=fner.num,
+                    dig=dig,
+                    gvrsn=Version,
+                )
+            )
 
     def _normalize_start_reply(
         self,

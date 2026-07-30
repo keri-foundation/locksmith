@@ -1499,7 +1499,7 @@ def test_parse_cesr_http_reply_rejects_sender_mismatch(monkeypatch):
         )
 
 
-def test_boot_client_syncs_account_keystate_once_per_surface(monkeypatch):
+def test_boot_client_syncs_canonical_account_keystate(monkeypatch):
     client = KFBootClient(
         FakeApp(),
         surfaces=KFSurfaceConfig(
@@ -1512,10 +1512,24 @@ def test_boot_client_syncs_account_keystate_once_per_surface(monkeypatch):
         "account",
         "AID_ACCOUNT",
         sn=1,
-        cloned_messages=[
-            b"clone-AID_ACCOUNT-0-with-receipts",
-            b"clone-AID_ACCOUNT-1-with-receipts",
-        ],
+    )
+    hab.kever.serder = SimpleNamespace(said="SAID_1")
+    canonical = {
+        0: "SAID_0",
+        1: "SAID_1",
+    }
+    first_seen = {
+        ("AID_ACCOUNT", "SAID_0"): SimpleNamespace(num=0),
+        ("AID_ACCOUNT", "SAID_1"): SimpleNamespace(num=1),
+    }
+    messages = {
+        ("AID_ACCOUNT", 0, "SAID_0"): b"clone-AID_ACCOUNT-0-with-receipts",
+        ("AID_ACCOUNT", 1, "SAID_1"): b"clone-AID_ACCOUNT-1-with-receipts",
+    }
+    hab.db = SimpleNamespace(
+        kels=SimpleNamespace(getLast=lambda keys, on: canonical.get(on)),
+        fons=SimpleNamespace(get=lambda keys: first_seen.get(keys)),
+        cloneEvtMsg=lambda pre, fn, dig, gvrsn: messages[(pre, fn, dig)],
     )
     calls = []
 
@@ -1523,24 +1537,38 @@ def test_boot_client_syncs_account_keystate_once_per_surface(monkeypatch):
         calls.append(kwa)
         return None
 
-    class FakeSerder:
-        def __init__(self, raw):
-            text = raw.decode("utf-8")
-            self.sn = int(text.split("-")[2])
-            self.ked = {"s": str(self.sn)}
-
     monkeypatch.setattr(client, "_post_cesr", fake_post_cesr)
-    monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.SerderKERI",
-        FakeSerder,
-    )
 
     client._ensure_surface_keystate(surface="account", hab=hab, destination="BOOT_SERVER_AID")
+    client._ensure_surface_keystate(surface="account", hab=hab, destination="BOOT_SERVER_AID")
+
+    hab.kever.sn = 2
+    hab.kever.serder.said = "SAID_2"
+    canonical[2] = "SAID_2"
+    first_seen[("AID_ACCOUNT", "SAID_2")] = SimpleNamespace(num=2)
+    messages[("AID_ACCOUNT", 2, "SAID_2")] = b"clone-AID_ACCOUNT-2-with-receipts"
+    client._ensure_surface_keystate(surface="account", hab=hab, destination="BOOT_SERVER_AID")
+
+    canonical[1] = "RECOVERED_SAID_1"
+    canonical[2] = "RECOVERED_SAID_2"
+    hab.kever.serder.said = "RECOVERED_SAID_2"
+    first_seen[("AID_ACCOUNT", "RECOVERED_SAID_1")] = SimpleNamespace(num=3)
+    first_seen[("AID_ACCOUNT", "RECOVERED_SAID_2")] = SimpleNamespace(num=4)
+    messages[("AID_ACCOUNT", 3, "RECOVERED_SAID_1")] = (
+        b"clone-AID_ACCOUNT-recovered-1-with-receipts"
+    )
+    messages[("AID_ACCOUNT", 4, "RECOVERED_SAID_2")] = (
+        b"clone-AID_ACCOUNT-recovered-2-with-receipts"
+    )
     client._ensure_surface_keystate(surface="account", hab=hab, destination="BOOT_SERVER_AID")
 
     assert [call["ims"] for call in calls] == [
         b"clone-AID_ACCOUNT-0-with-receipts",
         b"clone-AID_ACCOUNT-1-with-receipts",
+        b"clone-AID_ACCOUNT-2-with-receipts",
+        b"clone-AID_ACCOUNT-0-with-receipts",
+        b"clone-AID_ACCOUNT-recovered-1-with-receipts",
+        b"clone-AID_ACCOUNT-recovered-2-with-receipts",
     ]
     assert all(call["url"] == "https://boot.example/account" for call in calls)
     assert all(call["destination"] == "BOOT_SERVER_AID" for call in calls)
