@@ -606,26 +606,36 @@ def test_kf_plugin_failure_preserves_resumable_session_state(qapp, tmp_path):
     plugin._db = db
 
     record, _ = db.ensure_account()
+    record.account_aid = "AID_ACCOUNT"
     record.account_alias = "test-account"
     record.onboarding_session_id = "SESSION_1"
     record.onboarding_auth_alias = "kf-auth-alias"
     db.pin_account(record)
 
-    messages = []
-    plugin._onboarding_page.fail_run = lambda message: messages.append(message)
+    page = plugin._onboarding_page
+    page.set_db(db)
+    page._boot_connected = True
+    page._alias_input.setText("test-account")
+    page._selected_witness_profile = "3-of-4"
+    page.confirm_requested.disconnect(plugin._on_onboarding_confirm)
+    confirmations = []
+    page.confirm_requested.connect(lambda *args: confirmations.append(args))
 
     try:
         plugin._handle_onboarding_failure("test-account", "boom")
+        page._on_confirm_clicked()
 
         updated = db.get_account()
         assert updated is not None
         assert updated.status == ACCOUNT_STATUS_FAILED
+        assert updated.account_aid == "AID_ACCOUNT"
         assert updated.onboarding_session_id == "SESSION_1"
         assert updated.onboarding_auth_alias == "kf-auth-alias"
-        assert messages == [
+        assert page._progress_error == (
             "Onboarding failed: boom\n\n"
             "Local progress was preserved. Start onboarding again to resume the saved session."
-        ]
+        )
+        assert confirmations == [("test-account", "3-of-4", "AID_ACCOUNT")]
     finally:
         db.close()
 

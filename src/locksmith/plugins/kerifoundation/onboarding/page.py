@@ -1110,6 +1110,7 @@ class KFOnboardingPage(QWidget):
                 ACCOUNT_STATUS_PENDING_ONBOARDING,
                 ACCOUNT_STATUS_FAILED,
             }:
+                account_aid = account_aid or record.account_aid
                 count, toad = witness_profile_params(self._selected_witness_profile)
                 record.account_alias = alias
                 record.account_aid = account_aid
