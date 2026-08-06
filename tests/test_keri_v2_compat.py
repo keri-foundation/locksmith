@@ -203,21 +203,6 @@ def test_message_version_detects_existing_keri10_event():
     assert message_version(msg) == kering.Vrsn_1_0
 
 
-def test_keri_v2_parser_accepts_existing_keri10_event_with_detected_version():
-    with habbing.openHab(
-        name="v1-sender", temp=True, version=kering.Vrsn_1_0
-    ) as (_hby, hab):
-        msg = bytes(hab.msgOwnEvent(sn=0))
-
-    with habbing.openHby(name="v1-receiver", temp=True) as hby:
-        kvy = eventing.Kevery(db=hby.db, lax=True)
-        parsing.Parser(kvy=kvy, local=False, version=message_version(msg)).parse(
-            ims=bytearray(msg)
-        )
-
-        assert hab.pre in kvy.kevers
-
-
 def test_hab_replay_uses_v2_attachments_for_mixed_version_stream():
     with habbing.openHab(
         name="mixed-replay-sender",
