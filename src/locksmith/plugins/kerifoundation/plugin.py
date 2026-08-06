@@ -28,6 +28,7 @@ from locksmith.plugins.kerifoundation.onboarding.service import (
     KFBootError,
     KFOnboardingService,
     KFVaultDeletionService,
+    OnboardingSessionPending,
 )
 from locksmith.ui.vault.menu import MenuButton, MenuSpacer
 from locksmith.ui.vault.identifiers.rotate import RotateIdentifierDialog
@@ -463,6 +464,13 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
         except asyncio.CancelledError:
             logger.info("KF onboarding task cancelled for alias='%s'", alias)
             raise
+        except OnboardingSessionPending as ex:
+            logger.info("KF onboarding remains pending for alias='%s': %s", alias, ex)
+            if self._is_current_onboarding_task(task, vault=vault, db=db):
+                self._onboarding_page.pause_run(
+                    f"{ex}\n\nLocal progress is preserved. "
+                    "Start onboarding again to resume the saved session."
+                )
         except Exception as ex:
             logger.exception("KF onboarding failed")
             if self._is_current_onboarding_task(task, vault=vault, db=db):

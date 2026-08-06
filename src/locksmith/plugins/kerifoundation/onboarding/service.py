@@ -54,6 +54,7 @@ ONBOARDING_AUTH_NAMESPACE = "kf_onboarding"
 ONBOARDING_AUTH_ALIAS_PREFIX = "kf-onboarding"
 SESSION_PROVISION_POLL_INTERVAL_SECONDS = 1.0
 SESSION_PROVISION_TIMEOUT_SECONDS = 30.0
+_CLOSED_SESSION_STATUS_CODES = (404, 409, 410)
 
 
 @dataclass(frozen=True)
@@ -148,6 +149,14 @@ class OnboardingOutcome:
 
 class KFBootError(RuntimeError):
     """Raised when a boot-surface request cannot be completed."""
+
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class OnboardingSessionPending(KFBootError):
+    """Raised when a remote onboarding session must remain resumable."""
 
 
 class KFBootClient:
@@ -447,7 +456,10 @@ class KFBootClient:
 
         response = requests.post(url, data=body, headers=headers, timeout=30)
         if response.status_code >= 400:
-            raise KFBootError(self._format_http_error(response))
+            raise KFBootError(
+                self._format_http_error(response),
+                status_code=response.status_code,
+            )
 
         if not require_reply:
             return None
@@ -796,6 +808,21 @@ class KFOnboardingService:
                 boot_verified=True,
             )
 
+            self._pin_account_progress(
+                record=record,
+                alias=alias,
+                witness_profile_code=witness_profile_code,
+                witness_count=start.witness_count or option.witness_count,
+                toad=start.toad or option.toad,
+                watcher_required=bootstrap.watcher_required,
+                region_id=start.region_id or bootstrap.region_id,
+                account_aid=account_hab.pre,
+                boot_server_aid=self._boot_client.boot_server_aid,
+                status=ACCOUNT_STATUS_PENDING_ONBOARDING,
+                onboarding_session_id=start.session_id,
+                onboarding_auth_alias=ehab.name,
+            )
+
             if self._allocated_profile_complete(
                 start=start,
                 watcher_required=bootstrap.watcher_required,
@@ -828,21 +855,6 @@ class KFOnboardingService:
                 start=start,
                 option=option,
                 watcher_required=bootstrap.watcher_required,
-            )
-
-            self._pin_account_progress(
-                record=record,
-                alias=alias,
-                witness_profile_code=witness_profile_code,
-                witness_count=start.witness_count or option.witness_count,
-                toad=start.toad or option.toad,
-                watcher_required=bootstrap.watcher_required,
-                region_id=start.region_id or bootstrap.region_id,
-                account_aid=account_hab.pre,
-                boot_server_aid=self._boot_client.boot_server_aid,
-                status=ACCOUNT_STATUS_PENDING_ONBOARDING,
-                onboarding_session_id=start.session_id,
-                onboarding_auth_alias=ehab.name,
             )
 
             needs_rotation = self._account_needs_witness_rotation(
@@ -906,18 +918,19 @@ class KFOnboardingService:
                     witnesses=start.witnesses,
                 )
 
-            self._emit(progress, stage="account_create", detail="Sending /onboarding/account/create")
-            await self._await_blocking_result(
-                self._boot_client.create_account,
-                ehab,
-                session_id=start.session_id,
-                account_aid=account_hab.pre,
-                alias=alias,
-                witness_profile_code=witness_profile_code,
-                witnesses=start.witnesses,
-                watcher=start.watcher,
-                region_id=start.region_id or bootstrap.region_id,
-            )
+            if start.state != "completed":
+                self._emit(progress, stage="account_create", detail="Sending /onboarding/account/create")
+                await self._await_blocking_result(
+                    self._boot_client.create_account,
+                    ehab,
+                    session_id=start.session_id,
+                    account_aid=account_hab.pre,
+                    alias=alias,
+                    witness_profile_code=witness_profile_code,
+                    witnesses=start.witnesses,
+                    watcher=start.watcher,
+                    region_id=start.region_id or bootstrap.region_id,
+                )
 
             self._emit(progress, stage="complete", detail="Sending /onboarding/complete")
 
@@ -963,6 +976,8 @@ class KFOnboardingService:
                     had_saved_session=had_saved_session,
                     created_new_account=created_new_account,
                 )
+            raise
+        except OnboardingSessionPending:
             raise
         except Exception:
             await self._preserve_or_abandon_onboarding_run(
@@ -1031,15 +1046,11 @@ class KFOnboardingService:
                 fallback_region_id=bootstrap.region_id,
             )
         except Exception as exc:
-            if self._can_discard_stored_session(record=record, account_hab=account_hab):
-                logger.warning(
-                    "Discarding stale KF onboarding session %s after status lookup failure: %s",
-                    record.onboarding_session_id,
-                    exc,
-                )
-                self._clear_onboarding_session(record, delete_auth_hab=True)
-                return None, True
-            raise
+            if isinstance(exc, KFBootError) and exc.status_code in _CLOSED_SESSION_STATUS_CODES:
+                raise
+            raise OnboardingSessionPending(
+                f"Unable to check hosted resource provisioning: {exc}"
+            ) from exc
 
         if start.account_aid and start.account_aid != account_hab.pre:
             raise KFBootError(
@@ -1562,14 +1573,23 @@ class KFOnboardingService:
 
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
-                raise KFBootError("Timed out waiting for hosted witness allocation")
+                raise OnboardingSessionPending(
+                    "Hosted resource provisioning is still in progress"
+                )
 
-            current = await self._await_blocking_result(
-                self._boot_client.session_status,
-                ehab,
-                session_id=start.session_id,
-                fallback_region_id=fallback_region_id,
-            )
+            try:
+                current = await self._await_blocking_result(
+                    self._boot_client.session_status,
+                    ehab,
+                    session_id=start.session_id,
+                    fallback_region_id=fallback_region_id,
+                )
+            except Exception as exc:
+                if isinstance(exc, KFBootError) and exc.status_code in _CLOSED_SESSION_STATUS_CODES:
+                    raise
+                raise OnboardingSessionPending(
+                    f"Unable to check hosted resource provisioning: {exc}"
+                ) from exc
             if not self._allocated_profile_ready(
                 start=current,
                 option=option,

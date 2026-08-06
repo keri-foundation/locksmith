@@ -282,7 +282,7 @@ class RetryThenSucceedBootClient(FakeBootClient):
         self.complete_calls += 1
         if self.complete_calls == 1:
             self.calls.append(("complete", hab.pre, session_id, account_aid))
-            self.session_state = "account_created"
+            self.session_state = "completed"
             raise KFBootError("simulated completion failure")
         super().complete_onboarding(hab, session_id=session_id, account_aid=account_aid)
 
@@ -1003,6 +1003,7 @@ def test_onboarding_failure_after_completion_preserves_session_and_resumes(tmp_p
         assert outcome.account_aid == "AID_MY ACCOUNT"
         assert boot_client.start_calls == 1
         assert boot_client.status_calls == 1
+        assert sum(call[0] == "create_account" for call in boot_client.calls) == 1
         assert ("status", "EPHEMERAL_AID", "SESSION_1") in boot_client.calls
         assert ("cancel", "EPHEMERAL_AID", "SESSION_1", "AID_MY ACCOUNT", "client_abandoned") not in boot_client.calls
     finally:
@@ -1061,12 +1062,12 @@ def test_onboarding_failure_after_account_create_preserves_local_state_for_resum
         db.close()
 
 
-def test_onboarding_status_failure_preserves_non_discardable_saved_session(tmp_path):
+def test_onboarding_status_failure_preserves_saved_session(tmp_path):
     account = FakeHab(
         name="my account",
         pre="AID_EXISTING",
-        wits=["WIT_1", "WIT_2", "WIT_3", "WIT_4"],
-        toad=3,
+        wits=[],
+        toad=0,
     )
     auth = FakeHab(
         name="kf-auth-existing",

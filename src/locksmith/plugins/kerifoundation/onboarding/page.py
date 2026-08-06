@@ -668,7 +668,9 @@ class KFOnboardingPage(QWidget):
         self._watcher_section.setVisible(controls_available and phase_idx >= review_idx)
         self._review_section.setVisible(controls_available and phase_idx >= review_idx)
         self._progress_section.setVisible(
-            self._phase in {PHASE_IN_PROGRESS, PHASE_COMPLETED} or bool(self._progress_error)
+            self._phase in {PHASE_IN_PROGRESS, PHASE_COMPLETED}
+            or bool(self._progress_error)
+            or bool(self._progress_message)
         )
 
         self._update_subtitle()
@@ -810,6 +812,14 @@ class KFOnboardingPage(QWidget):
             self._progress_badge.setStyleSheet(self._neutral_badge_css(foreground=colors.DANGER))
             self._progress_badge.setVisible(True)
             self._open_account_btn.setVisible(False)
+        elif self._progress_message:
+            self._progress_status.setText(self._progress_message)
+            self._progress_badge.setText("PENDING")
+            self._progress_badge.setStyleSheet(
+                self._neutral_badge_css(foreground=colors.WARNING_BUTTON)
+            )
+            self._progress_badge.setVisible(True)
+            self._open_account_btn.setVisible(False)
         else:
             self._progress_status.setText(self._progress_message or "Onboarding has not started yet.")
             self._progress_badge.setVisible(False)
@@ -849,6 +859,15 @@ class KFOnboardingPage(QWidget):
         self._progress_message = ""
         self._qr_results = []
         self._account_aid = ""
+        self._set_inputs_enabled(True)
+        self._update_phase()
+        self._apply_phase_visibility()
+
+    def pause_run(self, message: str):
+        self._run_in_progress = False
+        self._progress_error = ""
+        self._progress_message = message
+        self._qr_results = []
         self._set_inputs_enabled(True)
         self._update_phase()
         self._apply_phase_visibility()
