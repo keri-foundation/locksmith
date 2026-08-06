@@ -217,11 +217,20 @@ class LoadSchemaDoer(doing.DoDoer):
 
         if pending is not None:
             current_prefixer, current_number, _ = pending[0]
-            pending_events = {
-                number.sn: prefixer.qb64
-                for _, (prefixer, number, _) in self.rgy.reger.tpwe.getTopItemIter(keys=())
-                if prefixer.qb64 == current_prefixer.qb64 and number.sn <= current_number.sn
-            }
+            pending_events = {}
+            for _, (prefixer, number, diger) in self.rgy.reger.tpwe.getTopItemIter(keys=()):
+                if prefixer.qb64 != current_prefixer.qb64 or number.sn > current_number.sn:
+                    continue
+
+                # Check if the KEL event is current.
+                if self.hby.db.kels.getLast(keys=prefixer.qb64, on=number.sn) != diger.qb64:
+                    self.remove(doers)
+                    raise kering.ValidationError(
+                        "Pending registry anchor was superseded by identifier recovery"
+                    )
+
+                pending_events[number.sn] = prefixer.qb64
+
             for sn in sorted(pending_events):
                 msg = dict(pre=pending_events[sn], sn=sn)
                 if auths:
@@ -264,9 +273,18 @@ class LoadSchemaDoer(doing.DoDoer):
                                  attachment=atc)
 
         while not registrar.complete(pre=registry.regk, sn=0):
-            self.rgy.processEscrows()
             if pending:
                 prefixer, number, diger = pending[0]
+
+                # Check if the KEL event is current.
+                if self.hby.db.kels.getLast(keys=prefixer.qb64, on=number.sn) != diger.qb64:
+                    self.remove(doers)
+                    raise kering.ValidationError(
+                        "Pending registry anchor was superseded by identifier recovery"
+                    )
+
+            self.rgy.processEscrows()
+            if pending:
                 attempted = any(
                     cue["pre"] == prefixer.qb64 and cue["sn"] == number.sn
                     for cue in registrar.receiptor.cues
@@ -849,6 +867,15 @@ class Registrar(doing.DoDoer):
                 number,
                 diger,
         ) in self.rgy.reger.tpwe.getTopItemIter(keys=()):  # partial witness escrow
+            # Check if the KEL event is current.
+            if self.hby.db.kels.getLast(keys=prefixer.qb64, on=number.sn) != diger.qb64:
+                logger.error(
+                    "Pending registry anchor for %s at sequence number %s was superseded",
+                    prefixer.qb64,
+                    number.sn,
+                )
+                continue
+
             kever = self.hby.kevers[prefixer.qb64]
 
             # Load all the witness receipts we have so far

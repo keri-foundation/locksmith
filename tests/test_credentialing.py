@@ -232,7 +232,15 @@ def test_load_schema_existing_registry_resumes_pending_receipts(monkeypatch, wig
     doer = credentialing.LoadSchemaDoer.__new__(credentialing.LoadSchemaDoer)
     doer.rgy = rgy
     doer.hby = SimpleNamespace(
-        db=SimpleNamespace(wigs=SimpleNamespace(get=lambda keys: wigs)),
+        db=SimpleNamespace(
+            kels=SimpleNamespace(
+                getLast=lambda keys, on: {
+                    1: CRED_SAID,
+                    2: TEL_SAID,
+                }[on]
+            ),
+            wigs=SimpleNamespace(get=lambda keys: wigs),
+        ),
     )
     doer.auth_codes = ["BWitness:123456"]
     doer.tock = 0.0
@@ -250,6 +258,35 @@ def test_load_schema_existing_registry_resumes_pending_receipts(monkeypatch, wig
         dict(pre=registry.hab.pre, sn=1, auths={"BWitness": "123456#dt"}),
         dict(pre=registry.hab.pre, sn=2, auths={"BWitness": "123456#dt"}),
     ]
+
+
+def test_registrar_does_not_advance_superseded_registry_anchor():
+    prefixer = SimpleNamespace(qb64=REGISTRY_SAID)
+    number = SimpleNamespace(sn=2)
+    diger = SimpleNamespace(qb64=TEL_SAID)
+
+    def fail(*args, **kwa):
+        pytest.fail("superseded registry anchor advanced from witness escrow")
+
+    registrar = credentialing.Registrar.__new__(credentialing.Registrar)
+    registrar.hby = SimpleNamespace(
+        db=SimpleNamespace(
+            kels=SimpleNamespace(getLast=lambda keys, on: CRED_SAID),
+        ),
+    )
+    registrar.rgy = SimpleNamespace(
+        reger=SimpleNamespace(
+            tpwe=SimpleNamespace(
+                getTopItemIter=lambda keys=(): [
+                    ((REGISTRY_SAID, "0"), (prefixer, number, diger))
+                ],
+                rem=fail,
+            ),
+            tede=SimpleNamespace(add=fail),
+        ),
+    )
+
+    registrar.processWitnessEscrow()
 
 
 def test_issue_credential_processes_verifier_escrows_before_completion(monkeypatch):
