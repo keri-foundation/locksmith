@@ -260,10 +260,11 @@ def test_load_schema_existing_registry_resumes_pending_receipts(monkeypatch, wig
     ]
 
 
-def test_registrar_does_not_advance_superseded_registry_anchor():
+def test_registrar_removes_superseded_registry_anchor_without_advancing():
     prefixer = SimpleNamespace(qb64=REGISTRY_SAID)
     number = SimpleNamespace(sn=2)
     diger = SimpleNamespace(qb64=TEL_SAID)
+    removed = []
 
     def fail(*args, **kwa):
         pytest.fail("superseded registry anchor advanced from witness escrow")
@@ -280,13 +281,15 @@ def test_registrar_does_not_advance_superseded_registry_anchor():
                 getTopItemIter=lambda keys=(): [
                     ((REGISTRY_SAID, "0"), (prefixer, number, diger))
                 ],
-                rem=fail,
+                rem=lambda keys: removed.append(keys),
             ),
             tede=SimpleNamespace(add=fail),
         ),
     )
 
     registrar.processWitnessEscrow()
+
+    assert removed == [(REGISTRY_SAID, "0")]
 
 
 def test_issue_credential_processes_verifier_escrows_before_completion(monkeypatch):

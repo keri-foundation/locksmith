@@ -874,6 +874,7 @@ class Registrar(doing.DoDoer):
                     prefixer.qb64,
                     number.sn,
                 )
+                self.rgy.reger.tpwe.rem(keys=(regk, snq))
                 continue
 
             kever = self.hby.kevers[prefixer.qb64]
