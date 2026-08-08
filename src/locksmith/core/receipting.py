@@ -33,7 +33,7 @@ class LocksmithReceiptor(agenting.Receiptor):
             sent = httping.streamCESRRequests(
                 client=client,
                 dest=wit,
-                ims=bytearray(hab.replay(pre=pre)),
+                ims=hab.replay(pre=pre),
             )
             while len(client.responses) < sent:
                 yield self.tock

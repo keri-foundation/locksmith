@@ -15,7 +15,10 @@ from locksmith.plugins.kerifoundation.db.basing import (
     KFBaser,
     KFAccountRecord,
 )
-from locksmith.plugins.kerifoundation.onboarding.service import KFBootError
+from locksmith.plugins.kerifoundation.onboarding.service import (
+    KFBootError,
+    OnboardingSessionPending,
+)
 from locksmith.plugins.kerifoundation.plugin import KeriFoundationPlugin
 
 
@@ -380,7 +383,26 @@ def test_kf_plugin_ignores_stale_onboarding_success_after_vault_switch(
         second_db.close()
 
 
-def test_kf_plugin_async_onboarding_failure_does_not_mark_account_onboarded(qapp, tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("error", "expected_status", "expected_badge"),
+    (
+        (RuntimeError("remote complete failed"), ACCOUNT_STATUS_FAILED, "FAILED"),
+        (
+            OnboardingSessionPending("Hosted resource provisioning is still in progress"),
+            ACCOUNT_STATUS_PENDING_ONBOARDING,
+            "PENDING",
+        ),
+    ),
+    ids=("failed", "pending"),
+)
+def test_kf_plugin_async_onboarding_error_updates_status(
+    qapp,
+    tmp_path,
+    monkeypatch,
+    error,
+    expected_status,
+    expected_badge,
+):
     app = FakeApp()
     plugin = KeriFoundationPlugin()
     plugin.initialize(app)
@@ -394,7 +416,7 @@ def test_kf_plugin_async_onboarding_failure_does_not_mark_account_onboarded(qapp
 
     async def fake_onboard_async(self, *, alias, witness_profile_code, account_aid, progress):
         progress(stage="session_start", detail="starting")
-        raise RuntimeError("remote complete failed")
+        raise error
 
     monkeypatch.setattr(
         "locksmith.plugins.kerifoundation.onboarding.service.KFOnboardingService.onboard_async",
@@ -407,9 +429,14 @@ def test_kf_plugin_async_onboarding_failure_does_not_mark_account_onboarded(qapp
 
         updated = db.get_account()
         assert updated is not None
-        assert updated.status == ACCOUNT_STATUS_FAILED
+        assert updated.status == expected_status
         assert updated.status != ACCOUNT_STATUS_ONBOARDED
-        assert "remote complete failed" in plugin._onboarding_page._progress_error
+        assert plugin._onboarding_page._progress_badge.text() == expected_badge
+        progress_text = (
+            plugin._onboarding_page._progress_error
+            or plugin._onboarding_page._progress_message
+        )
+        assert str(error) in progress_text
     finally:
         db.close()
 
@@ -579,26 +606,36 @@ def test_kf_plugin_failure_preserves_resumable_session_state(qapp, tmp_path):
     plugin._db = db
 
     record, _ = db.ensure_account()
+    record.account_aid = "AID_ACCOUNT"
     record.account_alias = "test-account"
     record.onboarding_session_id = "SESSION_1"
     record.onboarding_auth_alias = "kf-auth-alias"
     db.pin_account(record)
 
-    messages = []
-    plugin._onboarding_page.fail_run = lambda message: messages.append(message)
+    page = plugin._onboarding_page
+    page.set_db(db)
+    page._boot_connected = True
+    page._alias_input.setText("test-account")
+    page._selected_witness_profile = "3-of-4"
+    page.confirm_requested.disconnect(plugin._on_onboarding_confirm)
+    confirmations = []
+    page.confirm_requested.connect(lambda *args: confirmations.append(args))
 
     try:
         plugin._handle_onboarding_failure("test-account", "boom")
+        page._on_confirm_clicked()
 
         updated = db.get_account()
         assert updated is not None
         assert updated.status == ACCOUNT_STATUS_FAILED
+        assert updated.account_aid == "AID_ACCOUNT"
         assert updated.onboarding_session_id == "SESSION_1"
         assert updated.onboarding_auth_alias == "kf-auth-alias"
-        assert messages == [
+        assert page._progress_error == (
             "Onboarding failed: boom\n\n"
             "Local progress was preserved. Start onboarding again to resume the saved session."
-        ]
+        )
+        assert confirmations == [("test-account", "3-of-4", "AID_ACCOUNT")]
     finally:
         db.close()
 

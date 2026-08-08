@@ -6,7 +6,7 @@ import pytest
 from hio.base import doing
 from keri import kering
 from keri.app import habbing
-from keri.core import coring, eventing, parsing
+from keri.core import Codens, Counter, coring, eventing, parsing
 from keri.db import dbing
 from keri.vdr import credentialing
 
@@ -192,7 +192,10 @@ def test_parse_cesr_http_reply_uses_detected_parser_version(monkeypatch):
 
 def test_message_version_detects_existing_keri10_event():
     with habbing.openHab(
-        name="v1-sender", temp=True, version=kering.Vrsn_1_0
+        name="v1-sender",
+        temp=True,
+        version=kering.Vrsn_1_0,
+        kind=kering.Kinds.json,
     ) as (_hby, hab):
         msg = bytes(hab.msgOwnEvent(sn=0))
 
@@ -200,19 +203,36 @@ def test_message_version_detects_existing_keri10_event():
     assert message_version(msg) == kering.Vrsn_1_0
 
 
-def test_keri_v2_parser_accepts_existing_keri10_event_with_detected_version():
+def test_hab_replay_uses_v2_attachments_for_mixed_version_stream():
     with habbing.openHab(
-        name="v1-sender", temp=True, version=kering.Vrsn_1_0
+        name="mixed-replay-sender",
+        temp=True,
+        version=kering.Vrsn_1_0,
+        kind=kering.Kinds.json,
     ) as (_hby, hab):
-        msg = bytes(hab.msgOwnEvent(sn=0))
-
-    with habbing.openHby(name="v1-receiver", temp=True) as hby:
-        kvy = eventing.Kevery(db=hby.db, lax=True)
-        parsing.Parser(kvy=kvy, local=False, version=message_version(msg)).parse(
-            ims=bytearray(msg)
+        v1_stream = hab.replay(gvrsn=kering.Version)
+        counter = Counter(
+            qb64b=v1_stream[hab.kever.serder.size:],
+            version=kering.Vrsn_2_0,
         )
+        assert counter.name == Codens.AttachmentGroup
 
-        assert hab.pre in kvy.kevers
+        hab.rotate(version=kering.Vrsn_2_0, kind=kering.Kinds.json)
+        stream = hab.replay(gvrsn=kering.Version)
+
+        with habbing.openHby(
+            name="v2-replay-receiver",
+            temp=True,
+            version=kering.Vrsn_2_0,
+        ) as hby:
+            kvy = eventing.Kevery(db=hby.db, lax=True)
+            parsing.Parser(kvy=kvy, local=False, version=kering.Vrsn_2_0).parse(
+                ims=stream
+            )
+
+            assert not stream
+            assert kvy.kevers[hab.pre].sn == 1
+            assert kvy.kevers[hab.pre].serder.kind == kering.Kinds.json
 
 
 def test_vault_constructs_with_real_keri_v2_stores(monkeypatch, tmp_path):
@@ -322,32 +342,11 @@ def test_locksmith_config_resalt_uses_keri_v2_salter():
         config.salt = old_salt
 
 
-def test_registry_creation_uses_keri_v2_nonce(monkeypatch):
+def test_registry_creation_requests_legacy_v1_tel(monkeypatch):
     from locksmith.core import credentialing as locksmith_credentialing
 
-    class StopAfterNonce(Exception):
+    class StopAfterRegistryCreation(Exception):
         pass
-
-    captured = {}
-    doer = locksmith_credentialing.LoadSchemaDoer.__new__(
-        locksmith_credentialing.LoadSchemaDoer
-    )
-    doer.hby = SimpleNamespace(
-        habs={"ISSUER_AID": SimpleNamespace(name="issuer", pre="ISSUER_AID")}
-    )
-    doer.issuer_aid = "ISSUER_AID"
-    doer.auth_codes = None
-    doer.tock = 0.0
-    doer.extend = lambda doers: None
-
-    def make_registry(name, prefix, **kwa):
-        captured.update(name=name, prefix=prefix, nonce=kwa["nonce"])
-        raise StopAfterNonce
-
-    doer.rgy = SimpleNamespace(
-        registryByName=lambda name: None,
-        makeRegistry=make_registry,
-    )
 
     monkeypatch.setattr(
         locksmith_credentialing.grouping,
@@ -365,11 +364,34 @@ def test_registry_creation_uses_keri_v2_nonce(monkeypatch):
         lambda **kwargs: object(),
     )
 
-    with pytest.raises(StopAfterNonce):
+    captured = {}
+
+    def make_registry(name, prefix, **kwa):
+        captured.update(name=name, prefix=prefix, **kwa)
+        raise StopAfterRegistryCreation
+
+    doer = locksmith_credentialing.LoadSchemaDoer.__new__(
+        locksmith_credentialing.LoadSchemaDoer
+    )
+    doer.hby = SimpleNamespace(
+        habs={"ISSUER_AID": SimpleNamespace(name="issuer", pre="ISSUER_AID")}
+    )
+    doer.rgy = SimpleNamespace(
+        registryByName=lambda name: None,
+        makeRegistry=make_registry,
+    )
+    doer.issuer_aid = "ISSUER_AID"
+    doer.auth_codes = None
+    doer.tock = 0.0
+    doer.extend = lambda doers: None
+
+    with pytest.raises(StopAfterRegistryCreation):
         next(doer._create_registry("SCHEMA_SAID", "Schema Title"))
 
     assert captured["name"] == "SCHEMA_SAID"
     assert captured["prefix"] == "ISSUER_AID"
+    assert captured["version"] == kering.Vrsn_1_0
+    assert captured["kind"] == kering.Kinds.json
     assert len(captured["nonce"]) == 24
 
 
@@ -385,14 +407,16 @@ def test_locksmith_receiptor_uses_keri_v2_httping(monkeypatch):
             self.responses.pop(0)
             self.responded += 1
 
-    class FakeHab:
-        def replay(self, pre):
-            assert pre == "AID"
-            return b"replayed-kel"
-
     client = FakeClient()
     captured = {}
-    hby = SimpleNamespace(prefixes={"AID"}, habs={"AID": FakeHab()})
+    hab = SimpleNamespace()
+
+    def replay(*, pre):
+        captured.update(replay_pre=pre)
+        return b"replayed-kel"
+
+    hab.replay = replay
+    hby = SimpleNamespace(prefixes={"AID"}, habs={"AID": hab})
     receiptor = receipting.LocksmithReceiptor(hby=hby)
     receiptor.tock = 0.0
     receiptor.extend = lambda doers: captured.update(extended=len(doers))
@@ -413,7 +437,6 @@ def test_locksmith_receiptor_uses_keri_v2_httping(monkeypatch):
         "streamCESRRequests",
         stream_cesr_requests,
     )
-
     list(receiptor.catchup(pre="AID", wit="WIT"))
 
     assert captured == {
@@ -422,6 +445,7 @@ def test_locksmith_receiptor_uses_keri_v2_httping(monkeypatch):
         "ims": b"replayed-kel",
         "extended": 1,
         "removed": 1,
+        "replay_pre": "AID",
     }
     assert client.responded == 2
 
@@ -436,8 +460,8 @@ def test_watcher_inquisitor_treats_204_as_accepted(monkeypatch, caplog):
             return self.responses.pop(0)
 
     class FakeHab:
-        def query(self, target, *, src, route, query):
-            captured.update(target=target, src=src, route=route, query=query)
+        def query(self, target, *, src, route, query, **kwa):
+            captured.update(target=target, src=src, route=route, query=query, **kwa)
             return b"qry"
 
     class FakeHby:
@@ -473,6 +497,9 @@ def test_watcher_inquisitor_treats_204_as_accepted(monkeypatch, caplog):
     assert captured["stream"]["client"] is client
     assert captured["stream"]["dest"] == "WATCHER"
     assert captured["stream"]["ims"] == bytearray(b"qry")
+    assert captured["version"] == kering.Vrsn_2_0
+    assert captured["gvrsn"] == kering.Vrsn_2_0
+    assert captured["kind"] == kering.Kinds.json
     assert captured["removed"] == [client_doer]
     assert "invalid response" not in caplog.text
 

@@ -40,6 +40,7 @@ class FakeSchemaStore:
 class FakeHab:
     name = "issuer"
     pre = REGISTRY_SAID
+    kever = SimpleNamespace(wits=["BWitness"])
 
     def interact(self, data):
         return b"anchoring-event"
@@ -56,7 +57,8 @@ class FakeRegistry:
 class FakeSchemaRegistry:
     regk = REGISTRY_SAID
     regd = TEL_SAID
-    vcp = SimpleNamespace(raw=b"vcp", pre=REGISTRY_SAID, said=TEL_SAID)
+    hab = FakeHab()
+    vcp = None
 
 
 class FakeCtel:
@@ -177,30 +179,117 @@ def _immediate_generator_return(generator):
     return excinfo.value.value
 
 
-@pytest.mark.parametrize(
-    ("ctel_said", "expected_error"),
-    [
-        (TEL_SAID, None),
-        (None, "already exists but is not complete"),
-    ],
-)
-def test_load_schema_existing_registry_requires_committed_inception(ctel_said, expected_error):
-    class FakeRgy:
-        reger = SimpleNamespace(ctel=FakeCtel(ctel_said))
+def test_load_schema_existing_complete_registry_is_idempotent():
+    registry = FakeSchemaRegistry()
+    rgy = SimpleNamespace(
+        reger=SimpleNamespace(ctel=FakeCtel(TEL_SAID)),
+        registryByName=lambda name: registry,
+    )
+    doer = credentialing.LoadSchemaDoer.__new__(credentialing.LoadSchemaDoer)
+    doer.rgy = rgy
 
-        def registryByName(self, name):
-            return FakeSchemaRegistry()
+    assert not credentialing.registry_is_complete(rgy, None)
+    assert credentialing.registry_is_complete(rgy, registry)
+    assert _immediate_generator_return(
+        doer._create_registry(SCHEMA_SAID, "Schema Title")
+    ) == SCHEMA_SAID
+
+
+@pytest.mark.parametrize("wigs", [[object()], []])
+def test_load_schema_existing_registry_resumes_pending_receipts(monkeypatch, wigs):
+    queued = []
+    registry = FakeSchemaRegistry()
+    prefixer = SimpleNamespace(qb64=registry.hab.pre, qb64b=registry.hab.pre.encode())
+    pending = [(prefixer, SimpleNamespace(sn=2), SimpleNamespace(qb64=TEL_SAID))]
+    prior = (prefixer, SimpleNamespace(sn=1), SimpleNamespace(qb64=CRED_SAID))
+    registrar = SimpleNamespace(
+        receiptor=SimpleNamespace(
+            msgs=queued,
+            cues=[dict(pre=registry.hab.pre, sn=2)],
+        ),
+        complete=lambda pre, sn=0: bool(wigs),
+    )
+    rgy = SimpleNamespace(
+        reger=SimpleNamespace(
+            ctel=FakeCtel(),
+            tpwe=SimpleNamespace(
+                get=lambda keys: pending,
+                getTopItemIter=lambda keys=(): [(("prior",), prior), (("current",), pending[0])],
+            ),
+        ),
+        registryByName=lambda name: registry,
+        makeRegistry=lambda **kwa: pytest.fail("retry created another registry"),
+        processEscrows=lambda: None,
+    )
+
+    assert not credentialing.registry_is_complete(rgy, registry)
+
+    monkeypatch.setattr(credentialing.grouping, "Counselor", lambda **kwa: None)
+    monkeypatch.setattr(credentialing, "Registrar", lambda **kwa: registrar)
+    monkeypatch.setattr(credentialing.forwarding, "Poster", lambda **kwa: None)
+    monkeypatch.setattr(credentialing.helping, "nowIso8601", lambda: "dt")
 
     doer = credentialing.LoadSchemaDoer.__new__(credentialing.LoadSchemaDoer)
-    doer.rgy = FakeRgy()
+    doer.rgy = rgy
+    doer.hby = SimpleNamespace(
+        db=SimpleNamespace(
+            kels=SimpleNamespace(
+                getLast=lambda keys, on: {
+                    1: CRED_SAID,
+                    2: TEL_SAID,
+                }[on]
+            ),
+            wigs=SimpleNamespace(get=lambda keys: wigs),
+        ),
+    )
+    doer.auth_codes = ["BWitness:123456"]
+    doer.tock = 0.0
+    doer.extend = lambda doers: None
+    doer.remove = lambda doers: None
 
     generator = doer._create_registry(SCHEMA_SAID, "Schema Title")
-
-    if expected_error:
-        with pytest.raises(kering.MissingEntryError, match=expected_error):
-            next(generator)
-    else:
+    if wigs:
         assert _immediate_generator_return(generator) == SCHEMA_SAID
+    else:
+        with pytest.raises(kering.AuthError, match="Check the OTP"):
+            next(generator)
+
+    assert queued == [
+        dict(pre=registry.hab.pre, sn=1, auths={"BWitness": "123456#dt"}),
+        dict(pre=registry.hab.pre, sn=2, auths={"BWitness": "123456#dt"}),
+    ]
+
+
+def test_registrar_removes_superseded_registry_anchor_without_advancing():
+    prefixer = SimpleNamespace(qb64=REGISTRY_SAID)
+    number = SimpleNamespace(sn=2)
+    diger = SimpleNamespace(qb64=TEL_SAID)
+    removed = []
+
+    def fail(*args, **kwa):
+        pytest.fail("superseded registry anchor advanced from witness escrow")
+
+    registrar = credentialing.Registrar.__new__(credentialing.Registrar)
+    registrar.hby = SimpleNamespace(
+        db=SimpleNamespace(
+            kels=SimpleNamespace(getLast=lambda keys, on: CRED_SAID),
+        ),
+    )
+    registrar.rgy = SimpleNamespace(
+        reger=SimpleNamespace(
+            tpwe=SimpleNamespace(
+                getTopItemIter=lambda keys=(): [
+                    ((REGISTRY_SAID, "0"), (prefixer, number, diger))
+                ],
+                rem=lambda keys: removed.append(keys),
+            ),
+            tede=SimpleNamespace(add=fail),
+        ),
+    )
+
+    registrar.processWitnessEscrow()
+
+    assert removed == [(REGISTRY_SAID, "0")]
 
 
 def test_issue_credential_processes_verifier_escrows_before_completion(monkeypatch):

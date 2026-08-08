@@ -234,7 +234,15 @@ class WatcherInquisitor(doing.DoDoer):
             logger.exception(f"unable to create http client for witness {wat}: {e}")
             return
 
-        msg = hab.query(target, src=wat, route=route, query=query)  # Query for remote pre Event
+        msg = hab.query(
+            target,
+            src=wat,
+            route=route,
+            query=query,
+            version=eventing.Vrsn_2_0,
+            gvrsn=eventing.Vrsn_2_0,
+            kind=eventing.Kinds.json,
+        )  # Query for remote pre Event
         streamCESRRequests(client=client, dest=wat, ims=bytearray(msg), path="/", headers=dict())
         while not client.responses:
             yield self.tock

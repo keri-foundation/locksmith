@@ -1,6 +1,7 @@
 import asyncio
 import os
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -48,7 +49,9 @@ class FakeHab:
             wits=list(wits or []),
             toader=SimpleNamespace(num=toad),
         )
-        self.db = SimpleNamespace(clonePreIter=lambda pre: list(self._cloned_messages))
+        self.db = SimpleNamespace(
+            clonePreIter=lambda pre, *, gvrsn: list(self._cloned_messages)
+        )
 
     def msgOwnEvent(self, sn=0, allowPartiallySigned=False):
         return f"evt-{self.pre}-{sn}".encode("utf-8")
@@ -279,7 +282,7 @@ class RetryThenSucceedBootClient(FakeBootClient):
         self.complete_calls += 1
         if self.complete_calls == 1:
             self.calls.append(("complete", hab.pre, session_id, account_aid))
-            self.session_state = "account_created"
+            self.session_state = "completed"
             raise KFBootError("simulated completion failure")
         super().complete_onboarding(hab, session_id=session_id, account_aid=account_aid)
 
@@ -425,20 +428,59 @@ def _run(coro):
 def stub_rotation(service):
     calls = []
 
-    def fake_rotate(*, hab, registration, allocated_witness_eids, toad):
-        hab.kever.wits = list(allocated_witness_eids)
-        hab.kever.toader.num = toad
+    def fake_rotate(*, hab, registration, allocated_witness_eids, toad, rotate=True):
+        if rotate:
+            hab.kever.wits = list(allocated_witness_eids)
+            hab.kever.toader.num = toad
         calls.append(
             {
                 "hab_pre": hab.pre,
                 "witness_eids": list(allocated_witness_eids),
                 "toad": toad,
+                "rotate": rotate,
                 "result_eids": [result["eid"] for result in registration.results],
             }
         )
 
     service._rotate_account_to_allocated_witnesses_blocking = fake_rotate
     return calls
+
+
+@pytest.mark.parametrize("state", ["failed", "cancelled", "expired"])
+def test_await_allocated_profile_rejects_terminal_session_with_complete_resources(state):
+    boot_client = FakeBootClient()
+    ready = boot_client.start_onboarding(
+        FakeHab(name="auth", pre="EPHEMERAL_AID"),
+        alias="my account",
+        account_aid="AID_MY ACCOUNT",
+        witness_profile_code="3-of-4",
+        region_id="us-west-2",
+        watcher_required=True,
+    )
+    terminal = replace(
+        ready,
+        state=state,
+        failure_reason="hosted resource allocation failed",
+    )
+    service = KFOnboardingService(
+        app=FakeApp(),
+        db=None,
+        boot_client=boot_client,
+        witness_registrar=FakeWitnessRegistrar(),
+    )
+
+    with pytest.raises(KFBootError, match="hosted resource allocation failed"):
+        _run(
+            service._await_allocated_profile_async(
+                ehab=FakeHab(name="auth", pre="EPHEMERAL_AID"),
+                start=terminal,
+                option=BootstrapOption(code="3-of-4", witness_count=4, toad=3),
+                watcher_required=True,
+                fallback_region_id="us-west-2",
+            )
+        )
+
+    assert boot_client.status_calls == 0
 
 
 def test_single_witness_rotation_posts_direct_receipt(tmp_path, monkeypatch):
@@ -519,7 +561,7 @@ def test_single_witness_rotation_posts_direct_receipt(tmp_path, monkeypatch):
         fake_post,
     )
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.agenting.Receiptor",
+        "locksmith.plugins.kerifoundation.onboarding.service.LocksmithReceiptor",
         fail_receiptor,
     )
     monkeypatch.setattr(
@@ -645,6 +687,7 @@ def test_onboarding_service_runs_step_4_5_6_flow(tmp_path, monkeypatch):
                 "hab_pre": "AID_MY ACCOUNT",
                 "witness_eids": ["WIT_1", "WIT_2", "WIT_3", "WIT_4"],
                 "toad": 3,
+                "rotate": True,
                 "result_eids": ["WIT_1", "WIT_2", "WIT_3", "WIT_4"],
             }
         ]
@@ -737,7 +780,15 @@ def test_onboarding_service_reuses_existing_permanent_account_aid(tmp_path, monk
 
         assert outcome.account_aid == "AID_EXISTING"
         assert [call for call in app.vault.hby.make_hab_calls if call["ns"] == ""] == []
-        assert rotation_calls == []
+        assert rotation_calls == [
+            {
+                "hab_pre": "AID_EXISTING",
+                "witness_eids": ["WIT_1", "WIT_2", "WIT_3", "WIT_4"],
+                "toad": 3,
+                "rotate": False,
+                "result_eids": ["WIT_1", "WIT_2", "WIT_3", "WIT_4"],
+            }
+        ]
         assert witness_registrar.calls[0][0] == "AID_EXISTING"
         assert witness_registrar.calls[0][3] is True
         assert db.get_account().status == ACCOUNT_STATUS_ONBOARDED
@@ -783,7 +834,15 @@ def test_onboarding_service_uses_selected_existing_account_aid(tmp_path, monkeyp
 
         assert outcome.account_aid == "AID_EXISTING"
         assert [call for call in app.vault.hby.make_hab_calls if call["ns"] == ""] == []
-        assert rotation_calls == []
+        assert rotation_calls == [
+            {
+                "hab_pre": "AID_EXISTING",
+                "witness_eids": ["WIT_1", "WIT_2", "WIT_3", "WIT_4"],
+                "toad": 3,
+                "rotate": False,
+                "result_eids": ["WIT_1", "WIT_2", "WIT_3", "WIT_4"],
+            }
+        ]
         assert witness_registrar.calls[0][0] == "AID_EXISTING"
         assert db.get_account().account_aid == "AID_EXISTING"
     finally:
@@ -828,6 +887,7 @@ def test_onboarding_service_rotates_selected_unwitnessed_account_aid(tmp_path, m
                 "hab_pre": "AID_EXISTING",
                 "witness_eids": ["WIT_1", "WIT_2", "WIT_3", "WIT_4"],
                 "toad": 3,
+                "rotate": True,
                 "result_eids": ["WIT_1", "WIT_2", "WIT_3", "WIT_4"],
             }
         ]
@@ -943,6 +1003,7 @@ def test_onboarding_failure_after_completion_preserves_session_and_resumes(tmp_p
         assert outcome.account_aid == "AID_MY ACCOUNT"
         assert boot_client.start_calls == 1
         assert boot_client.status_calls == 1
+        assert sum(call[0] == "create_account" for call in boot_client.calls) == 1
         assert ("status", "EPHEMERAL_AID", "SESSION_1") in boot_client.calls
         assert ("cancel", "EPHEMERAL_AID", "SESSION_1", "AID_MY ACCOUNT", "client_abandoned") not in boot_client.calls
     finally:
@@ -1001,12 +1062,12 @@ def test_onboarding_failure_after_account_create_preserves_local_state_for_resum
         db.close()
 
 
-def test_onboarding_status_failure_preserves_non_discardable_saved_session(tmp_path):
+def test_onboarding_status_failure_preserves_saved_session(tmp_path):
     account = FakeHab(
         name="my account",
         pre="AID_EXISTING",
-        wits=["WIT_1", "WIT_2", "WIT_3", "WIT_4"],
-        toad=3,
+        wits=[],
+        toad=0,
     )
     auth = FakeHab(
         name="kf-auth-existing",
@@ -1246,6 +1307,8 @@ def test_rotate_account_to_allocated_witnesses_rotates_and_receipts(monkeypatch,
             super().__init__(name="rotating", pre="AID_ROTATE", wits=[], toad=0)
             self.rotate_calls = []
             self.kever.sn = 0
+            self.kever.serder = SimpleNamespace(said="SAID_ROTATE")
+            self.db.wigs = SimpleNamespace(get=lambda keys: [b"wig-1", b"wig-2"])
 
         def rotate(self, *, toad, cuts, adds):
             self.rotate_calls.append({"toad": toad, "cuts": list(cuts), "adds": list(adds)})
@@ -1287,7 +1350,7 @@ def test_rotate_account_to_allocated_witnesses_rotates_and_receipts(monkeypatch,
                 next(gen)
 
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.agenting.Receiptor",
+        "locksmith.plugins.kerifoundation.onboarding.service.LocksmithReceiptor",
         lambda hby: fake_receiptor,
     )
     monkeypatch.setattr(
@@ -1437,7 +1500,7 @@ def test_parse_cesr_http_reply_rejects_sender_mismatch(monkeypatch):
         )
 
 
-def test_boot_client_syncs_account_keystate_once_per_surface(monkeypatch):
+def test_boot_client_syncs_canonical_account_keystate(monkeypatch):
     client = KFBootClient(
         FakeApp(),
         surfaces=KFSurfaceConfig(
@@ -1450,10 +1513,24 @@ def test_boot_client_syncs_account_keystate_once_per_surface(monkeypatch):
         "account",
         "AID_ACCOUNT",
         sn=1,
-        cloned_messages=[
-            b"clone-AID_ACCOUNT-0-with-receipts",
-            b"clone-AID_ACCOUNT-1-with-receipts",
-        ],
+    )
+    hab.kever.serder = SimpleNamespace(said="SAID_1")
+    canonical = {
+        0: "SAID_0",
+        1: "SAID_1",
+    }
+    first_seen = {
+        ("AID_ACCOUNT", "SAID_0"): SimpleNamespace(num=0),
+        ("AID_ACCOUNT", "SAID_1"): SimpleNamespace(num=1),
+    }
+    messages = {
+        ("AID_ACCOUNT", 0, "SAID_0"): b"clone-AID_ACCOUNT-0-with-receipts",
+        ("AID_ACCOUNT", 1, "SAID_1"): b"clone-AID_ACCOUNT-1-with-receipts",
+    }
+    hab.db = SimpleNamespace(
+        kels=SimpleNamespace(getLast=lambda keys, on: canonical.get(on)),
+        fons=SimpleNamespace(get=lambda keys: first_seen.get(keys)),
+        cloneEvtMsg=lambda pre, fn, dig, gvrsn: messages[(pre, fn, dig)],
     )
     calls = []
 
@@ -1461,24 +1538,38 @@ def test_boot_client_syncs_account_keystate_once_per_surface(monkeypatch):
         calls.append(kwa)
         return None
 
-    class FakeSerder:
-        def __init__(self, raw):
-            text = raw.decode("utf-8")
-            self.sn = int(text.split("-")[2])
-            self.ked = {"s": str(self.sn)}
-
     monkeypatch.setattr(client, "_post_cesr", fake_post_cesr)
-    monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.SerderKERI",
-        FakeSerder,
-    )
 
     client._ensure_surface_keystate(surface="account", hab=hab, destination="BOOT_SERVER_AID")
+    client._ensure_surface_keystate(surface="account", hab=hab, destination="BOOT_SERVER_AID")
+
+    hab.kever.sn = 2
+    hab.kever.serder.said = "SAID_2"
+    canonical[2] = "SAID_2"
+    first_seen[("AID_ACCOUNT", "SAID_2")] = SimpleNamespace(num=2)
+    messages[("AID_ACCOUNT", 2, "SAID_2")] = b"clone-AID_ACCOUNT-2-with-receipts"
+    client._ensure_surface_keystate(surface="account", hab=hab, destination="BOOT_SERVER_AID")
+
+    canonical[1] = "RECOVERED_SAID_1"
+    canonical[2] = "RECOVERED_SAID_2"
+    hab.kever.serder.said = "RECOVERED_SAID_2"
+    first_seen[("AID_ACCOUNT", "RECOVERED_SAID_1")] = SimpleNamespace(num=3)
+    first_seen[("AID_ACCOUNT", "RECOVERED_SAID_2")] = SimpleNamespace(num=4)
+    messages[("AID_ACCOUNT", 3, "RECOVERED_SAID_1")] = (
+        b"clone-AID_ACCOUNT-recovered-1-with-receipts"
+    )
+    messages[("AID_ACCOUNT", 4, "RECOVERED_SAID_2")] = (
+        b"clone-AID_ACCOUNT-recovered-2-with-receipts"
+    )
     client._ensure_surface_keystate(surface="account", hab=hab, destination="BOOT_SERVER_AID")
 
     assert [call["ims"] for call in calls] == [
         b"clone-AID_ACCOUNT-0-with-receipts",
         b"clone-AID_ACCOUNT-1-with-receipts",
+        b"clone-AID_ACCOUNT-2-with-receipts",
+        b"clone-AID_ACCOUNT-0-with-receipts",
+        b"clone-AID_ACCOUNT-recovered-1-with-receipts",
+        b"clone-AID_ACCOUNT-recovered-2-with-receipts",
     ]
     assert all(call["url"] == "https://boot.example/account" for call in calls)
     assert all(call["destination"] == "BOOT_SERVER_AID" for call in calls)

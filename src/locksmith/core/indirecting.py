@@ -357,9 +357,25 @@ class Poller(doing.DoDoer):
 
             # Create query message
             if isinstance(self.hab, GroupHab):
-                msg = self.hab.mhab.query(pre=self.pre, src=self.mailbox, route="mbx", query=q)  # type: ignore
+                msg = self.hab.mhab.query(
+                    pre=self.pre,
+                    src=self.mailbox,
+                    route="mbx",
+                    query=q,
+                    version=kering.Vrsn_2_0,
+                    gvrsn=kering.Vrsn_2_0,
+                    kind=kering.Kinds.json,
+                )  # type: ignore
             else:
-                msg = self.hab.query(pre=self.pre, src=self.mailbox, route="mbx", query=q)
+                msg = self.hab.query(
+                    pre=self.pre,
+                    src=self.mailbox,
+                    route="mbx",
+                    query=q,
+                    version=kering.Vrsn_2_0,
+                    gvrsn=kering.Vrsn_2_0,
+                    kind=kering.Kinds.json,
+                )
 
             httping.createCESRRequest(msg, client, dest=self.mailbox)
 
@@ -398,5 +414,4 @@ class Poller(doing.DoDoer):
 
                 yield 0.25
             yield self.retry / 1000
-
 

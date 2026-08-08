@@ -218,11 +218,11 @@ def introduce_watcher_observed_aid(
         topic="reply",
     )
 
-    for msg in hab.db.cloneDelegation(hab.kever):
+    for msg in hab.db.cloneDelegation(hab.kever, gvrsn=kering.Version):
         serder = serdering.SerderKERI(raw=msg)
         postman.send(serder=serder, attachment=msg[serder.size:])
 
-    for msg in hab.db.clonePreIter(pre=hab.pre):
+    for msg in hab.db.clonePreIter(pre=hab.pre, gvrsn=kering.Version):
         serder = serdering.SerderKERI(raw=msg)
         postman.send(serder=serder, attachment=msg[serder.size:])
 
@@ -953,7 +953,15 @@ class ChallengeVerificationDoer(doing.DoDoer):
             payload = dict(i=self.hab_pre, words=self.challenge_words)
 
             # Create exchange message
-            exn = exchange(route='/challenge/response',attributes=payload, sender=hab.pre)
+            exn = exchange(
+                route='/challenge/response',
+                attributes=payload,
+                sender=hab.pre,
+                version=kering.Vrsn_2_0,
+                pvrsn=kering.Vrsn_2_0,
+                gvrsn=kering.Vrsn_2_0,
+                kind=kering.Kinds.json,
+            )
 
             # Endorse the message
             ims = hab.endorse(serder=exn, last=False, framed=True)
@@ -1113,12 +1121,12 @@ class SetRoleDoer(doing.DoDoer):
             )
 
             # Send delegation messages
-            for msg in hab.db.cloneDelegation(hab.kever):
+            for msg in hab.db.cloneDelegation(hab.kever, gvrsn=kering.Version):
                 serder = serdering.SerderKERI(raw=msg)
                 postman.send(serder=serder, attachment=msg[serder.size:])
 
             # Send identifier messages
-            for msg in hab.db.clonePreIter(pre=hab.pre):
+            for msg in hab.db.clonePreIter(pre=hab.pre, gvrsn=kering.Version):
                 serder = serdering.SerderKERI(raw=msg)
                 postman.send(serder=serder, attachment=msg[serder.size:])
 

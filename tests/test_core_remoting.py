@@ -223,8 +223,8 @@ def test_introduce_watcher_observed_aid_sends_kel_and_add_reply(monkeypatch):
         kever=SimpleNamespace(),
         db=SimpleNamespace(
             ends=_FakeStore(),
-            cloneDelegation=lambda _kever: [b"delegation"],
-            clonePreIter=lambda pre: [b"icp", b"rot"],
+            cloneDelegation=lambda _kever, *, gvrsn: [b"delegation"],
+            clonePreIter=lambda pre, *, gvrsn: [b"icp", b"rot"],
         ),
         psr=SimpleNamespace(parseOne=fake_parse_one),
     )
@@ -328,8 +328,8 @@ def test_introduce_watcher_observed_aid_skips_role_add_when_already_allowed(monk
         kever=SimpleNamespace(),
         db=SimpleNamespace(
             ends=_FakeStore(),
-            cloneDelegation=lambda _kever: [],
-            clonePreIter=lambda pre: [b"icp"],
+            cloneDelegation=lambda _kever, *, gvrsn: [],
+            clonePreIter=lambda pre, *, gvrsn: [b"icp"],
         ),
         psr=SimpleNamespace(parseOne=fake_parse_one),
     )
@@ -425,8 +425,8 @@ def test_introduce_watcher_observed_aid_wraps_delivery_failures(monkeypatch):
         kever=SimpleNamespace(),
         db=SimpleNamespace(
             ends=_FakeStore(),
-            cloneDelegation=lambda _kever: [],
-            clonePreIter=lambda pre: [],
+            cloneDelegation=lambda _kever, *, gvrsn: [],
+            clonePreIter=lambda pre, *, gvrsn: [],
         ),
         psr=SimpleNamespace(parseOne=lambda ims: None),
         reply=lambda *, route, data: f"reply:{route}".encode("utf-8"),

@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QHBoxLayout
 )
 
+from locksmith.core.credentialing import registry_is_complete
 from locksmith.ui.toolkit.widgets import (
     LocksmithInvertedButton
 )
@@ -188,8 +189,17 @@ class ViewSchemaDialog(LocksmithDialog):
         issue_lable.setStyleSheet("font-weight: bold; font-size: 14px;")
         layout.addWidget(issue_lable)
 
+        registry = self.app.vault.rgy.registryByName(self.schema_said)
+        issuable = "No"
+        if registry:
+            issuable = (
+                "Yes"
+                if registry_is_complete(self.app.vault.rgy, registry)
+                else "Pending"
+            )
+
         self.issue_field = LocksmithLineEdit("Schema Type")
-        self.issue_field.setText("Yes" if self.app.vault.rgy.registryByName(self.schema_said) else "No")
+        self.issue_field.setText(issuable)
         self.issue_field.setReadOnly(True)
         self.issue_field.setCursorPosition(0)
         self.issue_field.setMinimumWidth(420)

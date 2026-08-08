@@ -1099,7 +1099,7 @@ class ConfirmDoer(doing.DoDoer):
         """
         from keri.db import dbing
         from keri.core import serdering, coring
-        from keri.app import habbing, grouping, agenting
+        from keri.app import agenting, habbing, grouping
         from ordered_set import OrderedSet as oset
         from keri import core
 
@@ -1212,7 +1212,14 @@ class ConfirmDoer(doing.DoDoer):
                             # wait for confirmation of fully committed event
                             if eserder.pre in self.hby.kevers:
 
-                                self.witq.query(src=hab.pre, pre=eserder.pre, sn=eserder.sn)
+                                self.witq.query(
+                                    src=hab.pre,
+                                    pre=eserder.pre,
+                                    sn=eserder.sn,
+                                    version=kering.Vrsn_2_0,
+                                    gvrsn=kering.Vrsn_2_0,
+                                    kind=kering.Kinds.json,
+                                )
 
                                 while eserder.sn < self.hby.kevers[eserder.pre].sn:
                                     yield self.tock
@@ -1220,7 +1227,15 @@ class ConfirmDoer(doing.DoDoer):
                                 logger.info(f"Delegate {eserder.pre} {typ} event committed.")
                             else:  # It should be an inception event then...
                                 wits = [werfer.qb64 for werfer in eserder.berfers]
-                                self.witq.query(src=hab.pre, pre=eserder.pre, sn=eserder.sn, wits=wits)
+                                self.witq.query(
+                                    src=hab.pre,
+                                    pre=eserder.pre,
+                                    sn=eserder.sn,
+                                    wits=wits,
+                                    version=kering.Vrsn_2_0,
+                                    gvrsn=kering.Vrsn_2_0,
+                                    kind=kering.Kinds.json,
+                                )
                                 while eserder.pre not in self.hby.kevers:
                                     yield self.tock
 
