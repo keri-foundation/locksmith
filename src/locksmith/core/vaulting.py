@@ -59,7 +59,12 @@ class Vault(doing.DoDoer):
         self.app = app
         self.hby = hby
         self.rgy = rgy
-        self.db = LocksmithBaser(name=self.hby.name, reopen=True)
+        self.db = LocksmithBaser(
+            name=self.hby.name,
+            base=self.hby.base,
+            temp=self.hby.temp,
+            reopen=True,
+        )
 
         # Keyed namespace for plugin runtime state
         self.plugin_state: dict[str, any] = {}
@@ -105,7 +110,11 @@ class Vault(doing.DoDoer):
         self.rep = storing.Respondant(
             hby=hby,
             cues=self.cues,
-            mbx=storing.Mailboxer(name=self.hby.name, temp=self.hby.temp)
+            mbx=storing.Mailboxer(
+                name=self.hby.name,
+                base=self.hby.base,
+                temp=self.hby.temp,
+            ),
         )
 
         # Habery doer
@@ -123,7 +132,15 @@ class Vault(doing.DoDoer):
 
         # Signaling and notifications
         signaler = signaling.Signaler()
-        self.notifier = notifying.Notifier(hby=hby, signaler=signaler)
+        self.notifier = notifying.Notifier(
+            hby=hby,
+            signaler=signaler,
+            noter=notifying.Noter(
+                name=self.hby.name,
+                base=self.hby.base,
+                temp=self.hby.temp,
+            ),
+        )
         self.mux = grouping.Multiplexor(hby=hby, notifier=self.notifier)
 
         # Exchange handling

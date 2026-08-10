@@ -17,6 +17,7 @@ from keri.vdr import credentialing
 from locksmith.core import otping
 from locksmith.core.crypto import stretch_password_to_passcode
 from locksmith.core.habbing import format_bran
+from locksmith.db.basing import LocksmithBaser
 from locksmith.ui import colors
 from locksmith.ui.toolkit.widgets import (
     LocksmithDialog,
@@ -204,6 +205,12 @@ class CreateVaultDialog(LocksmithDialog):
 
             # Persistent vaults: close and let user open via drawer
             hby.close()
+            db = LocksmithBaser(
+                name=name,
+                base=self.config.base,
+                reopen=True,
+            )
+            db.close()
 
             # Save OTP secret if enabled
             if self._otp_enabled and self._otp_secret:
