@@ -242,9 +242,11 @@ def test_vault_constructs_with_real_keri_v2_stores(monkeypatch, tmp_path):
         def __init__(self, *args, **kwargs):
             super().__init__(doers=[])
 
-    def locksmith_baser(name, reopen=True):
+    def locksmith_baser(name, base="", temp=False, reopen=True):
         return LocksmithBaser(
             name=f"{name}-locksmith",
+            base=base,
+            temp=temp,
             headDirPath=str(tmp_path),
             reopen=reopen,
         )
@@ -252,13 +254,24 @@ def test_vault_constructs_with_real_keri_v2_stores(monkeypatch, tmp_path):
     monkeypatch.setattr(vaulting, "LocksmithBaser", locksmith_baser)
     monkeypatch.setattr(vaulting, "TurretDoer", FakeTurretDoer)
 
-    with habbing.openHby(name="vault-v2", temp=True) as hby:
-        rgy = credentialing.Regery(hby=hby, name=hby.name, temp=True)
+    with habbing.openHby(name="vault-v2", base="custom", temp=True) as hby:
+        rgy = credentialing.Regery(
+            hby=hby,
+            name=hby.name,
+            base=hby.base,
+            temp=hby.temp,
+        )
         vault = None
         try:
             vault = vaulting.Vault(app=SimpleNamespace(), hby=hby, rgy=rgy)
 
             assert vault.hby is hby
+            assert vault.db.base == hby.base
+            assert vault.db.temp is hby.temp
+            assert vault.rep.mbx.base == hby.base
+            assert vault.rep.mbx.temp is hby.temp
+            assert vault.notifier.noter.base == hby.base
+            assert vault.notifier.noter.temp is hby.temp
             assert vault.counseling_completion_doers == {}
             assert vault.pluginSettings is None
             assert vault.turrent_doer is None
