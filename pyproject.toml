@@ -41,7 +41,7 @@ dependencies = [
     "schedule==1.2.2",
     "kerkle>=0.0.3",
     "cbor>=1.0.0",
-    "falcon==4.2.0",
+    "falcon>=4.2.0",
     "requests==2.32.3",
     'cryptography>=46.0.3',
     'pymongo>=4.11.2',
