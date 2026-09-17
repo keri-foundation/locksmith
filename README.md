@@ -1,15 +1,18 @@
 # Locksmith
-This is the KERI Foundation open port of the Locksmith wallet
 
-to update assets, in locksmith directory run
+This is the KERI Foundation open port of the Locksmith wallet.
+
+Install Python 3.14 and [uv 0.9.18](https://docs.astral.sh/uv/getting-started/installation/).
+From the repository root:
+
 ```bash
-python ./scripts/generate_qrc.py; pyside6-rcc resources.qrc -o resources_rc.py; mv resources_rc.py ./src/locksmith;
+uv sync --locked
+uv run --locked python -m locksmith.main
 ```
 
-To run the app:
-```bash
-python ./src/locksmith/main.py
-```
+See the [developer guide](docs/developer-guide.rst) for tests, dependency updates,
+and asset generation.
+
 ## To run with local witness, watchers
 
 ### in witness-hk
@@ -37,7 +40,7 @@ watopnet marshal start \
 ### in locksmith
 
 ```
-python ./src/locksmith/main.py
+uv run --locked python -m locksmith.main
 ```
 
 KERI Foundation plugin documentation lives in
