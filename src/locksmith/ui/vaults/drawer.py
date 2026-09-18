@@ -14,6 +14,7 @@ from keri import help
 
 from locksmith.ui import colors
 from locksmith.ui.toolkit.utils import load_scaled_pixmap, create_spacer
+from locksmith.ui.toolkit.widgets.fields import LocksmithLineEdit
 from locksmith.ui.vaults.create import CreateVaultDialog
 from locksmith.ui.vaults.open import OpenVaultDialog
 
@@ -21,6 +22,12 @@ if TYPE_CHECKING:
     from locksmith.ui.window import LocksmithWindow
 
 logger = help.ogler.getLogger(__name__)
+
+# Item data role holding each row's index in the unfiltered baseline order.
+# The baseline is whatever order ``LocksmithApplication.environments()`` returns,
+# so clearing the filter can restore it without re-reading the filesystem.
+_BASELINE_INDEX_ROLE = Qt.ItemDataRole.UserRole
+
 
 class VaultDrawer(QWidget):
     """
@@ -48,6 +55,7 @@ class VaultDrawer(QWidget):
         self.drawer_width = 330
         self.app = self.parent.app
         self._overlay_animation_connected = False  # Track connection state
+        self._filter_active = False  # Track filter transitions for logging only
 
         # Create components
         self._create_overlay()
@@ -132,6 +140,18 @@ class VaultDrawer(QWidget):
         divider.setFrameShape(QFrame.Shape.HLine)
         drawer_layout.addWidget(divider)
 
+        # Search filter, between the header divider and "Initialize New Vault"
+        search_row = QHBoxLayout()
+        search_row.setContentsMargins(12, 8, 12, 12)
+        self.search_field = LocksmithLineEdit(
+            placeholder_text="Search vaults",
+            leading_icon=":/assets/material-icons/search.svg",
+        )
+        self.search_field.setClearButtonEnabled(True)
+        self.search_field.textChanged.connect(self._filter_vaults)
+        search_row.addWidget(self.search_field)
+        drawer_layout.addLayout(search_row)
+
         # New vault button in its own list widget with custom styling
         new_vault_button_container = QListWidget()
         new_vault_button_container.setObjectName("new-vault-button-container")
@@ -183,6 +203,19 @@ class VaultDrawer(QWidget):
         """)
 
         self.vault_list.itemClicked.connect(self._on_vault_item_clicked)
+
+        # Filter empty state. It replaces the vault list only; the
+        # "Initialize New Vault" action above stays available.
+        # PlainText so unusual search input is shown literally, never as markup.
+        self.empty_state_label = QLabel("")
+        self.empty_state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_state_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.empty_state_label.setWordWrap(True)
+        self.empty_state_label.setStyleSheet(
+            f"color: {colors.TEXT_SECONDARY}; font-size: 14px; padding: 24px 16px;"
+        )
+        self.empty_state_label.hide()
+        drawer_layout.addWidget(self.empty_state_label)
 
         # Populate vault list
         self._refresh_vault_list()
@@ -267,6 +300,10 @@ class VaultDrawer(QWidget):
             )
             self.drawer_visible = True
 
+            # Every open starts from a clean filter. This runs before the drawer
+            # becomes visible so the user never sees the previous query applied.
+            self._reset_filter()
+
             # Show overlay and fade in
             self.drawer_overlay.show()
             self.drawer_overlay.raise_()  # Bring overlay to front
@@ -348,7 +385,9 @@ class VaultDrawer(QWidget):
         Show the drawer widgets (but keep drawer closed).
         Used when navigating to pages that use the drawer.
         """
-        # Refresh the vault list to pick up any changes (e.g., deleted vaults)
+        # Navigation-level re-entry: start from a clean filter state, then
+        # refresh the list to pick up any changes (e.g., deleted vaults).
+        self._reset_filter()
         self._refresh_vault_list()
         
         # Don't show overlay (it's only shown when drawer is toggled open)
@@ -356,17 +395,139 @@ class VaultDrawer(QWidget):
         self.vault_drawer.show()
 
     def _refresh_vault_list(self):
-        """Refresh the list of vaults."""
+        """
+        Rebuild the vault list from the application's environment list.
+
+        The order returned by ``self.app.environments()`` is the baseline order.
+        Each row records its baseline index so an inactive filter can restore
+        that exact order without re-reading the filesystem.
+        """
         self.vault_list.clear()
 
         vault_font = QFont()
         vault_font.setPointSize(15)
 
-        for vault_name in self.app.environments():
+        for baseline_index, vault_name in enumerate(self.app.environments()):
             vault_item = QListWidgetItem(QIcon(":/assets/custom/vault.png"), vault_name)
             vault_item.setFont(vault_font)
+            vault_item.setData(_BASELINE_INDEX_ROLE, baseline_index)
             self.vault_list.addItem(vault_item)
 
+        # Re-apply the active filter so an add or delete cannot desync the
+        # visible list while the drawer stays open.
+        query = self.search_field.text() if hasattr(self, "search_field") else ""
+        self._filter_vaults(query)
+
+    def _reset_filter(self):
+        """
+        Clear the search field and restore the unfiltered list.
+
+        This is the drawer's real open transition. ``QLineEdit.clear()`` emits
+        ``textChanged`` synchronously, so list order and the empty state are
+        restored before the drawer scrolls into view.
+
+        Note: ``show_drawer_widgets()`` is a separate navigation-level lifecycle
+        method. It is not the path a toolbar close/reopen takes, so it must not
+        be the only place the filter is cleared.
+        """
+        if not hasattr(self, "search_field"):
+            return
+        if self.search_field.text():
+            self.search_field.clear()
+        else:
+            self._filter_vaults("")
+
+    def _filter_vaults(self, query: str):
+        """
+        Apply ``query`` to the vault list.
+
+        Matching is a case-insensitive substring test on the vault name. Prefix
+        matches are ordered above other substring matches, and each group is
+        ordered alphabetically. Rows that do not match stay in the model but are
+        hidden, so the baseline order is always recoverable.
+
+        The query is used exactly as typed: no whitespace stripping and no other
+        normalisation, because the contract is substring matching.
+
+        This operates on the already-loaded rows and never touches the
+        filesystem.
+        """
+        if not hasattr(self, "search_field"):
+            return
+
+        needle = query.casefold()
+        total = self.vault_list.count()
+
+        ranked: list[tuple[int, str, int, QListWidgetItem]] = []
+        for position in range(total):
+            item = self.vault_list.item(position)
+            folded = item.text().casefold()
+            baseline_index = item.data(_BASELINE_INDEX_ROLE)
+            if baseline_index is None:
+                baseline_index = position
+
+            if not needle or folded.startswith(needle):
+                rank = 0  # prefix match, or inactive filter (everything matches)
+            elif needle in folded:
+                rank = 1  # substring-only match
+            else:
+                rank = 2  # no match
+            ranked.append((rank, folded, baseline_index, item))
+
+        matching = [entry for entry in ranked if entry[0] != 2]
+        non_matching = [entry for entry in ranked if entry[0] == 2]
+
+        if needle:
+            matching.sort(key=lambda entry: (entry[0], entry[1]))
+        else:
+            matching.sort(key=lambda entry: entry[2])
+        non_matching.sort(key=lambda entry: entry[2])
+
+        self.vault_list.blockSignals(True)
+        for position in range(self.vault_list.count() - 1, -1, -1):
+            self.vault_list.takeItem(position)
+        for _rank, _folded, _baseline_index, item in matching:
+            self.vault_list.addItem(item)
+            item.setHidden(False)
+        for _rank, _folded, _baseline_index, item in non_matching:
+            self.vault_list.addItem(item)
+            item.setHidden(True)
+        self.vault_list.blockSignals(False)
+
+        self._set_empty_state(query, len(matching))
+        self._log_filter_state(needle, len(matching), total)
+
+    def _set_empty_state(self, query: str, match_count: int):
+        """
+        Show the no-match message in place of the vault list.
+
+        The message replaces the list only. The "Initialize New Vault" action is
+        a separate widget and deliberately stays visible.
+        """
+        if query and match_count == 0:
+            self.empty_state_label.setText(f"No vaults match '{query}'")
+            self.vault_list.hide()
+            self.empty_state_label.show()
+        else:
+            self.empty_state_label.hide()
+            self.vault_list.show()
+
+    def _log_filter_state(self, needle: str, match_count: int, total: int):
+        """
+        Log filter state transitions, not keystrokes.
+
+        INFO is reserved for a meaningful transition (filter enabled, filter
+        cleared). The user's query text is never written to the log, and typing
+        further characters while the filter is already active produces no INFO
+        record, so a keystroke cannot leak the search text or flood the log.
+        """
+        active = bool(needle)
+        if active and not self._filter_active:
+            logger.info(f"Vault drawer filter enabled: matches={match_count} total={total}")
+        elif not active and self._filter_active:
+            logger.info(f"Vault drawer filter cleared: total={total}")
+        self._filter_active = active
+        logger.debug(f"Vault drawer filter applied: active={active} matches={match_count} total={total}")
 
     def show_create_vault_dialog(self):
         """Show the vault creation dialog."""
