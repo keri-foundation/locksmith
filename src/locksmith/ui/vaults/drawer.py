@@ -51,6 +51,7 @@ class VaultDrawer(QWidget):
         self.app = self.parent.app
         self._overlay_animation_connected = False  # Track connection state
         self._filter_active = False  # So INFO logs transitions, not keystrokes
+        self._vault_names: list[str] = []
 
         # Create components
         self._create_overlay()
@@ -211,10 +212,10 @@ class VaultDrawer(QWidget):
         self.empty_state_label.hide()
         drawer_layout.addWidget(self.empty_state_label)
 
+        drawer_layout.addWidget(self.vault_list)
+
         # Populate vault list
         self._refresh_vault_list()
-
-        drawer_layout.addWidget(self.vault_list)
 
 
         # Set drawer dimensions
@@ -395,6 +396,7 @@ class VaultDrawer(QWidget):
         Vault names come from ``LocksmithApplication.environments()``, which also
         defines the order shown while no filter is active.
         """
+        self._vault_names = self.app.environments()
         self._filter_vaults(self.search_field.text())
 
     def _filter_vaults(self, query: str):
@@ -406,7 +408,7 @@ class VaultDrawer(QWidget):
         query every vault is shown, in the application's own order.
         """
         needle = query.casefold()
-        matching = [name for name in self.app.environments() if needle in name.casefold()]
+        matching = [name for name in self._vault_names if needle in name.casefold()]
         if needle:
             matching.sort(
                 key=lambda name: (not name.casefold().startswith(needle), name.casefold())

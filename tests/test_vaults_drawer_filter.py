@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from PySide6.QtWidgets import QWidget
@@ -59,12 +60,11 @@ def logs():
     drawer_module.logger.removeHandler(handler)
 
 
-def _shown(drawer: VaultDrawer) -> list[str]:
+def _vault_names(drawer: VaultDrawer) -> list[str]:
     """Vault names the user can currently see, in display order."""
     return [
         drawer.vault_list.item(row).text()
         for row in range(drawer.vault_list.count())
-        if not drawer.vault_list.item(row).isHidden()
     ]
 
 
@@ -76,7 +76,7 @@ def test_filter_hides_non_matches_and_puts_prefix_matches_first(drawer):
     # Case-insensitive match. "gallium" and "Gamma" are prefixes, so they sort
     # alphabetically ahead of the "megalith" substring match. "alpine" and
     # "zeta" do not match and are gone.
-    assert _shown(widget) == ["gallium", "Gamma", "megalith"]
+    assert _vault_names(widget) == ["gallium", "Gamma", "megalith"]
 
 
 def test_no_match_shows_empty_state(drawer):
@@ -84,7 +84,7 @@ def test_no_match_shows_empty_state(drawer):
 
     widget.search_field.setText("zzz")
 
-    assert _shown(widget) == []
+    assert _vault_names(widget) == []
     assert widget.empty_state_label.isHidden() is False
     assert widget.empty_state_label.text() == "No vaults match 'zzz'"
     assert widget.vault_list.isHidden() is True
@@ -96,13 +96,13 @@ def test_toggle_close_and_reopen_clears_filter(drawer, qapp):
 
     widget.toggle()  # open
     widget.search_field.setText("gam")
-    assert _shown(widget) == ["Gamma"]
+    assert _vault_names(widget) == ["Gamma"]
 
     widget.toggle()  # close
     widget.toggle()  # open again
 
     assert widget.search_field.text() == ""
-    assert _shown(widget) == vaults
+    assert _vault_names(widget) == vaults
     assert widget.empty_state_label.isHidden() is True
 
     widget.toggle()
@@ -112,14 +112,22 @@ def test_toggle_close_and_reopen_clears_filter(drawer, qapp):
 def test_refresh_reapplies_active_filter(drawer):
     widget, vaults = drawer
 
+    environments = Mock(side_effect=lambda: list(vaults))
+    widget.app.environments = environments
+
+    widget.search_field.setText("g")
     widget.search_field.setText("ga")
-    assert _shown(widget) == ["gallium", "Gamma", "megalith"]
+
+    # Typing filters the cached list, not the filesystem.
+    assert environments.call_count == 0
+    assert _vault_names(widget) == ["gallium", "Gamma", "megalith"]
 
     vaults[:] = ["megalith", "gantry", "zeta"]
     widget._refresh_vault_list()
 
+    assert environments.call_count == 1
     assert widget.search_field.text() == "ga"
-    assert _shown(widget) == ["gantry", "megalith"]
+    assert _vault_names(widget) == ["gantry", "megalith"]
 
 
 def test_filter_logs_one_info_transition_per_state_change(drawer, logs):
