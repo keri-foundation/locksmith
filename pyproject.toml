@@ -10,7 +10,7 @@ name = "Locksmith"
 version = "0.0.1"
 description = "Locksmith – KERI identity vault application"
 readme = "README.md"
-requires-python = ">=3.14.0"
+requires-python = "~=3.14.0"
 license = { text = "MIT" }
 
 authors = [
@@ -34,18 +34,24 @@ dependencies = [
     "qtawesome>=1.4.0",
     "mnemonic==0.21",
     "multicommand==1.0.0",
-    "pillow==12.2.0",
+    "pillow==12.3.0",
     "qrcode[pil]==8.2",
     "pyotp==2.9.0",
     "prometheus_client>=0.21.1",
     "schedule==1.2.2",
     "kerkle>=0.0.3",
     "cbor>=1.0.0",
-    "falcon==4.2.0",
-    "requests==2.32.3",
+    "falcon>=4.2.0",
+    "requests==2.33.0",
     'cryptography>=46.0.3',
     'pymongo>=4.11.2',
 ]
+
+[dependency-groups]
+dev = ["pytest", "ruff", "pip-audit", "Sphinx>=8,<9"]
+
+[tool.uv]
+required-version = "==0.9.18"
 
 [project.entry-points."locksmith.plugins"]
 kerifoundation = "locksmith.plugins.kerifoundation.plugin:KeriFoundationPlugin"

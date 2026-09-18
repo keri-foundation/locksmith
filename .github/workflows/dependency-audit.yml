@@ -1,0 +1,43 @@
+name: Audit locked dependencies
+
+on:
+  pull_request:
+    paths:
+      - pyproject.toml
+      - uv.lock
+      - .github/workflows/dependency-audit.yml
+  push:
+    branches: [main]
+    paths:
+      - pyproject.toml
+      - uv.lock
+      - .github/workflows/dependency-audit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.14'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
+      - name: Install locked dependencies and tools
+        run: uv sync --locked
+
+      - name: Check installed dependencies
+        run: uv pip check
+
+      - name: Audit installed packages
+        run: uv run --locked pip-audit --local --skip-editable
