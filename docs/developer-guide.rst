@@ -66,15 +66,6 @@ Once the editable install is in place:
 
    uv run --locked python -m locksmith.main
 
-Resetting Local Vaults
-----------------------
-
-To clear stale local test vaults and reset KERI databases:
-
-.. code-block:: bash
-
-   rm -rf ~/.keri/rt ~/.keri/db ~/.keri/ks
-
 Building the Docs
 -----------------
 

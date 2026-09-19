@@ -43,14 +43,6 @@ watopnet marshal start \
 uv run --locked python -m locksmith.main
 ```
 
-## Resetting Local Vaults & Environments
-
-To clear stale local test vaults and reset local KERI databases:
-
-```bash
-rm -rf ~/.keri/rt ~/.keri/db ~/.keri/ks
-```
-
 KERI Foundation plugin documentation lives in
 [`docs/kerifoundation-plugin.rst`](docs/kerifoundation-plugin.rst).
 
