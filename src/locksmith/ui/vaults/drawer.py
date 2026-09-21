@@ -14,6 +14,7 @@ from keri import help
 
 from locksmith.ui import colors
 from locksmith.ui.toolkit.utils import load_scaled_pixmap, create_spacer
+from locksmith.ui.toolkit.widgets.fields import LocksmithLineEdit
 from locksmith.ui.vaults.create import CreateVaultDialog
 from locksmith.ui.vaults.open import OpenVaultDialog
 
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from locksmith.ui.window import LocksmithWindow
 
 logger = help.ogler.getLogger(__name__)
+
 
 class VaultDrawer(QWidget):
     """
@@ -48,6 +50,11 @@ class VaultDrawer(QWidget):
         self.drawer_width = 330
         self.app = self.parent.app
         self._overlay_animation_connected = False  # Track connection state
+        self._filter_active = False  # So INFO logs transitions, not keystrokes
+        self._vault_names: list[str] = []
+        # Built once here: _filter_vaults() runs on every keystroke.
+        self._vault_font = QFont()
+        self._vault_font.setPointSize(15)
 
         # Create components
         self._create_overlay()
@@ -132,6 +139,18 @@ class VaultDrawer(QWidget):
         divider.setFrameShape(QFrame.Shape.HLine)
         drawer_layout.addWidget(divider)
 
+        # Search filter, between the header divider and "Initialize New Vault"
+        search_row = QHBoxLayout()
+        search_row.setContentsMargins(12, 8, 12, 12)
+        self.search_field = LocksmithLineEdit(
+            placeholder_text="Search vaults",
+            leading_icon=":/assets/material-icons/search.svg",
+        )
+        self.search_field.setClearButtonEnabled(True)
+        self.search_field.textChanged.connect(self._filter_vaults)
+        search_row.addWidget(self.search_field)
+        drawer_layout.addLayout(search_row)
+
         # New vault button in its own list widget with custom styling
         new_vault_button_container = QListWidget()
         new_vault_button_container.setObjectName("new-vault-button-container")
@@ -184,10 +203,22 @@ class VaultDrawer(QWidget):
 
         self.vault_list.itemClicked.connect(self._on_vault_item_clicked)
 
-        # Populate vault list
-        self._refresh_vault_list()
+        # No-match message. Shown in place of the list only, so "Initialize New
+        # Vault" stays available. The query is user input, never markup.
+        self.empty_state_label = QLabel("")
+        self.empty_state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_state_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.empty_state_label.setWordWrap(True)
+        self.empty_state_label.setStyleSheet(
+            f"color: {colors.TEXT_SECONDARY}; font-size: 14px; padding: 24px 16px;"
+        )
+        self.empty_state_label.hide()
+        drawer_layout.addWidget(self.empty_state_label)
 
         drawer_layout.addWidget(self.vault_list)
+
+        # Populate vault list
+        self._refresh_vault_list()
 
 
         # Set drawer dimensions
@@ -266,6 +297,10 @@ class VaultDrawer(QWidget):
                 window_height - toolbar_height
             )
             self.drawer_visible = True
+
+            # Every open starts from a clean filter, so the previous query is
+            # never shown. clear() emits textChanged, which rebuilds the list.
+            self.search_field.clear()
 
             # Show overlay and fade in
             self.drawer_overlay.show()
@@ -348,7 +383,9 @@ class VaultDrawer(QWidget):
         Show the drawer widgets (but keep drawer closed).
         Used when navigating to pages that use the drawer.
         """
-        # Refresh the vault list to pick up any changes (e.g., deleted vaults)
+        # Navigation-level re-entry: clean filter, and pick up vaults added or
+        # deleted since this page was last shown.
+        self.search_field.clear()
         self._refresh_vault_list()
         
         # Don't show overlay (it's only shown when drawer is toggled open)
@@ -356,17 +393,47 @@ class VaultDrawer(QWidget):
         self.vault_drawer.show()
 
     def _refresh_vault_list(self):
-        """Refresh the list of vaults."""
+        """
+        Rebuild the vault list, re-applying any active filter.
+
+        Vault names come from ``LocksmithApplication.environments()``, which also
+        defines the order shown while no filter is active.
+        """
+        self._vault_names = self.app.environments()
+        self._filter_vaults(self.search_field.text())
+
+    def _filter_vaults(self, query: str):
+        """
+        Show the vaults matching ``query``, prefix matches first.
+
+        Matching is a case-insensitive substring test. Prefix matches sort above
+        substring-only matches, and each group sorts alphabetically. With no
+        query every vault is shown, in the application's own order.
+        """
+        needle = query.casefold()
+        matching = [name for name in self._vault_names if needle in name.casefold()]
+        if needle:
+            matching.sort(
+                key=lambda name: (not name.casefold().startswith(needle), name.casefold())
+            )
+
         self.vault_list.clear()
-
-        vault_font = QFont()
-        vault_font.setPointSize(15)
-
-        for vault_name in self.app.environments():
+        for vault_name in matching:
             vault_item = QListWidgetItem(QIcon(":/assets/custom/vault.png"), vault_name)
-            vault_item.setFont(vault_font)
+            vault_item.setFont(self._vault_font)
             self.vault_list.addItem(vault_item)
 
+        no_matches = bool(needle) and not matching
+        self.empty_state_label.setText(f"No vaults match '{query}'")
+        self.empty_state_label.setVisible(no_matches)
+        self.vault_list.setVisible(not no_matches)
+
+        # INFO marks the transition only: it never contains the query text, and
+        # typing does not log once per keystroke.
+        active = bool(needle)
+        if active != self._filter_active:
+            logger.info("Vault drawer filter %s", "enabled" if active else "cleared")
+            self._filter_active = active
 
     def show_create_vault_dialog(self):
         """Show the vault creation dialog."""
