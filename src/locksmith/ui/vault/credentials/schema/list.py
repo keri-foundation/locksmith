@@ -9,7 +9,6 @@ from typing import Dict, Any, TYPE_CHECKING
 
 from PySide6.QtWidgets import QVBoxLayout, QSizePolicy
 
-from locksmith.core.credentialing import registry_is_complete
 from locksmith.ui.toolkit.tables import PaginatedTableWidget
 from locksmith.ui.vault.shared.base_list_page import BaseListPage
 from locksmith.ui.vault.credentials.schema.add import AddSchemaDialog
@@ -62,7 +61,7 @@ class SchemaListPage(BaseListPage):
         self.icon_path = ":/assets/material-icons/schema.svg"
         self.table = PaginatedTableWidget(
             columns=["Schema Name", "Version", "Issuable", "Issuer", "Description", "Actions"],
-            column_widths={"Version": 80, "Issuable": 80, "Issuer": 150, "Description": 250, "Actions": 50},
+            column_widths={"Version": 80, "Issuable": 150, "Issuer": 150, "Description": 250, "Actions": 50},
             title="Credential Schemas",
             icon_path=self.icon_path,
             items_per_page=10,
@@ -99,26 +98,10 @@ class SchemaListPage(BaseListPage):
             for (said,), schemer in self.app.vault.hby.db.schema.getTopItemIter():
                 sed = schemer.sed
 
-                # Determine issuer name
-                issuer_name = "N/A"
-                registry = self.app.vault.rgy.registryByName(said)
-                issuable = "No"
-                if registry:
-                    issuable = (
-                        "Yes"
-                        if registry_is_complete(self.app.vault.rgy, registry)
-                        else "Pending"
-                    )
-                    try:
-                        # Get the issuer prefix from the registry
-                        issuer_pre = registry.hab.pre
-                        # Get the hab for this issuer
-                        hab = self.app.vault.hby.habs.get(issuer_pre)
-                        if hab:
-                            issuer_name = hab.name
-                    except Exception as e:
-                        logger.warning(f"Error getting issuer for schema {said}: {e}")
-                        issuer_name = "N/A"
+                issuer_pre = self.app.vault.db.issuers.get(keys=(said,))
+                hab = self.app.vault.hby.habByPre(issuer_pre) if issuer_pre else None
+                issuer_name = hab.name if hab is not None else "N/A"
+                issuable = "Ready for issuance" if hab is not None else "No"
 
                 schema_dict = {
                     "Schema Name": sed.get("title", ""),

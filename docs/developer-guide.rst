@@ -84,3 +84,15 @@ and optional witness hooks.
 
 See :doc:`plugin-authoring` for the complete host contract and a walkthrough of
 the bundled KERI Foundation reference implementation.
+
+Credential exchange lifecycle
+-----------------------------
+
+Use ``keri.acdc`` for V2 credentials and IPEX. V1 credentials and migration
+are out of scope.
+
+The vault owns the registry, wallet inventory, and parser. Submit exchanges
+through ``SendIpexDoer``. Call ``locksmith.core.ipexing.admit`` after consent.
+
+A successful send does not mean acceptance. Receiver registry retrieval is not
+connected yet; missing evidence prevents acceptance.

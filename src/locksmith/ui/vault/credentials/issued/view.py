@@ -12,7 +12,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QHBoxLayout
 )
-from keri.core import coring
+from locksmith.core import credentialing
 from keri.help import helping
 
 from locksmith.ui.toolkit.widgets import (
@@ -48,11 +48,10 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
 
         # Get the credential details from the app
         try:
-            saider = coring.Saider(qb64=self.credential_said)
-            self.credential = next(iter(self.app.vault.rgy.reger.cloneCreds([saider], self.app.hby.db)))
+            self.credential = credentialing.credential(self.app.vault, self.credential_said)
 
             # Get schema info
-            self.schema_title = self.credential.get("schema").get("title", "Unknown Schema")
+            self.schema_title = (self.credential.get("schema") or {}).get("title", "Unknown Schema")
 
         except Exception as e:
             logger.error(f"Error loading credential: {e}")
@@ -191,10 +190,10 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
         layout.addWidget(recipient_label)
 
         # Get recipient from credential attributes
-        recipient_pre = self.credential['sad']['i']
+        recipient_pre = self.credential['sad']['a'].get('i', '')
 
         # Try to find recipient name if it's a local identifier
-        recipient_display = recipient_pre
+        recipient_display = recipient_pre or "Not specified"
         try:
             for hab_pre, hab in self.app.vault.hby.habs.items():
                 if hab.pre == recipient_pre:
@@ -218,12 +217,12 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
 
         # Determine credential status
         status = self.credential.get("status", {})
-        if status['et'] == 'iss' or status['et'] == 'bis':
-            status_text = "Issued / Active"
-        elif status['et'] == 'rev' or status['et'] == 'brv':
-            status_text = "Issued / Revoked"
-        else:
-            status_text = "Not Issued"
+        status_text = {
+            'issued': 'Issued / Active',
+            'revoked': 'Issued / Revoked',
+            'pending': 'Pending verification',
+            'unknown': 'Unknown state',
+        }.get(status['et'], 'Unknown state')
 
         self.status_field = LocksmithLineEdit("Status")
         self.status_field.setText(status_text)
@@ -240,10 +239,10 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
 
         # Get issued date from credential attributes
         status = self.credential.get("status", {})
-        dt = helping.fromIso8601(status['dt'])
+        dt = helping.fromIso8601(status['dt']) if status.get('dt') else None
 
         self.date_field = LocksmithLineEdit("Issued Date")
-        self.date_field.setText(dt.strftime("%b %d, %Y %I:%M %p"))
+        self.date_field.setText(dt.strftime("%b %d, %Y %I:%M %p") if dt else "Unknown")
         self.date_field.setReadOnly(True)
         self.date_field.setCursorPosition(0)
         self.date_field.setMinimumWidth(420)

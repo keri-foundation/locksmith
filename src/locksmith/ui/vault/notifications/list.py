@@ -12,9 +12,8 @@ from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import QWidget, QVBoxLayout
 from keri import help
 from keri.app import organizing
-from keri.core import scheming
 from keri.peer import exchanging
-from keri.vc.protocoling import Ipex
+from locksmith.core import ipexing
 from locksmith.ui import colors
 from locksmith.ui.toolkit.tables import PaginatedTableWidget
 from locksmith.ui.vault.credentials.received.accept_grant import AcceptGrantDialog
@@ -337,58 +336,28 @@ class NotificationsListPage(QWidget):
             return self._format_generic_notification(note, rid, timestamp_display)
 
     def _format_ipex_message(self, exn, route: str, actual_message: str = "") -> tuple[str, str]:
-        """
-        Format IPEX message details based on message type.
-
-        Args:
-            exn: Exchange message object
-            route: Message route (e.g., '/ipex/grant')
-            actual_message: Optional actual message from the sender
-
-        Returns:
-            Tuple of (message_type, formatted_message)
-        """
-        match route:
-            case "/ipex/grant":
-                return self._format_grant(exn, actual_message)
-            case "/ipex/admit":
-                return self._format_admit(exn, actual_message)
-            case "/ipex/spurn":
-                return self._format_spurn(exn, actual_message)
-            case "/ipex/apply":
-                return self._format_apply(exn, actual_message)
-            case "/ipex/offer":
-                return self._format_offer(exn, actual_message)
-            case "/ipex/agree":
-                return self._format_agree(exn, actual_message)
-            case _:
-                return "IPEX", f"Unknown IPEX message type: {route}"
+        """Format native exchange results and expose grants for explicit acceptance."""
+        if exn.pvrsn.major != 2 or not exn.sad.get('x'):
+            return "Unsupported IPEX", "This exchange does not use ACDC V2 IPEX"
+        verb = route.rsplit('/', 1)[-1].upper()
+        message = "Protocol verified"
+        if route == '/ipex/grant':
+            credential = ipexing.grant_credential(self.app.vault, exn.said)
+            schema = credential.schema
+            title = (schema.get('title') if isinstance(schema, dict)
+                     else self._resolve_schema_title(schema))
+            message = f"Credential grant: {title or 'Unknown Schema'}"
+            responded, response = self._get_response_status(exn.said)
+            if responded:
+                message += f" | {response}"
+        if actual_message:
+            message += f" | {actual_message}"
+        return verb, message
 
     def _resolve_schema_title(self, schema_said: str) -> str | None:
-        """
-        Resolve schema SAID to get the schema title.
-
-        Args:
-            schema_said: SAID of the schema
-
-        Returns:
-            Schema title or None if not found
-        """
-        if not self.app or not self.app.vault:
-            return None
-
-        try:
-            # Access the verifier's resolver to get schema
-            verifier = getattr(self.app.vault, 'vry', None)
-            if verifier and hasattr(verifier, 'resolver'):
-                scraw = verifier.resolver.resolve(schema_said)
-                if scraw:
-                    schemer = scheming.Schemer(raw=scraw)
-                    return schemer.sed.get('title', schema_said)
-        except Exception as e:
-            logger.warning(f"Failed to resolve schema {schema_said}: {e}")
-
-        return None
+        """Read the schema title from the vault's shared schema cache."""
+        schemer = self.app.vault.hby.db.schema.get(keys=(schema_said,))
+        return schemer.sed.get('title') if schemer is not None else None
 
     def _get_response_status(self, exn_said: str) -> tuple[bool, str | None]:
         """
@@ -416,152 +385,6 @@ class NotificationsListPage(QWidget):
 
         return False, None
 
-    def _format_grant(self, exn, actual_message: str = "") -> tuple[str, str]:
-        """Format a GRANT message."""
-        try:
-            sad = exn.ked.get('e', {}).get('acdc', {})
-            iss = exn.ked.get('e', {}).get('iss', {})
-
-            issuer = sad.get('i', 'Unknown')
-            issued_on = iss.get('dt', 'Unknown')
-            schema = sad.get('s', '')
-
-            schema_title = self._resolve_schema_title(schema) or 'Unknown Credential'
-            has_response, response_type = self._get_response_status(exn.said)
-
-            response_str = f" [Responded: {response_type}]" if has_response else " [Pending Response]"
-
-            # Build the base credential info
-            cred_info = (
-                f"Credential Offered: {schema_title} | "
-                f"From: {issuer[:16]}... | "
-                f"Issued: {issued_on[:10]}{response_str}"
-            )
-
-            # Append the actual message if present
-            if actual_message and actual_message.strip():
-                message = f"{cred_info} | Message: {actual_message}"
-            else:
-                message = cred_info
-
-            return "GRANT", message
-
-        except Exception as e:
-            logger.warning(f"Error formatting grant message: {e}")
-            return "GRANT", f"Credential grant (SAID: {exn.said[:16]}...)"
-
-    def _format_admit(self, exn, actual_message: str = "") -> tuple[str, str]:
-        """Format an ADMIT message."""
-        try:
-            hby = self.app.vault.hby
-            dig = exn.ked.get('p', '')
-
-            if dig:
-                admitted, _ = exchanging.cloneMessage(hby, said=dig)
-                if admitted:
-                    sad = admitted.ked.get('e', {}).get('acdc', {})
-                    cred_said = sad.get('d', 'Unknown')
-                    schema = sad.get('s', '')
-                    schema_title = self._resolve_schema_title(schema) or 'Unknown Credential'
-
-                    base_message = f"Credential Accepted: {schema_title} | Credential: {cred_said[:16]}..."
-
-                    # Append the actual message if present
-                    if actual_message and actual_message.strip():
-                        message = f"{base_message} | Message: {actual_message}"
-                    else:
-                        message = base_message
-
-                    return "ADMIT", message
-
-            return "ADMIT", f"Credential admission (SAID: {exn.said[:16]}...)"
-
-        except Exception as e:
-            logger.warning(f"Error formatting admit message: {e}")
-            return "ADMIT", f"Credential admission (SAID: {exn.said[:16]}...)"
-
-    def _format_spurn(self, exn, actual_message: str = "") -> tuple[str, str]:
-        """Format a SPURN message."""
-        try:
-            hby = self.app.vault.hby
-            dig = exn.ked.get('p', '')
-
-            if dig:
-                spurned, _ = exchanging.cloneMessage(hby, said=dig)
-                if spurned:
-                    sroute = spurned.ked.get('r', '')
-                    sverb = os.path.basename(os.path.normpath(sroute))
-
-                    if sverb in (Ipex.grant, Ipex.offer):
-                        sad = spurned.ked.get('e', {}).get('acdc', {})
-                        schema = sad.get('s', '')
-                        schema_title = self._resolve_schema_title(schema) or 'Unknown Credential'
-
-                        base_message = f"Rejected {sverb.capitalize()}: {schema_title}"
-                    else:
-                        base_message = f"Rejected {sverb.capitalize()} (SAID: {spurned.said[:16]}...)"
-
-                    # Append the actual message if present
-                    if actual_message and actual_message.strip():
-                        message = f"{base_message} | Message: {actual_message}"
-                    else:
-                        message = base_message
-
-                    return "SPURN", message
-
-            return "SPURN", f"Message rejection (SAID: {exn.said[:16]}...)"
-
-        except Exception as e:
-            logger.warning(f"Error formatting spurn message: {e}")
-            return "SPURN", f"Message rejection (SAID: {exn.said[:16]}...)"
-
-    def _format_apply(self, exn, actual_message: str = "") -> tuple[str, str]:
-        """Format an APPLY message."""
-        sender = exn.ked.get('i', 'Unknown')
-        base_message = f"Credential application from {sender[:16]}..."
-
-        # Append the actual message if present
-        if actual_message and actual_message.strip():
-            message = f"{base_message} | Message: {actual_message}"
-        else:
-            message = base_message
-
-        return "APPLY", message
-
-    def _format_offer(self, exn, actual_message: str = "") -> tuple[str, str]:
-        """Format an OFFER message."""
-        try:
-            sad = exn.ked.get('e', {}).get('acdc', {})
-            schema = sad.get('s', '')
-            schema_title = self._resolve_schema_title(schema) or 'Unknown Credential'
-            sender = exn.ked.get('i', 'Unknown')
-
-            base_message = f"Credential Offer: {schema_title} | From: {sender[:16]}..."
-
-            # Append the actual message if present
-            if actual_message and actual_message.strip():
-                message = f"{base_message} | Message: {actual_message}"
-            else:
-                message = base_message
-
-            return "OFFER", message
-
-        except Exception as e:
-            logger.warning(f"Error formatting offer message: {e}")
-            return "OFFER", f"Credential offer (SAID: {exn.said[:16]}...)"
-
-    def _format_agree(self, exn, actual_message: str = "") -> tuple[str, str]:
-        """Format an AGREE message."""
-        sender = exn.ked.get('i', 'Unknown')
-        base_message = f"Agreement from {sender[:16]}..."
-
-        # Append the actual message if present
-        if actual_message and actual_message.strip():
-            message = f"{base_message} | Message: {actual_message}"
-        else:
-            message = base_message
-
-        return "AGREE", message
 
     def _format_multisig_notification(self, note, rid: str, timestamp_display: str) -> dict[str, Any] | None:
         """

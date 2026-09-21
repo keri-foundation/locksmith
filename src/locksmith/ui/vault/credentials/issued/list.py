@@ -11,6 +11,7 @@ from keri import help
 from keri.app import organizing
 from keri.help import helping
 
+from locksmith.core import credentialing
 from locksmith.ui.toolkit.tables import PaginatedTableWidget
 from locksmith.ui.vault.shared.base_list_page import BaseListPage
 from locksmith.ui.vault.credentials.issued.delete import DeleteIssuedCredentialDialog
@@ -104,38 +105,35 @@ class IssuedCredentialsListPage(BaseListPage):
             org = organizing.Organizer(hby=self.app.vault.hby)
 
             issued_credentials_data = []
-            saids = list()
-            for pre in self.app.vault.hby.habs.keys():
-                saids.extend([saider for saider in self.app.vault.rgy.reger.issus.get(keys=(pre,))])
-            creds = self.app.vault.rgy.reger.cloneCreds(saids, self.app.hby.db)
+            creds = credentialing.credentials(self.app.vault, received=False)
 
             for credential in creds:
                 sad = credential['sad']
-                attribs = sad['a']
-                schemer = credential.get("schema")
+                schemer = credential.get("schema") or {}
                 status = credential.get("status", {})
-                if status['et'] == 'iss' or status['et'] == 'bis':
-                    status_text = "Issued / Active"
-                elif status['et'] == 'rev' or status['et'] == 'brv':
-                    status_text = "Issued / Revoked"
-                else:
-                    status_text = "Not Issued"
+                status_text = {
+                    'issued': 'Issued / Active',
+                    'revoked': 'Issued / Revoked',
+                    'pending': 'Pending verification',
+                    'unknown': 'Unknown state',
+                }.get(status['et'], 'Unknown state')
 
-                recp = attribs.get('i')
-                recipient_name = f'Unknown ({recp})'
-                if (recipient_hab := self.app.vault.hby.habByPre(attribs['i'])) is not None:
+                recp = credential['recipient']
+                recipient_name = f'Unknown ({recp})' if recp else 'Not specified'
+                recipient_hab = self.app.vault.hby.habByPre(recp) if recp else None
+                if recipient_hab is not None:
                     recipient_name = f'{recipient_hab.name} ({recp})'
-                elif (remote_id := org.get(recp)) is not None:
+                elif recp and (remote_id := org.get(recp)) is not None:
                     recipient_name = f'{remote_id['alias']} ({recp})'
 
-                dt = helping.fromIso8601(status['dt'])
+                dt = helping.fromIso8601(status['dt']) if status.get('dt') else None
 
                 cred_dict = {
                     "Schema": schemer.get("title", ""),
                     "Recipient": recipient_name,
                     "Issuer": sad['i'],
                     "Status": status_text,
-                    "Issued Date": dt.strftime("%b %d, %Y %I:%M %p"),
+                    "Issued Date": dt.strftime("%b %d, %Y %I:%M %p") if dt else "Unknown",
                     "SAID": sad['d']  # Store SAID for view operation
                 }
                 issued_credentials_data.append(cred_dict)

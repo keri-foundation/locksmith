@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QVBoxLayout, QSizePolicy
 from keri import help
 from keri.help import helping
 
+from locksmith.core import credentialing
 from locksmith.ui.toolkit.tables import PaginatedTableWidget
 from locksmith.ui.vault.shared.base_list_page import BaseListPage
 from locksmith.ui.vault.credentials.received.accept import AcceptCredentialDialog
@@ -96,34 +97,34 @@ class ReceivedCredentialsListPage(BaseListPage):
         """
         try:
             received_credentials_data = []
-            saids = list()
-            for pre in self.app.vault.hby.habs.keys():
-                saids.extend([saider for saider in self.app.vault.rgy.reger.subjs.get(keys=(pre,))])
-            creds = self.app.vault.rgy.reger.cloneCreds(saids, self.app.hby.db)
+            creds = credentialing.credentials(self.app.vault, received=True)
 
             for credential in creds:
                 sad = credential['sad']
-                attribs = sad['a']
-                schemer = credential.get("schema")
+                schemer = credential.get("schema") or {}
                 status = credential.get("status", {})
 
-                recipient_hab = self.app.vault.hby.habByPre(attribs['i'])
+                recp = credential['recipient']
+                recipient_hab = self.app.vault.hby.habByPre(recp) if recp else None
+                recipient_name = f'Unknown ({recp})' if recp else 'Not specified'
+                if recipient_hab is not None:
+                    recipient_name = f'{recipient_hab.name} ({recp})'
 
                 # Determine status text based on event type
-                if status['et'] == 'iss' or status['et'] == 'bis':
-                    status_text = "Received / Active"
-                elif status['et'] == 'rev' or status['et'] == 'brv':
-                    status_text = "Received / Revoked"
-                else:
-                    status_text = "Not Received"
+                status_text = {
+                    'issued': 'Received / Active',
+                    'revoked': 'Received / Revoked',
+                    'pending': 'Pending verification',
+                    'unknown': 'Unknown state',
+                }.get(status['et'], 'Unknown state')
 
-                dt = helping.fromIso8601(status['dt'])
+                dt = helping.fromIso8601(status['dt']) if status.get('dt') else None
 
                 cred_dict = {
                     "Schema": schemer.get("title", ""),
-                    "Recipient": f"{recipient_hab.name} ({recipient_hab.pre})" if recipient_hab else "Unknown",  # Issuer is the 'i' field
+                    "Recipient": recipient_name,
                     "Status": status_text,
-                    "Received Date": dt.strftime("%b %d, %Y %I:%M %p"),
+                    "Received Date": dt.strftime("%b %d, %Y %I:%M %p") if dt else "Unknown",
                     "SAID": sad['d']  # Store SAID for view operation
                 }
                 received_credentials_data.append(cred_dict)
@@ -210,8 +211,5 @@ class ReceivedCredentialsListPage(BaseListPage):
             logger.info(f"Received credential deleted: {data.get('schema')}, refreshing list")
             self._load_received_credentials_data()
 
-        # Refresh list when a grant is admitted (credential accepted)
-        elif doer_name == "AdmitDoer" and event_type == "admit_complete":
-            if data.get('success'):
-                logger.info(f"Grant admitted successfully, refreshing list")
-                self._load_received_credentials_data()
+        elif doer_name == "Ipex" and event_type in ("accepted", "transport_submitted", "send_failed"):
+            self._load_received_credentials_data()

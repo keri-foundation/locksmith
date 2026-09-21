@@ -330,108 +330,50 @@ class GrantCredentialDialog(LocksmithDialog):
         return True
 
     def _on_grant(self):
-        """Handle Grant/Save button click."""
-        # Clear previous errors
+        """Create a grant after the user selects its recipient and delivery mode."""
         self.clear_error()
-
-        # Validate fields
         if not self._validate_fields():
             return
-
-        # Disable button during processing
         self.action_button.setEnabled(False)
         self.action_button.setText("Processing...")
+        try:
+            hab = self.app.vault.hby.habByPre(self.credential_issuer)
+            if hab is None:
+                raise ValueError("The credential issuer is not a local identifier")
+            serder, attachment = ipexing.grant(
+                self.app.vault, hab, self.credential_said,
+                self.recipient_dropdown.currentData(), self.message_field.text(),
+            )
+            if self.send_radio.isChecked():
+                self._send_grant(hab, serder, attachment)
+            else:
+                stream = ipexing.prepare(self.app.vault, hab, serder, attachment)
+                self._save_grant(stream)
+        except Exception as error:
+            logger.exception("Failed to create credential grant")
+            self.show_error(f"Failed to create grant: {error}")
+            self._reset_button()
 
-        # Route to appropriate handler
-        if self.send_radio.isChecked():
-            self._send_grant()
-        else:
-            # For save mode, still create the grant message
-            try:
-                hab = self.app.hby.habs.get(self.credential_issuer)
-                if not hab:
-                    self.show_error(f"Issuer identifier not found: {self.credential_issuer}")
-                    self._reset_button()
-                    return
-
-                # Use vault's existing exchanger instead of creating new resources
-                granter = ipexing.Granter(
-                    self.app.hby,
-                    hab,
-                    self.app.rgy,
-                    exc=self.app.vault.exc
-                )
-                grant = granter.grant(
-                    self.credential_said,
-                    recp=self.recipient_dropdown.currentData(),
-                    message=self.message_field.text()
-                )
-                self._save_grant(grant)
-            except Exception as e:
-                logger.exception(f"Failed to create grant message: {e}")
-                self.show_error(f"Failed to create grant message: {str(e)}")
-                self._reset_button()
-
-    def _send_grant(self):
-        """Send credential to selected recipient via IPEX."""
-        recipient_pre = self.recipient_dropdown.currentData()
-
-        logger.info(f"Sending credential {self.credential_said} to recipient {recipient_pre}")
-
-        # Connect to signal bridge for doer events
-        if hasattr(self.app.vault, 'signals'):
-            self.app.vault.signals.doer_event.connect(self._on_doer_event)
-
-        # Create and run SendGrantDoer
-        doer = ipexing.SendGrantDoer(
-            app=self.app,
-            hab_pre=self.credential_issuer,
-            credential_said=self.credential_said,
-            recipient_pre=recipient_pre,
-            message=self.message_field.text(),
-            signal_bridge=self.app.vault.signals if hasattr(self.app.vault, 'signals') else None
-        )
-
-        # Add doer to vault's event loop
+    def _send_grant(self, hab, serder, attachment):
+        """Submit the signed grant through the vault's transport."""
+        self._pending_said = serder.said
+        doer = ipexing.SendIpexDoer(self.app.vault, hab, serder, attachment)
+        self.app.vault.signals.doer_event.connect(self._on_doer_event)
         self.app.vault.extend([doer])
-
-        # Update button to show sending state
         self.action_button.setText("Sending...")
 
     def _on_doer_event(self, doer_name: str, event_type: str, data: dict):
-        """Handle doer events from SendGrantDoer."""
-        # Only handle events from SendGrantDoer for our credential
-        if doer_name != "SendGrantDoer":
+        """Show the transport result for this grant."""
+        if doer_name != "Ipex" or data.get('said') != self._pending_said:
             return
-
-        if data.get('credential_said') != self.credential_said:
+        if event_type not in ("transport_submitted", "send_failed"):
             return
-
-        # Disconnect signal
-        if hasattr(self.app.vault, 'signals'):
-            try:
-                self.app.vault.signals.doer_event.disconnect(self._on_doer_event)
-            except Exception:
-                pass
-
-        if event_type == "send_complete" and data.get('success'):
-            logger.info(f"Credential sent successfully: {self.credential_said}")
-            recipient = data.get('recipient', 'recipient')
-
-            note = data.get('note', '')
-            success_msg = f"Credential sent to {recipient[:15]}..."
-            if note:
-                success_msg += f"\n{note}"
-
-            self.show_success(success_msg)
-
-            # Close dialog after short delay
+        self.app.vault.signals.doer_event.disconnect(self._on_doer_event)
+        if event_type == "transport_submitted":
+            self.show_success("Grant submitted for delivery")
             QTimer.singleShot(2000, self.accept)
-
-        elif event_type == "send_failed":
-            error = data.get('error', 'Unknown error')
-            logger.error(f"Failed to send credential: {error}")
-            self.show_error(f"Failed to send: {error}")
+        else:
+            self.show_error(f"Failed to send: {data.get('error', 'Unknown error')}")
             self._reset_button()
 
     def _save_grant(self, grant: bytes):

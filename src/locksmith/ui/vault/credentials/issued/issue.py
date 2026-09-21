@@ -10,7 +10,8 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QButton
 from keri import help
 from keri.core import coring
 
-from locksmith.core.credentialing import IssueCredentialDoer, registry_is_complete
+from locksmith.core import credentialing
+from locksmith.core.credentialing import IssueCredentialDoer
 from locksmith.core.habbing import list_eligible_local_identifiers
 from locksmith.ui.toolkit.widgets import (
     LocksmithDialog,
@@ -275,9 +276,8 @@ class IssueCredentialDialog(LocksmithDialog):
         try:
             # Get all schemas from the database
             for (said,), schemer in self.app.vault.hby.db.schema.getTopItemIter():
-                logger.info(f"Found schema {said} checking with {self.app.vault.rgy.regs}")
-                registry = self.app.vault.rgy.registryByName(said)
-                if not registry_is_complete(self.app.vault.rgy, registry):
+                issuer_pre = self.app.vault.db.issuers.get(keys=(said,))
+                if not issuer_pre or self.app.vault.hby.habByPre(issuer_pre) is None:
                     continue
 
                 sed = schemer.sed
@@ -351,24 +351,12 @@ class IssueCredentialDialog(LocksmithDialog):
             schema = schemer.sed
             props = schema.get('properties', {})
 
-            # Navigate to a.oneOf array
-            if 'a' not in props or 'oneOf' not in props['a']:
-                logger.error("Schema missing 'a.oneOf' structure")
-                self.show_error("Schema has invalid structure (missing attributes definition)")
-                return []
-
-            one_of = props['a']['oneOf']
-
-            # Find the object type (should be second element, index 1)
-            attributes_obj = None
-            for item in one_of:
-                if isinstance(item, dict) and item.get('type') == 'object':
-                    attributes_obj = item
-                    break
-
-            if not attributes_obj:
-                logger.error("No object type found in oneOf array")
-                self.show_error("Schema has invalid structure (no attribute properties found)")
+            attribute_definition = props.get('a', {})
+            candidates = attribute_definition.get('oneOf', [attribute_definition])
+            attributes_obj = next((item for item in candidates
+                                   if isinstance(item, dict) and item.get('type') == 'object'), None)
+            if attributes_obj is None:
+                self.show_error("Schema has no attribute properties for this form")
                 return []
 
             # Get properties and required list
@@ -573,50 +561,18 @@ class IssueCredentialDialog(LocksmithDialog):
         return None
 
     def _get_credentials_for_schema(self, schema_said: str) -> list[dict]:
-        """
-        Get all credentials (issued and received) for a specific schema.
-
-        Args:
-            schema_said: SAID of the schema to filter by
-
-        Returns:
-            List of credential info dictionaries with 'said' and 'display_name'
-        """
-        try:
-            reger = self.app.vault.rgy.reger
-            credentials = []
-
-            # Query credentials by schema SAID
-            for (_,), saider in reger.schms.getTopItemIter(keys=(schema_said,)):
-                credential = reger.creds.get(keys=(saider.qb64,))
-
-                if not credential:
-                    continue
-
-                # Get schema info for display
-                schema_name = "Unknown Schema"
-                try:
-                    schemer = self.app.vault.hby.db.schema.get(keys=(credential.schema,))
-                    if schemer:
-                        schema_name = schemer.sed.get('title', 'Unknown Schema')
-                except:
-                    pass
-
-                cred_said = credential.said
-                display_name = f"{schema_name} ({cred_said[:15]}...)"
-
-                credentials.append({
-                    'said': cred_said,
-                    'display_name': display_name
-                })
-
-            logger.debug(f"Found {len(credentials)} credentials for schema {schema_said}")
-            return credentials
-
-        except Exception as e:
-            logger.exception(f"Error querying credentials for schema: {e}")
-            self.show_error(f"Failed to load chained credentials: {str(e)}")
-            return []
+        """Return active wallet credentials that use the requested schema."""
+        result = []
+        for item in credentialing.credentials(self.app.vault):
+            schema = item['sad']['s']
+            said = schema.get('$id') if isinstance(schema, dict) else schema
+            if said != schema_said or item['status']['et'] != 'issued':
+                continue
+            credential_said = item['sad']['d']
+            title = (item.get('schema') or {}).get('title', 'Unknown Schema')
+            result.append({'said': credential_said,
+                           'display_name': f"{title} ({credential_said[:15]}...)"})
+        return result
 
     def _create_edge_dropdown(self, edge_req: dict) -> FloatingLabelComboBox:
         """
@@ -1020,13 +976,12 @@ class IssueCredentialDialog(LocksmithDialog):
         schema_index = self.schema_dropdown.currentIndex()
         schema_said = self.schema_dropdown.itemData(schema_index)
 
-        registryName = schema_said
-        registry = self.app.vault.rgy.registryByName(registryName)
-        if not registry:
-            self.show_error(f"Registry not found for schema {schema_said}")
+        issuer_pre = self.app.vault.db.issuers.get(keys=(schema_said,))
+        hab = self.app.vault.hby.habByPre(issuer_pre) if issuer_pre else None
+        if hab is None:
+            self.show_error("Select a local issuer for this schema first")
             return
 
-        hab = registry.hab
         if hab.kever.wits:
             self._show_auth_step(hab)
             return
@@ -1158,7 +1113,7 @@ class IssueCredentialDialog(LocksmithDialog):
         edges = self._extract_edge_credentials()
 
         # Parse rules from schema
-        rules = self._parse_rules_from_schema(schema_said)
+        rules = self._parse_rules_from_schema(schema_said) or None
 
         logger.info(f"Issuing credential with schema {schema_said} to recipient {recipient_pre}")
         logger.info(f"Credential attributes: {attributes}")

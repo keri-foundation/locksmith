@@ -92,43 +92,26 @@ class AcceptGrantDialog(LocksmithDialog):
 
 
     def _load_grant_message(self):
-        """Load grant message using exchanging.cloneMessage()"""
-        from keri.peer import exchanging
-
-        logger.info(f"Loading grant message: {self.grant_said}")
-
-        exn, pathed = exchanging.cloneMessage(self.app.hby, self.grant_said)
-
-        if exn is None:
-            raise ValueError(f"Grant message not found: {self.grant_said}")
-
-        # Validate it's a grant message
-        if exn.ked.get('r') != '/ipex/grant':
-            raise ValueError(f"Not a grant message, route: {exn.ked.get('r')}")
-
-        logger.debug(f"Grant message loaded successfully: {exn.ked}")
-
-        # Extract grant metadata
-        self.sender = exn.ked['i']
-        self.recipient = exn.ked['a'].get('i', '')
-        self.message = exn.ked['a'].get('m', '')  # Optional message
-        self.timestamp = exn.ked.get('dt', '')
-
-        # Extract credential from embeds
-        embeds = exn.ked.get('e', {})
-        if 'acdc' not in embeds:
-            raise ValueError("No ACDC credential found in grant message")
-
-        self.acdc_ked = embeds['acdc']
-        self.credential_said = self.acdc_ked.get('d', '')
-        self.issuer = self.acdc_ked.get('i', '')
-        self.schema_said = self.acdc_ked.get('s', '')
-        self.credential_attrs = self.acdc_ked.get('a', {})
-
-        # Store pathed for full credential data
-        self.pathed = pathed
-
-        logger.info(f"Extracted credential SAID: {self.credential_said}, Schema: {self.schema_said}")
+        """Load a verified native grant and its disclosed credential."""
+        exn = self.app.vault.hby.db.exns.get(keys=(self.grant_said,))
+        if exn is None or exn.pvrsn.major != 2 or exn.route != '/ipex/grant':
+            raise ValueError("A verified ACDC V2 grant is required")
+        credential = ipexing.grant_credential(self.app.vault, self.grant_said)
+        self.sender = exn.sad['i']
+        self.recipient = exn.sad['ri']
+        self.message = exn.sad['a'].get('m', '')
+        self.timestamp = exn.sad.get('dt', '')
+        self.acdc_ked = credential.sad
+        self.credential_said = credential.said
+        self.issuer = credential.sad['i']
+        schema = credential.schema
+        self.schema_said = schema['$id'] if isinstance(schema, dict) else schema
+        if isinstance(schema, dict):
+            self.schema = schema
+        else:
+            schemer = self.app.vault.hby.db.schema.get(keys=(schema,))
+            self.schema = schemer.sed if schemer is not None else {}
+        self.credential_attrs = credential.sad.get('a', {})
 
     def _build_error_ui(self):
         """Build error UI when grant loading fails"""
@@ -220,12 +203,12 @@ class AcceptGrantDialog(LocksmithDialog):
         separator = QFrame()
         separator.setFrameShape(QFrame.Shape.HLine)
         separator.setFrameShadow(QFrame.Shadow.Sunken)
-        separator.setStyleSheet(f"""
-            QFrame {{
+        separator.setStyleSheet("""
+            QFrame {
                 color: #D0D0D0;
                 background-color: #D0D0D0;
                 max-height: 1px;
-            }}
+            }
         """)
         layout.addWidget(separator)
 
@@ -333,10 +316,12 @@ class AcceptGrantDialog(LocksmithDialog):
         layout.addWidget(fields_label)
 
         # Parse schema to get field definitions
-        field_defs = self._parse_schema_fields(self.schema_said)
+        field_defs = self._parse_schema_fields()
 
         if not field_defs:
-            no_fields_label = QLabel("No credential attributes to display")
+            message = ("Load this credential's schema before accepting it"
+                       if not self.schema else "No credential attributes to display")
+            no_fields_label = QLabel(message)
             no_fields_label.setStyleSheet(f"color: {colors.TEXT_SECONDARY}; font-size: 13px; font-style: italic;")
             layout.addWidget(no_fields_label)
             return
@@ -385,46 +370,28 @@ class AcceptGrantDialog(LocksmithDialog):
         """)
         layout.addWidget(self.response_message_field)
 
-    def _parse_schema_fields(self, schema_said: str) -> list[dict]:
+    def _parse_schema_fields(self) -> list[dict]:
         """
-        Parse schema to get field definitions.
-        Reused from IssueCredentialDialog.
+        Parse the loaded schema to get attribute field definitions.
 
-        Args:
-            schema_said: SAID of the schema to parse
+        Supports a direct object definition or an object within a.oneOf.
+        Excludes the credential metadata fields d, i, dt, and u.
 
         Returns:
-            List of field definition dictionaries
+            List of field definition dictionaries, or an empty list if the
+            schema is unavailable or its attribute definition cannot be parsed.
         """
         try:
-            # Get schema from database using SAID
-            schemer = self.app.hby.db.schema.get(keys=(schema_said,))
-            if not schemer:
-                logger.error(f"Schema {schema_said} not found")
-                self.show_error(f"Schema not found: {schema_said[:20]}...")
+            schema = self.schema
+            if not schema:
                 return []
-
-            schema = schemer.sed
             props = schema.get('properties', {})
 
-            # Navigate to a.oneOf array
-            if 'a' not in props or 'oneOf' not in props['a']:
-                logger.error("Schema missing 'a.oneOf' structure")
-                self.show_error("Schema has invalid structure (missing attributes definition)")
-                return []
-
-            one_of = props['a']['oneOf']
-
-            # Find the object type (should be second element, index 1)
-            attributes_obj = None
-            for item in one_of:
-                if isinstance(item, dict) and item.get('type') == 'object':
-                    attributes_obj = item
-                    break
-
-            if not attributes_obj:
-                logger.error("No object type found in oneOf array")
-                self.show_error("Schema has invalid structure (no attribute properties found)")
+            attribute_definition = props.get('a', {})
+            candidates = attribute_definition.get('oneOf', [attribute_definition])
+            attributes_obj = next((item for item in candidates
+                                   if isinstance(item, dict) and item.get('type') == 'object'), None)
+            if attributes_obj is None:
                 return []
 
             # Get properties and required list
@@ -448,12 +415,11 @@ class AcceptGrantDialog(LocksmithDialog):
                 }
                 field_defs.append(field_def)
 
-            logger.info(f"Parsed {len(field_defs)} fields from schema {schema_said}")
+            logger.info(f"Parsed {len(field_defs)} fields from schema {self.schema_said}")
             return field_defs
 
         except Exception as e:
             logger.exception(f"Error parsing schema fields: {e}")
-            self.show_error(f"Failed to parse schema fields: {str(e)}")
             return []
 
     @staticmethod
@@ -573,7 +539,7 @@ class AcceptGrantDialog(LocksmithDialog):
             hab = self.app.hby.habByPre(pre)
             if hab:
                 return f"{hab.name} ({pre})"
-        except:
+        except Exception:
             pass
 
         # Try to find in remote identifiers (contacts)
@@ -584,33 +550,19 @@ class AcceptGrantDialog(LocksmithDialog):
                 if remote_id.get('id') == pre:
                     alias = remote_id.get('alias', 'Unknown')
                     return f"{alias} ({pre})"
-        except:
+        except Exception:
             pass
 
         # Default: just show prefix
         return pre
 
     def _get_schema_display(self) -> str:
-        """
-        Get schema display string with title and version.
-
-        Returns:
-            Schema display string
-        """
-        try:
-            schemer = self.app.hby.db.schema.get(keys=(self.schema_said,))
-            if schemer:
-                sed = schemer.sed
-                title = sed.get('title', 'Untitled')
-                version = sed.get('version', '')
-                if version:
-                    return f"{title} v{version}"
-                return title
-        except Exception as e:
-            logger.warning(f"Failed to get schema display: {e}")
-
-        # Fallback to SAID
-        return f"{self.schema_said[:15]}..." if len(self.schema_said) > 15 else self.schema_said
+        """Show a disclosed or cached schema title."""
+        if self.schema:
+            title = self.schema.get('title', 'Untitled')
+            version = self.schema.get('version', '')
+            return f"{title} v{version}" if version else title
+        return self.schema_said
 
     def _on_admit(self):
         """Handle Admit button click"""
@@ -627,137 +579,50 @@ class AcceptGrantDialog(LocksmithDialog):
             # Save-only mode: create admit synchronously
             self._save_admit_sync(message)
         else:
-            # Send mode: use AdmitDoer for async processing
+            # Send the acknowledgment after acceptance
             self._send_admit_async(message)
 
     def _save_admit_sync(self, message: str):
-        """
-        Create and save admit message synchronously (for offline use).
-
-        Args:
-            message: Optional message to include in admit
-        """
+        """Accept the credential and save its signed acknowledgment."""
         try:
-            # Connect to signal bridge for doer events
-            if hasattr(self.app.vault, 'signals'):
-                self.app.vault.signals.doer_event.connect(self._on_doer_event)
-
-            # Create AdmitDoer in save-only mode
-            doer = ipexing.AdmitDoer(
-                app=self.app,
-                hab_pre=self.recipient,
-                grant_said=self.grant_said,
-                message=message,
-                save_only=True,  # Save-only mode
-                signal_bridge=self.app.vault.signals if hasattr(self.app.vault, 'signals') else None
-            )
-
-            # Add doer to vault's event loop
-            self.app.vault.extend([doer])
-
-            # Update button to show processing state
-            self.admit_button.setText("Creating admit message...")
-
-        except Exception as e:
-            logger.exception(f"Failed to create AdmitDoer: {e}")
-            self.show_error(f"Failed to process admit: {str(e)}")
+            hab = self.app.vault.hby.habByPre(self.recipient)
+            serder, attachment = ipexing.admit(self.app.vault, hab, self.grant_said, message)
+            stream = ipexing.prepare(self.app.vault, hab, serder, attachment)
+            self.app.vault.signals.emit_doer_event("Ipex", "accepted", {'said': serder.said})
+            self._save_admit_to_file(serder.said, stream)
+        except Exception as error:
+            logger.exception("Failed to accept credential")
+            self.show_error(f"Failed to accept credential: {error}")
             self._reset_button()
 
     def _send_admit_async(self, message: str):
-        """
-        Send admit message asynchronously.
-
-        Args:
-            message: Optional message to include in admit
-        """
+        """Accept the credential and submit its acknowledgment for delivery."""
         try:
-            # Connect to signal bridge for doer events
-            if hasattr(self.app.vault, 'signals'):
-                self.app.vault.signals.doer_event.connect(self._on_doer_event)
-
-            # Create AdmitDoer in send mode
-            doer = ipexing.AdmitDoer(
-                app=self.app,
-                hab_pre=self.recipient,
-                grant_said=self.grant_said,
-                message=message,
-                save_only=False,  # Send mode
-                signal_bridge=self.app.vault.signals if hasattr(self.app.vault, 'signals') else None
-            )
-
-            # Add doer to vault's event loop
+            hab = self.app.vault.hby.habByPre(self.recipient)
+            serder, attachment = ipexing.admit(self.app.vault, hab, self.grant_said, message)
+            self._pending_said = serder.said
+            doer = ipexing.SendIpexDoer(self.app.vault, hab, serder, attachment)
+            self.app.vault.signals.emit_doer_event("Ipex", "accepted", {'said': serder.said})
+            self.app.vault.signals.doer_event.connect(self._on_doer_event)
             self.app.vault.extend([doer])
-
-            # Update button to show sending state
-            self.admit_button.setText("Sending admit...")
-
-        except Exception as e:
-            logger.exception(f"Failed to create AdmitDoer: {e}")
-            self.show_error(f"Failed to send admit: {str(e)}")
+            self.admit_button.setText("Sending acknowledgment...")
+        except Exception as error:
+            logger.exception("Failed to submit credential acknowledgment")
+            self.show_error(f"Failed to submit acknowledgment: {error}")
             self._reset_button()
 
     def _on_doer_event(self, doer_name: str, event_type: str, data: dict):
-        """
-        Handle doer events from AdmitDoer.
-
-        Args:
-            doer_name: Name of the doer that emitted the event
-            event_type: Type of event (progress, admit_complete, admit_failed)
-            data: Event data dictionary
-        """
-        # Only handle events from AdmitDoer for our grant
-        if doer_name != "AdmitDoer":
+        """Show the transport result without inferring the grantor's receipt."""
+        if doer_name != "Ipex" or data.get('said') != self._pending_said:
             return
-
-        if data.get('grant_said') != self.grant_said:
+        if event_type not in ("transport_submitted", "send_failed"):
             return
-
-        if event_type == "progress":
-            # Show progress messages
-            message = data.get('message', '')
-            if message:
-                self.show_success(message)
-                self.admit_button.setText(message[:30] + "..." if len(message) > 30 else message)
-
-        elif event_type == "admit_complete" and data.get('success'):
-            logger.info(f"Admit completed successfully: {self.grant_said}")
-
-            # Disconnect signal
-            if hasattr(self.app.vault, 'signals'):
-                try:
-                    self.app.vault.signals.doer_event.disconnect(self._on_doer_event)
-                except Exception:
-                    pass
-
-            if data.get('save_only'):
-                # Save-only mode: save the admit message to file
-                admit_said = data.get('admit_said', '')
-                admit_message = data.get('admit_message', b'')
-                self._save_admit_to_file(admit_said, admit_message)
-            else:
-                # Send mode: show success and close
-                grantor = data.get('grantor', 'grantor')
-                note = data.get('note', '')
-
-                if note:
-                    self.show_success(f"Admit coordinated: {note}")
-                else:
-                    self.show_success(f"Credential admitted and sent to {grantor[:16]}...")
-
-                # Close dialog after short delay
-                QTimer.singleShot(2000, self.accept)
-
-        elif event_type == "admit_failed":
-            logger.error(f"Admit failed: {data.get('error')}")
-
-            # Disconnect signal
-            if hasattr(self.app.vault, 'signals'):
-                try:
-                    self.app.vault.signals.doer_event.disconnect(self._on_doer_event)
-                except Exception:
-                    pass
-
-            self.show_error(f"Admit failed: {data.get('error', 'Unknown error')}")
+        self.app.vault.signals.doer_event.disconnect(self._on_doer_event)
+        if event_type == "transport_submitted":
+            self.show_success("Credential accepted. Acknowledgment submitted for delivery.")
+            QTimer.singleShot(2000, self.accept)
+        else:
+            self.show_error(f"Credential accepted, but acknowledgment delivery failed: {data.get('error', 'Unknown error')}")
             self._reset_button()
 
     def _save_admit_to_file(self, admit_said: str, admit_message: bytes):

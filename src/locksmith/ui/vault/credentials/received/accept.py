@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 from keri import help
 from keri.core import serdering
 
-from locksmith.core import ipexing
+from keri import kering
 from locksmith.ui import colors
 from locksmith.ui.toolkit.widgets import (
     LocksmithDialog,
@@ -198,23 +198,20 @@ class AcceptCredentialDialog(LocksmithDialog):
                 ims = f.read()
 
             grant_serder = serdering.SerderKERI(raw=bytes(ims))
-            attribs = grant_serder.ked['a']
-            recp = attribs['i']
+            if (grant_serder.pvrsn.major != 2
+                    or grant_serder.ked.get('r') != '/ipex/grant'):
+                raise ValueError("Expected an ACDC V2 IPEX grant")
+            recp = grant_serder.ked['ri']
             grant_said = grant_serder.said
-
-            # Parse CESR stream into database
-            # This stores the grant message in hby.db.exns
-            hab = self.app.hby.habByPre(recp)
-            if not hab:
+            if self.app.vault.hby.habByPre(recp) is None:
                 raise ValueError(f"No local identifier found for recipient: {recp}")
-
-            # Use Admitter to parse the message into the database
-            admitter = ipexing.Admitter(self.app.hby, hab, self.app.rgy)
-            admitter.parse(ims)
-
-            # Verify grant message is in database
-            if (_ := self.app.hby.db.exns.get(keys=(grant_said,))) is None:
-                raise ValueError(f"Grant message not in database: {grant_said}")
+            self.app.vault.mbx.parser.parse(
+                ims=bytearray(ims), version=kering.Vrsn_2_0, local=False,
+            )
+            if not self.app.vault.exc.complete(grant_said):
+                self.show_error("Grant verification is pending or failed. Required issuer or registry evidence may be missing.")
+                self._reset_button()
+                return
 
             logger.info(f"Found grant message SAID: {grant_said}")
 
