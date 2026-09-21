@@ -52,6 +52,9 @@ class VaultDrawer(QWidget):
         self._overlay_animation_connected = False  # Track connection state
         self._filter_active = False  # So INFO logs transitions, not keystrokes
         self._vault_names: list[str] = []
+        # Built once here: _filter_vaults() runs on every keystroke.
+        self._vault_font = QFont()
+        self._vault_font.setPointSize(15)
 
         # Create components
         self._create_overlay()
@@ -414,12 +417,10 @@ class VaultDrawer(QWidget):
                 key=lambda name: (not name.casefold().startswith(needle), name.casefold())
             )
 
-        vault_font = QFont()
-        vault_font.setPointSize(15)
         self.vault_list.clear()
         for vault_name in matching:
             vault_item = QListWidgetItem(QIcon(":/assets/custom/vault.png"), vault_name)
-            vault_item.setFont(vault_font)
+            vault_item.setFont(self._vault_font)
             self.vault_list.addItem(vault_item)
 
         no_matches = bool(needle) and not matching
