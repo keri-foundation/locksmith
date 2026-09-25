@@ -8,7 +8,7 @@ locksmith.core.basing package
 
 from dataclasses import dataclass
 
-from keri.db import dbing, koming
+from keri.db import dbing, koming, subing
 
 
 @dataclass
@@ -66,6 +66,20 @@ class BrowserPluginSettings:
     locksmith_alias: str
     plugin_identifier: str | None = None
 
+
+@dataclass
+class IssuedCredential:
+    raw: str
+    blinder: str
+    update: str
+
+
+@dataclass
+class AcceptedCredential:
+    grant: str
+    admit: str
+
+
 class LocksmithBaser(dbing.LMDBer):
     TailDirPath = "keri/rt"
     AltTailDirPath = ".keri/rt"
@@ -111,5 +125,11 @@ class LocksmithBaser(dbing.LMDBer):
             subkey='pluginSettings.',
             klas=BrowserPluginSettings
         )
+
+        # Schema-to-issuer choices and private wallet inventory. Received
+        # credentials refer to the evidence retained by Keripy's exchange store.
+        self.issuers = subing.Suber(db=self, subkey='issuers.')
+        self.issued = koming.Komer(db=self, subkey='issued.', klas=IssuedCredential)
+        self.accepted = koming.Komer(db=self, subkey='accepted.', klas=AcceptedCredential)
 
         return self.env

@@ -12,7 +12,7 @@ from keri import kering
 from keri.app import habbing
 from keri.core import signing
 from keri.db.basing import OobiRecord
-from keri.vdr import credentialing
+from keri.acdc import registraring
 
 from locksmith.core import otping
 from locksmith.core.crypto import stretch_password_to_passcode
@@ -192,7 +192,7 @@ class CreateVaultDialog(LocksmithDialog):
             if is_temp:
                 # Temp vaults: immediately open (they can't be found on disk later)
                 from locksmith.core.vaulting import run_vault_controller
-                rgy = credentialing.Regery(hby=hby, name=hby.name, base=self.config.base, temp=True)
+                rgy = registraring.Regery(hby=hby, name=hby.name, base=self.config.base, temp=True)
                 vault, qtask = run_vault_controller(app=self.app, hby=hby, rgy=rgy)
                 self.app.open_vault(name=name, vault=vault, qtask=qtask)
                 logger.info(f"Temp vault opened: {name}")

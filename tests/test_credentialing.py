@@ -1,318 +1,341 @@
-from types import SimpleNamespace
+"""Native wallet issuance and explicit acceptance with independent stores."""
+from time import monotonic, sleep
 
 import pytest
+from PySide6.QtNetwork import QAbstractSocket, QHostAddress, QTcpServer
+from hio.base import doing
 from keri import kering
+from keri.acdc.messaging import acmSchemaDefault
+from keri.core import scheming, SerderKERI
 
-from locksmith.core import credentialing
-
-
-CRED_SAID = "EKfS5jLqaNs3Hy88VZVfu1gxTleRvb1SgLj7ZSVeL9Xv"
-REGISTRY_SAID = "EKqVVG868WDESvfk_E75ExOc-OUzPdPaxD8PVsBczDhN"
-TEL_SAID = "ED5PTlTaq3CPiUsG6HnmN-nJ-ZDbpEL0MefSORH6-AWi"
-SCHEMA_SAID = "EAW8ju7u_onYZBtuPCJQd_CThQBMH7rq94z2LfnbrSik"
+from locksmith.core import credentialing, ipexing
+from test_keri_v2_compat import _deliver_ipex, _retry_ipex
+from test_keri_v2_compat import ipex_vaults as ipex_vaults
 
 
-class FakeSignalBridge:
-    def __init__(self):
-        self.events = []
+@pytest.fixture
+def schema_server(qapp):
+    _, schema = acmSchemaDefault()
+    schemer = scheming.Schemer(sed=schema)
+    server = QTcpServer()
+    assert server.listen(QHostAddress.SpecialAddress.LocalHost, 0)
+    requests, connections, buffers = [], [], {}
 
-    def emit_doer_event(self, doer_name, event_type, data):
-        self.events.append((doer_name, event_type, data))
-
-
-class FakeSchemaStore:
-    def get(self, keys):
-        return SimpleNamespace(
-            sed={
-                "title": "Test Credential",
-                "properties": {
-                    "a": {
-                        "oneOf": [
-                            {"type": "string"},
-                            {"type": "object", "properties": {}},
-                        ]
-                    }
-                },
-            }
-        )
-
-
-class FakeHab:
-    name = "issuer"
-    pre = REGISTRY_SAID
-    kever = SimpleNamespace(wits=["BWitness"])
-
-    def interact(self, data):
-        return b"anchoring-event"
-
-
-class FakeRegistry:
-    estOnly = False
-    hab = FakeHab()
-
-    def issue(self, said, dt):
-        return SimpleNamespace(pre=REGISTRY_SAID, snh="0", sn=0, said=TEL_SAID)
-
-
-class FakeSchemaRegistry:
-    regk = REGISTRY_SAID
-    regd = TEL_SAID
-    hab = FakeHab()
-    vcp = None
-
-
-class FakeCtel:
-    def __init__(self, said=None):
-        self.said = said
-
-    def get(self, keys):
-        return self.said
-
-
-class FakeRgy:
-    def __init__(self, calls):
-        self.calls = calls
-        self.reger = SimpleNamespace()
-        self.registry = FakeRegistry()
-
-    def registryByName(self, name):
-        return self.registry if name == SCHEMA_SAID else None
-
-    def processEscrows(self):
-        self.calls.append("rgy.processEscrows")
-
-
-def _make_issue_doer(monkeypatch, *, complete_after_retry):
-    calls = []
-    signal_bridge = FakeSignalBridge()
-    rgy = FakeRgy(calls)
-    hby = SimpleNamespace(db=SimpleNamespace(schema=FakeSchemaStore()))
-    app = SimpleNamespace(vault=SimpleNamespace(hby=hby, rgy=rgy))
-
-    class FakeCounselor:
-        def __init__(self, hby):
-            self.hby = hby
-
-    class FakeRegistrar:
-        def __init__(self, hby, rgy, counselor, auth=None):
-            self.auth = auth or {}
-
-        def issue(self, creder, iserder, aserder):
-            calls.append("registrar.issue")
-
-    class FakePoster:
-        def __init__(self, hby):
-            self.hby = hby
-
-    class FakeVerifier:
-        def __init__(self, hby, reger):
-            self.processed = False
-
-        def processEscrows(self):
-            calls.append("verifier.processEscrows")
-            self.processed = True
-
-    class FakeCredentialer:
-        def __init__(self, hby, rgy, registrar, verifier):
-            self.verifier = verifier
-            self.completed = False
-
-        def create(self, **kwa):
-            calls.append("credentialer.create")
-            return SimpleNamespace(said=CRED_SAID, attrib={})
-
-        def issue(self, creder, serder):
-            calls.append("credentialer.issue")
-
-        def complete(self, said):
-            return self.completed
-
-        def processEscrows(self):
-            calls.append("credentialer.processEscrows")
-            if complete_after_retry and self.verifier.processed:
-                self.completed = True
-
-    monkeypatch.setattr(credentialing.grouping, "Counselor", FakeCounselor)
-    monkeypatch.setattr(credentialing, "Registrar", FakeRegistrar)
-    monkeypatch.setattr(credentialing.forwarding, "Poster", FakePoster)
-    monkeypatch.setattr(credentialing.verifying, "Verifier", FakeVerifier)
-    monkeypatch.setattr(credentialing.credentialing, "Credentialer", FakeCredentialer)
-    monkeypatch.setattr(
-        credentialing.eventing,
-        "SealEvent",
-        lambda i, s, d: SimpleNamespace(i=i, s=s, d=d),
-    )
-    monkeypatch.setattr(
-        credentialing.serdering,
-        "SerderKERI",
-        lambda raw: SimpleNamespace(raw=raw),
-    )
-    monkeypatch.setattr(credentialing.signing, "serialize", lambda *args, **kwa: b"acdc")
-
-    doer = credentialing.IssueCredentialDoer(
-        app=app,
-        schema_said=SCHEMA_SAID,
-        recipient_pre=REGISTRY_SAID,
-        attributes={"nickname": "alice"},
-        signal_bridge=signal_bridge,
-    )
-    doer.wind = lambda tymth: None
-    doer.extend = lambda doers: calls.append("doer.extend")
-    doer.remove = lambda doers: calls.append("doer.remove")
-    return doer, calls, signal_bridge
-
-
-def _run_until_done(generator, limit=8):
-    for _ in range(limit):
-        try:
-            next(generator)
-        except StopIteration:
+    def respond(connection):
+        buffers[connection].extend(bytes(connection.readAll()))
+        if b'\r\n\r\n' not in buffers[connection]:
             return
+        path = bytes(buffers[connection]).split(b' ')[1].decode()
+        buffers[connection].clear()
+        requests.append(path)
+        if path.startswith('/stall'):
+            return
+        status, headers, body = b'200 OK', b'', schemer.raw
+        if path in ('/redirect', '/redirect308'):
+            status = b'302 Found' if path == '/redirect' else b'308 Permanent Redirect'
+            headers, body = b'Location: /schema\r\n', b''
+        elif path == '/failure':
+            status, body = b'503 Service Unavailable', b''
+        elif path == '/invalid':
+            body = b'not a schema'
+        connection.write(b'HTTP/1.1 ' + status + b'\r\n' + headers +
+                         f'Content-Length: {len(body)}\r\nConnection: close\r\n\r\n'.encode() + body)
+        connection.disconnectFromHost()
 
-    pytest.fail("IssueCredentialDoer did not finish within the bounded retry loop")
+    def accept():
+        while server.hasPendingConnections():
+            connection = server.nextPendingConnection()
+            connections.append(connection)
+            buffers[connection] = bytearray()
+            connection.readyRead.connect(lambda connection=connection: respond(connection))
+
+    server.newConnection.connect(accept)
+    yield f'http://127.0.0.1:{server.serverPort()}', schemer, requests, connections
+    for connection in connections:
+        connection.abort()
+    server.close()
+    server.deleteLater()
+    qapp.processEvents()
 
 
-def _immediate_generator_return(generator):
-    with pytest.raises(StopIteration) as excinfo:
-        next(generator)
-
-    return excinfo.value.value
-
-
-def test_load_schema_existing_complete_registry_is_idempotent():
-    registry = FakeSchemaRegistry()
-    rgy = SimpleNamespace(
-        reger=SimpleNamespace(ctel=FakeCtel(TEL_SAID)),
-        registryByName=lambda name: registry,
-    )
-    doer = credentialing.LoadSchemaDoer.__new__(credentialing.LoadSchemaDoer)
-    doer.rgy = rgy
-
-    assert not credentialing.registry_is_complete(rgy, None)
-    assert credentialing.registry_is_complete(rgy, registry)
-    assert _immediate_generator_return(
-        doer._create_registry(SCHEMA_SAID, "Schema Title")
-    ) == SCHEMA_SAID
-
-
-@pytest.mark.parametrize("wigs", [[object()], []])
-def test_load_schema_existing_registry_resumes_pending_receipts(monkeypatch, wigs):
-    queued = []
-    registry = FakeSchemaRegistry()
-    prefixer = SimpleNamespace(qb64=registry.hab.pre, qb64b=registry.hab.pre.encode())
-    pending = [(prefixer, SimpleNamespace(sn=2), SimpleNamespace(qb64=TEL_SAID))]
-    prior = (prefixer, SimpleNamespace(sn=1), SimpleNamespace(qb64=CRED_SAID))
-    registrar = SimpleNamespace(
-        receiptor=SimpleNamespace(
-            msgs=queued,
-            cues=[dict(pre=registry.hab.pre, sn=2)],
-        ),
-        complete=lambda pre, sn=0: bool(wigs),
-    )
-    rgy = SimpleNamespace(
-        reger=SimpleNamespace(
-            ctel=FakeCtel(),
-            tpwe=SimpleNamespace(
-                get=lambda keys: pending,
-                getTopItemIter=lambda keys=(): [(("prior",), prior), (("current",), pending[0])],
-            ),
-        ),
-        registryByName=lambda name: registry,
-        makeRegistry=lambda **kwa: pytest.fail("retry created another registry"),
-        processEscrows=lambda: None,
-    )
-
-    assert not credentialing.registry_is_complete(rgy, registry)
-
-    monkeypatch.setattr(credentialing.grouping, "Counselor", lambda **kwa: None)
-    monkeypatch.setattr(credentialing, "Registrar", lambda **kwa: registrar)
-    monkeypatch.setattr(credentialing.forwarding, "Poster", lambda **kwa: None)
-    monkeypatch.setattr(credentialing.helping, "nowIso8601", lambda: "dt")
-
-    doer = credentialing.LoadSchemaDoer.__new__(credentialing.LoadSchemaDoer)
-    doer.rgy = rgy
-    doer.hby = SimpleNamespace(
-        db=SimpleNamespace(
-            kels=SimpleNamespace(
-                getLast=lambda keys, on: {
-                    1: CRED_SAID,
-                    2: TEL_SAID,
-                }[on]
-            ),
-            wigs=SimpleNamespace(get=lambda keys: wigs),
-        ),
-    )
-    doer.auth_codes = ["BWitness:123456"]
-    doer.tock = 0.0
-    doer.extend = lambda doers: None
-    doer.remove = lambda doers: None
-
-    generator = doer._create_registry(SCHEMA_SAID, "Schema Title")
-    if wigs:
-        assert _immediate_generator_return(generator) == SCHEMA_SAID
+@pytest.mark.parametrize('path', ['/schema', '/redirect', '/redirect308', '/failure',
+                                  '/invalid', '/stall-timeout', '/stall-close'])
+def test_schema_url_loading_and_cleanup(ipex_vaults, schema_server, qapp, monkeypatch, path):
+    url, schemer, requests, connections = schema_server
+    app = ipex_vaults('schema-download')
+    events, clock = [], [0.0]
+    monkeypatch.setattr(credentialing, 'monotonic', lambda: clock[0])
+    app.vault.signals.doer_event.connect(lambda name, event, data: events.append((event, data)))
+    doer = credentialing.LoadSchemaDoer(app, oobi=url + path)
+    app.qtask.extend([doer])
+    deadline = monotonic() + 3.0
+    while path not in requests and monotonic() < deadline:
+        qapp.processEvents()
+        app.qtask.run()
+        sleep(0.001)
+    assert path in requests
+    if path.startswith('/stall'):
+        assert not doer.done
+        assert not events
+        assert app.hby.db.schema.get((schemer.said,)) is None
+    if path == '/stall-close':
+        app.close_vault()
     else:
-        with pytest.raises(kering.AuthError, match="Check the OTP"):
-            next(generator)
-
-    assert queued == [
-        dict(pre=registry.hab.pre, sn=1, auths={"BWitness": "123456#dt"}),
-        dict(pre=registry.hab.pre, sn=2, auths={"BWitness": "123456#dt"}),
-    ]
-
-
-def test_registrar_removes_superseded_registry_anchor_without_advancing():
-    prefixer = SimpleNamespace(qb64=REGISTRY_SAID)
-    number = SimpleNamespace(sn=2)
-    diger = SimpleNamespace(qb64=TEL_SAID)
-    removed = []
-
-    def fail(*args, **kwa):
-        pytest.fail("superseded registry anchor advanced from witness escrow")
-
-    registrar = credentialing.Registrar.__new__(credentialing.Registrar)
-    registrar.hby = SimpleNamespace(
-        db=SimpleNamespace(
-            kels=SimpleNamespace(getLast=lambda keys, on: CRED_SAID),
-        ),
-    )
-    registrar.rgy = SimpleNamespace(
-        reger=SimpleNamespace(
-            tpwe=SimpleNamespace(
-                getTopItemIter=lambda keys=(): [
-                    ((REGISTRY_SAID, "0"), (prefixer, number, diger))
-                ],
-                rem=lambda keys: removed.append(keys),
-            ),
-            tede=SimpleNamespace(add=fail),
-        ),
-    )
-
-    registrar.processWitnessEscrow()
-
-    assert removed == [(REGISTRY_SAID, "0")]
+        if path == '/stall-timeout':
+            clock[0] = doer.Timeout + 1
+        while not doer.done and monotonic() < deadline:
+            qapp.processEvents()
+            app.qtask.run()
+            sleep(0.001)
+        assert doer.done
+        if path in ('/schema', '/redirect', '/redirect308'):
+            assert events[-1][0] == 'schema_loaded'
+            assert app.hby.db.schema.get((schemer.said,)).raw == schemer.raw
+        else:
+            assert events[-1][0] == 'schema_load_failed'
+            assert app.hby.db.schema.get((schemer.said,)) is None
+        if path == '/stall-timeout':
+            assert 'timed out' in events[-1][1]['error']
+    while any(connection.state() != QAbstractSocket.SocketState.UnconnectedState
+              for connection in connections) and monotonic() < deadline:
+        qapp.processEvents()
+        sleep(0.001)
+    assert all(connection.state() == QAbstractSocket.SocketState.UnconnectedState
+               for connection in connections)
+    if path == '/stall-close':
+        assert not events
 
 
-def test_issue_credential_processes_verifier_escrows_before_completion(monkeypatch):
-    doer, calls, signal_bridge = _make_issue_doer(monkeypatch, complete_after_retry=True)
+def _load_schema(app, issuer):
+    _, schema = acmSchemaDefault()
+    schemer = scheming.Schemer(sed=schema)
+    doer = credentialing.LoadSchemaDoer(
+        app, file_content=schemer.raw, enable_issuance=True, issuer_aid=issuer.pre)
+    doing.Doist(doers=[doer], tock=0.03125, limit=1.0).do()
+    assert app.vault.db.issuers.get((schemer.said,)) == issuer.pre
+    assert app.vault.rgy.regs == {}
+    return schemer
 
-    _run_until_done(doer.issue_credential_do(lambda: 0.0))
 
-    assert calls.index("rgy.processEscrows") < calls.index("verifier.processEscrows")
-    assert calls.index("verifier.processEscrows") < calls.index("credentialer.processEscrows")
-    assert signal_bridge.events[0][1] == "credential_issued"
-    assert signal_bridge.events[0][2]["credential_said"] == CRED_SAID
+def _issue(app, schema, recipient, attributes=None, edges=None):
+    events = []
+    callback = lambda name, event, data: events.append((name, event, data))
+    app.vault.signals.doer_event.connect(callback)
+    doer = credentialing.IssueCredentialDoer(
+        app, schema.said, recipient.pre, attributes or {'LEI': '254900OPPU84GM83MG36'},
+        edges=edges)
+    doing.Doist(doers=[doer], tock=0.03125, limit=1.0).do()
+    app.vault.signals.doer_event.disconnect(callback)
+    assert doer.done
+    assert events[-1][1] == 'credential_issued', events
+    return events[-1][2]['credential_said']
 
 
-def test_issue_credential_keeps_retrying_while_credentialer_is_pending(monkeypatch):
-    doer, calls, signal_bridge = _make_issue_doer(monkeypatch, complete_after_retry=False)
-    generator = doer.issue_credential_do(lambda: 0.0)
+def test_native_issuance_keeps_independent_credentials_valid_after_reopen(ipex_vaults):
+    app = ipex_vaults('native-issuer')
+    issuer = app.hby.makeHab(name='issuer')
+    holder = app.hby.makeHab(name='holder')
+    schema = _load_schema(app, issuer)
+    first = _issue(app, schema, holder)
+    second = _issue(app, schema, holder)
+    assert first != second
+    views = credentialing.credentials(app.vault, received=False)
+    assert len(views) == 2
+    assert {view['status']['et'] for view in views} == {'issued'}
+    assert len({view['sad']['rd'] for view in views}) == 2
+    assert all(view['sad']['a']['i'] == holder.pre for view in views)
+    assert not credentialing.credentials(app.vault, received=True)
+    app.close_vault()
+    app = ipex_vaults('native-issuer')
+    assert {view['sad']['d'] for view in credentialing.credentials(app.vault)} == {first, second}
+    assert credentialing.credential(app.vault, first)['status']['et'] == 'issued'
+    assert credentialing.delete_credential(app.vault, first)
+    assert [view['sad']['d'] for view in credentialing.credentials(app.vault)] == [second]
+    assert len(app.vault.rgy.regs) == 2
 
-    for _ in range(4):
-        next(generator)
 
-    generator.close()
+def test_grant_collects_shared_sources_without_hiding_inventory_after_deletion(ipex_vaults):
+    from keri.peer import exchanging
 
-    assert signal_bridge.events == []
-    assert calls.count("rgy.processEscrows") >= 2
-    assert calls.count("verifier.processEscrows") >= 2
-    assert calls.count("credentialer.processEscrows") >= 2
+    app = ipex_vaults('shared-source')
+    hab = app.hby.makeHab(name='issuer')
+    schema = _load_schema(app, hab)
+    source = _issue(app, schema, hab)
+    child = _issue(app, schema, hab, edges={
+        'source_a': {'cred_said': source, 'schema_said': schema.said},
+        'source_b': {'cred_said': source, 'schema_said': schema.said},
+    })
+    grant, atc = ipexing.grant(app.vault, hab, child, hab.pre)
+    ipexing.prepare(app.vault, hab, grant, atc)
+    assert app.vault.exc.complete(grant.said)
+    nested = exchanging.loadParsedNestedSubstreams(app.hby, grant.said)
+    assert [nest.serder.said for nest in nested] == [child, source]
+
+    assert credentialing.delete_credential(app.vault, source)
+    assert [view['sad']['d'] for view in credentialing.credentials(app.vault)] == [child]
+    assert credentialing.credential(app.vault, child)['status']['et'] == 'issued'
+    with pytest.raises(kering.ValidationError, match='not in this wallet'):
+        ipexing.grant(app.vault, hab, child, hab.pre)
+
+
+def test_native_grant_requires_evidence_schema_and_consent_before_inventory(ipex_vaults):
+    from keri.peer import exchanging
+
+    sender, receiver = ipex_vaults('issue-sender'), ipex_vaults('issue-receiver')
+    issuer, holder = sender.hby.makeHab(name='issuer'), receiver.hby.makeHab(name='holder')
+    schema = _load_schema(sender, issuer)
+    said = _issue(sender, schema, holder)
+    _deliver_ipex(receiver.vault, issuer.replay(gvrsn=kering.Vrsn_2_0))
+    _deliver_ipex(sender.vault, holder.replay(gvrsn=kering.Vrsn_2_0))
+    grant, attachment = ipexing.grant(sender.vault, issuer, said, holder.pre)
+    stream = ipexing.prepare(sender.vault, issuer, grant, attachment)
+    _deliver_ipex(receiver.vault, stream)
+    assert not receiver.vault.exc.complete(grant.said)
+    with pytest.raises(kering.ValidationError):
+        ipexing.admit(receiver.vault, holder, grant.said)
+    assert not credentialing.credentials(receiver.vault)
+    # Prepared TEL is fixture input; observer ingestion is a separate service boundary.
+    regk = credentialing.credential(sender.vault, said)['sad']['rd']
+    for sn in (0, 1):
+        receiver.vault.rgy.store.accept(regk, sn, sender.vault.rgy.store.seqEvent(regk, sn))
+    _retry_ipex(receiver.vault)
+    assert receiver.vault.exc.complete(grant.said)
+    assert not credentialing.credentials(receiver.vault)
+    with pytest.raises(kering.ValidationError, match='Load credential schema'):
+        ipexing.admit(receiver.vault, holder, grant.said)
+    receiver.hby.db.schema.pin((schema.said,), schema)
+    admit, atc = ipexing.admit(receiver.vault, holder, grant.said)
+    assert receiver.vault.exc.complete(admit.said)
+    _deliver_ipex(sender.vault, admit.raw + atc)
+    assert sender.vault.exc.complete(admit.said)
+    assert ipexing.admit(receiver.vault, holder, grant.said)[0].said == admit.said
+    assert [view['sad']['d'] for view in credentialing.credentials(receiver.vault, received=True)] == [said]
+    assert not credentialing.credentials(receiver.vault, received=False)
+    receiver.close_vault()
+    receiver = ipex_vaults('issue-receiver')
+    view = credentialing.credential(receiver.vault, said)
+    assert view['status']['et'] == 'issued'
+    assert view['proof']
+    assert receiver.vault.db.accepted.get((said,)).admit == admit.said
+
+    retained = exchanging.serializeMessage(receiver.hby, admit.said)
+    assert credentialing.delete_credential(receiver.vault, said, received=True)
+    receiver.close_vault()
+    receiver = ipex_vaults('issue-receiver')
+    holder = receiver.hby.habByName('holder')
+    assert not credentialing.credentials(receiver.vault, received=True)
+    _deliver_ipex(receiver.vault, stream)
+    restored, restored_atc = ipexing.admit(receiver.vault, holder, grant.said,
+                                          message='Restore this credential')
+    assert restored.raw == admit.raw
+    assert restored.raw + restored_atc == retained
+    assert receiver.vault.db.accepted.get((said,)).admit == admit.said
+    assert receiver.hby.db.erpy.get((grant.said,)).qb64 == admit.said
+    assert [view['sad']['d'] for view in credentialing.credentials(receiver.vault, received=True)] == [said]
+
+
+def test_issuance_rejects_schema_mismatch(ipex_vaults):
+    app = ipex_vaults('schema-mismatch')
+    hab = app.hby.makeHab(name='issuer')
+    _, schema = acmSchemaDefault()
+    schema['properties']['a'] = {
+        'type': 'object', 'required': ['LEI'],
+        'properties': {'LEI': {'type': 'string'}}}
+    schema['$id'] = ''
+    schemer = scheming.Schemer(sed=schema)
+    app.hby.db.schema.pin((schemer.said,), schemer)
+    app.vault.db.issuers.pin((schemer.said,), hab.pre)
+    events = []
+    app.vault.signals.doer_event.connect(lambda name, event, data: events.append((event, data)))
+    doer = credentialing.IssueCredentialDoer(app, schemer.said, hab.pre, {'LEI': 123})
+    doing.Doist(doers=[doer], tock=0.03125, limit=1.0).do()
+    assert events[-1][0] == 'credential_issuance_failed'
+    assert 'credential_issued' not in [event for event, _ in events]
+    assert not credentialing.credentials(app.vault)
+    assert hab.kever.sn == 0
+
+
+def test_witness_timeout_preserves_pending_issuance_and_closes_receiptor(ipex_vaults, monkeypatch):
+    app = ipex_vaults('issuance-timeout')
+    witness = app.hby.makeHab(name='witness', transferable=False)
+    hab = app.hby.makeHab(name='issuer', wits=[witness.pre], toad=1)
+    schema = _load_schema(app, hab)
+    receipts = []
+    def receipt(self, pre, sn=None, auths=None):
+        receipts.append(sn)
+        if sn == 1:
+            _deliver_ipex(app.vault, witness.witness(SerderKERI(raw=hab.msgOwnEvent(sn=sn))))
+            return
+        try:
+            while True:
+                yield self.tock
+        finally:
+            receipts.append('closed')
+    monkeypatch.setattr(credentialing.LocksmithReceiptor, 'receipt', receipt)
+    events = []
+    app.vault.signals.doer_event.connect(lambda name, event, data: events.append((event, data)))
+    doer = credentialing.IssueCredentialDoer(app, schema.said, hab.pre, {'LEI': 'test'})
+    doing.Doist(doers=[doer], tock=0.03125, limit=31.0).do()
+    assert doer.done
+    assert not doer.deeds
+    assert receipts == [1, 2, 'closed'], (receipts, events)
+    assert events[-1][0] == 'credential_issuance_failed'
+    ((said,), _), = app.vault.db.issued.getTopItemIter()
+    app.vault.rgy.processEscrows()
+    assert credentialing.credential(app.vault, said)['status']['et'] == 'pending'
+    with pytest.raises(kering.ValidationError, match='verified issued state'):
+        ipexing.grant(app.vault, hab, said, hab.pre)
+    app.close_vault()
+    reopened = ipex_vaults('issuance-timeout')
+    assert len(list(reopened.vault.db.issued.getTopItemIter())) == 1
+    reopened.vault.rgy.processEscrows()
+    assert credentialing.credential(reopened.vault, said)['status']['et'] == 'pending'
+    hab = reopened.hby.habByName('issuer')
+    witness = reopened.hby.habByName('witness')
+    _deliver_ipex(reopened.vault, witness.witness(SerderKERI(raw=hab.msgOwnEvent(sn=2))))
+    reopened.vault.rgy.processEscrows()
+    assert credentialing.credential(reopened.vault, said)['status']['et'] == 'issued'
+
+
+@pytest.mark.parametrize('kind', [kering.Kinds.json, kering.Kinds.cbor, kering.Kinds.mgpk])
+@pytest.mark.parametrize('state', ['issued', 'revoked'])
+def test_native_credential_content_kind_and_acceptance_state(ipex_vaults, kind, state):
+    from keri.acdc import Registrar, acdcmap
+    from keri.acdc import ipexing as native_ipexing
+    from keri.core import messagize
+    from keri.peer import exchanging
+
+    sender, receiver = ipex_vaults('content-sender'), ipex_vaults('content-receiver')
+    issuer, holder = sender.hby.makeHab(name='issuer'), receiver.hby.makeHab(name='holder')
+    schema = _load_schema(sender, issuer)
+    registrar = Registrar(rgy=sender.vault.rgy)
+    reg = registrar.makeRegistry(name='content', prefix=issuer.pre)
+    rip = sender.vault.rgy.store.event(reg.regk)
+    issuer.interact(data=[dict(i=reg.regk, s=rip.sad['n'], d=rip.said)])
+    assert reg.anchorMsg(rip.said)
+    acdc = acdcmap(israid=issuer.pre, regid=reg.regk, iseaid=holder.pre,
+                   schema=schema.said, attribute={'d': '', 'LEI': 'test'}, kind=kind)
+    blinder, update = registrar.issue(reg, acdc=acdc, state=state)
+    issuer.interact(data=[dict(i=reg.regk, s=update.sad['n'], d=update.said)])
+    assert reg.anchorMsg(update.said)
+    _deliver_ipex(receiver.vault, issuer.replay(gvrsn=kering.Vrsn_2_0))
+    # Registry data is prepared fixture evidence, not observer delivery.
+    for sn in range(2):
+        receiver.vault.rgy.store.accept(reg.regk, sn, sender.vault.rgy.store.seqEvent(reg.regk, sn))
+    receiver.hby.db.schema.pin((schema.said,), schema)
+    proof = messagize(serder=acdc, bonds=[blinder.data], framed=False)
+    grant, attachment = native_ipexing.grant(issuer, holder.pre, 'Credential', origin=proof)
+    _deliver_ipex(receiver.vault, grant.raw + attachment)
+    assert receiver.vault.exc.complete(grant.said)
+    if state == 'issued':
+        admit, _ = ipexing.admit(receiver.vault, holder, grant.said)
+        assert receiver.vault.exc.complete(admit.said)
+        assert credentialing.credential(receiver.vault, acdc.said)['status']['et'] == 'issued'
+        nested, = exchanging.loadParsedNestedSubstreams(receiver.hby, grant.said)
+        assert nested.serder.kind == kind
+        assert nested.serder.raw == acdc.raw
+    else:
+        with pytest.raises(kering.ValidationError, match='revoked'):
+            ipexing.admit(receiver.vault, holder, grant.said)
+        assert not credentialing.credentials(receiver.vault)
+        assert not receiver.hby.db.erpy.get((grant.said,))

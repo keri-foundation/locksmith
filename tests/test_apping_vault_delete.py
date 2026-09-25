@@ -55,7 +55,7 @@ def _make_app(plugin_manager, calls=None):
     app.name = "test-vault"
     app.vault = vault
     app.hby = hby
-    app.rgy = SimpleNamespace(reger=FakeCloser("rgy.reger", calls))
+    app.rgy = SimpleNamespace(baser=FakeCloser("rgy.baser", calls))
     app.qtask = FakeQTask(calls)
     return app, calls
 
@@ -82,7 +82,8 @@ def test_delete_vault_prepares_plugins_before_local_clear():
     assert ("vault.db", True) in timeline
     assert ("vault.rep.mbx", True) in timeline
     assert ("vault.notifier.noter", True) in timeline
-    assert ("rgy.reger", True) in timeline
+    assert ("rgy.baser", True) in timeline
+    assert timeline.index(("rgy.baser", True)) < timeline.index(("hby", True))
     assert ("hby.cf", True) in timeline
     assert ("hby", True) in timeline
     assert app.vault is None

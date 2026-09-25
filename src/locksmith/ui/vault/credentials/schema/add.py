@@ -8,7 +8,6 @@ from keri import help
 import re
 from urllib import parse
 
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QButtonGroup, QFileDialog, QCheckBox
 
@@ -22,10 +21,6 @@ from locksmith.ui.toolkit.widgets import (
     LocksmithInvertedButton
 )
 from locksmith.ui.toolkit.widgets.buttons import LocksmithRadioButton, LocksmithIconButton
-from locksmith.ui.vault.shared.witness_auth_mixin import (
-    WitnessAuthenticationPanel,
-    witness_auth_dialog_height
-)
 
 logger = help.ogler.getLogger(__name__)
 
@@ -43,14 +38,10 @@ class AddSchemaDialog(LocksmithDialog):
             parent: Parent widget
         """
         self.app = app
-        self._auth_panel = None
-        self._workflow_mode = "schema"
-        self.pending_load_params = None
 
         # Create content widget
         content_widget = QWidget()
         content_widget.setStyleSheet("background-color: #F8F9FF;")
-        self._schema_content_widget = content_widget
         layout = QVBoxLayout(content_widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -103,9 +94,9 @@ class AddSchemaDialog(LocksmithDialog):
 
         layout.addSpacing(20)
 
-        # Checkbox for credential registry creation
-        self.create_registry_checkbox = QCheckBox("Use for Credential Issuance")
-        self.create_registry_checkbox.setStyleSheet("""
+        # Checkbox for choosing a schema issuer
+        self.enable_issuance_checkbox = QCheckBox("Use for Credential Issuance")
+        self.enable_issuance_checkbox.setStyleSheet("""
             QCheckBox {
                 font-size: 14px;
                 spacing: 8px;
@@ -124,7 +115,7 @@ class AddSchemaDialog(LocksmithDialog):
                 color: #FFFFFF;
             }
         """)
-        layout.addWidget(self.create_registry_checkbox)
+        layout.addWidget(self.enable_issuance_checkbox)
 
         layout.addSpacing(15)
 
@@ -187,7 +178,7 @@ class AddSchemaDialog(LocksmithDialog):
         self.browse_button.clicked.connect(self._browse_file)
         self.load_button.clicked.connect(self._on_primary_clicked)
         self.oobi_field.line_edit.textChanged.connect(self._on_oobi_changed)
-        self.create_registry_checkbox.toggled.connect(self._on_registry_checkbox_toggled)
+        self.enable_issuance_checkbox.toggled.connect(self._on_issuance_checkbox_toggled)
 
         # Populate issuer dropdown with local identifiers
         self._populate_issuer_dropdown()
@@ -212,117 +203,20 @@ class AddSchemaDialog(LocksmithDialog):
         self._doer_event_connected = False
 
     def _on_dialog_finished(self, _result):
-        self.pending_load_params = None
         self._disconnect_doer_event_signal()
 
     def _on_primary_clicked(self):
-        if self._workflow_mode == "auth":
-            self._submit_auth_step()
-        else:
-            self._on_load()
+        self._on_load()
 
     def _on_cancel_clicked(self):
-        if self._workflow_mode == "auth":
-            self._show_schema_step(clear_pending=True)
-        else:
-            self.close()
+        self.close()
 
-    def _show_auth_step(self, hab):
-        self.clear_error()
-
-        if self._auth_panel is not None:
-            self._auth_panel.setParent(None)
-            self._auth_panel.deleteLater()
-
-        self._schema_content_widget.hide()
-        self._auth_panel = WitnessAuthenticationPanel(
-            app=self.app,
-            hab=hab,
-            witness_ids=list(hab.kever.wits),
-            parent=self
-        )
-        self.content_layout.addWidget(self._auth_panel)
-
-        self._workflow_mode = "auth"
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.cancel_button.setText("Back")
-        self.cancel_button.setEnabled(True)
-        self.load_button.setText("Authenticate")
-        self.load_button.setEnabled(True)
-        self.setFixedSize(700, witness_auth_dialog_height(
-            self._auth_panel.individual_witnesses,
-            self._auth_panel.batch_groups
-        ))
-        self.center_on_parent()
-
-    def _show_schema_step(self, clear_pending: bool = False):
-        self.clear_error()
-
-        if clear_pending:
-            self.pending_load_params = None
-
-        if self._auth_panel is not None:
-            self.content_layout.removeWidget(self._auth_panel)
-            self._auth_panel.setParent(None)
-            self._auth_panel.deleteLater()
-            self._auth_panel = None
-
-        self._schema_content_widget.show()
-        self._workflow_mode = "schema"
-        self.cancel_button.setText("Cancel")
-        self.cancel_button.setEnabled(True)
-        self.load_button.setText("Load Schema")
-        self.load_button.setEnabled(True)
-        self.setFixedSize(420, 540)
-        self.center_on_parent()
 
     def _set_primary_button_idle(self):
         self.cancel_button.setEnabled(True)
         self.load_button.setEnabled(True)
-        if self._workflow_mode == "auth":
-            self.load_button.setText("Authenticate")
-        else:
-            self.load_button.setText("Load Schema")
+        self.load_button.setText("Load Schema")
 
-    def _submit_auth_step(self):
-        if self._auth_panel is None:
-            self._show_schema_step(clear_pending=True)
-            return
-
-        self.clear_error()
-        valid, codes, error_message = self._auth_panel.validate_authentication_codes()
-        if not valid:
-            self.show_error(error_message)
-            return
-
-        self.load_button.setEnabled(False)
-        self.load_button.setText("Loading...")
-        self.cancel_button.setEnabled(False)
-        self._launch_pending_load(codes)
-
-    def _launch_pending_load(self, codes: list[str]):
-        if not self.pending_load_params:
-            self._show_schema_step(clear_pending=True)
-            self.show_error("No pending schema load operation")
-            return
-
-        params = self.pending_load_params
-
-        if params['workflow'] == 'oobi':
-            self._create_load_schema_doer(
-                oobi=params['oobi'],
-                create_registry=params['create_registry'],
-                issuer_aid=params['issuer_aid'],
-                auth_codes=codes
-            )
-        elif params['workflow'] == 'file':
-            self._create_load_schema_doer(
-                file_path=params['file_path'],
-                file_content=params['file_content'],
-                create_registry=params['create_registry'],
-                issuer_aid=params['issuer_aid'],
-                auth_codes=codes
-            )
 
     def _on_connection_type_changed(self):
         """Handle connection type radio button selection changes."""
@@ -335,9 +229,9 @@ class AddSchemaDialog(LocksmithDialog):
             self.file_path_field.show()
             self.browse_button.show()
 
-    def _on_registry_checkbox_toggled(self, checked):
+    def _on_issuance_checkbox_toggled(self, checked):
         """
-        Handle registry checkbox toggle to show/hide issuer dropdown.
+        Handle issuance checkbox toggle to show/hide issuer dropdown.
 
         Args:
             checked: Whether the checkbox is checked
@@ -496,8 +390,8 @@ class AddSchemaDialog(LocksmithDialog):
             self.said_field.style().unpolish(self.said_field)
             self.said_field.style().polish(self.said_field)
 
-        # Validate issuer selection if registry checkbox is checked
-        if self.create_registry_checkbox.isChecked():
+        # Validate issuer selection if issuance checkbox is checked
+        if self.enable_issuance_checkbox.isChecked():
             if self.issuer_dropdown.currentIndex() <= 0:
                 failed_fields.append("Issuer Identifier")
                 self.issuer_dropdown.setProperty("error", True)
@@ -512,134 +406,42 @@ class AddSchemaDialog(LocksmithDialog):
         return True
 
     def _load_oobi(self):
-        """Initiate schema loading from OOBI."""
-        oobi = self.oobi_field.text().strip()
-        create_registry = self.create_registry_checkbox.isChecked()
-
-        # Get issuer AID if registry is being created
-        issuer_aid = None
-        if create_registry:
-            issuer_index = self.issuer_dropdown.currentIndex()
-            if issuer_index > 0:
-                issuer_aid = self.issuer_dropdown.itemData(issuer_index)
-
-        logger.info(f"Loading schema from OOBI: {oobi}")
-        if issuer_aid:
-            logger.info(f"Will create registry with issuer: {issuer_aid}")
-
-        try:
-            # Check if issuer has witnesses and needs authentication
-            if issuer_aid and create_registry:
-                hab = self.app.vault.hby.habs.get(issuer_aid)
-                if hab and hab.kever.wits:
-                    logger.info(f"Issuer {issuer_aid} has {len(hab.kever.wits)} witnesses, awaiting authentication")
-                    self.pending_load_params = {
-                        'workflow': 'oobi',
-                        'oobi': oobi,
-                        'create_registry': create_registry,
-                        'issuer_aid': issuer_aid
-                    }
-                    self._show_auth_step(hab)
-                    return
-
-            # No witnesses or no registry creation - proceed directly
-            self._create_load_schema_doer(
-                oobi=oobi,
-                create_registry=create_registry,
-                issuer_aid=issuer_aid
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to create LoadSchemaDoer: {e}")
-            self._set_primary_button_idle()
-            self.show_error(f"Failed to initiate schema loading: {str(e)}")
+        """Load a schema and optionally save its local issuer selection."""
+        self._create_load_schema_doer(
+            oobi=self.oobi_field.text().strip(),
+            enable_issuance=self.enable_issuance_checkbox.isChecked(),
+            issuer_aid=self.issuer_dropdown.currentData(),
+        )
 
     def _load_file(self):
-        """Initiate schema loading from file."""
+        """Load a schema file and optionally save its local issuer selection."""
         file_path = self.file_path_field.text().strip()
-        create_registry = self.create_registry_checkbox.isChecked()
-
-        # Get issuer AID if registry is being created
-        issuer_aid = None
-        if create_registry:
-            issuer_index = self.issuer_dropdown.currentIndex()
-            if issuer_index > 0:
-                issuer_aid = self.issuer_dropdown.itemData(issuer_index)
-
-        logger.info(f"Loading schema from file: {file_path}")
-        if issuer_aid:
-            logger.info(f"Will create registry with issuer: {issuer_aid}")
-
         try:
-            # Read the schema file
-            with open(file_path, 'rb') as f:
-                raw = f.read()
-
-            # Check if issuer has witnesses and needs authentication
-            if issuer_aid and create_registry:
-                hab = self.app.vault.hby.habs.get(issuer_aid)
-                if hab and hab.kever.wits:
-                    logger.info(f"Issuer {issuer_aid} has {len(hab.kever.wits)} witnesses, awaiting authentication")
-                    self.pending_load_params = {
-                        'workflow': 'file',
-                        'file_path': file_path,
-                        'file_content': raw,
-                        'create_registry': create_registry,
-                        'issuer_aid': issuer_aid
-                    }
-                    self._show_auth_step(hab)
-                    return
-
-            # No witnesses or no registry creation - proceed directly
+            with open(file_path, 'rb') as source:
+                raw = source.read()
             self._create_load_schema_doer(
-                file_path=file_path,
                 file_content=raw,
-                create_registry=create_registry,
-                issuer_aid=issuer_aid
+                enable_issuance=self.enable_issuance_checkbox.isChecked(),
+                issuer_aid=self.issuer_dropdown.currentData(),
             )
-
-        except Exception as e:
-            logger.error(f"Failed to create LoadSchemaDoer: {e}")
+        except OSError as error:
+            self.show_error(f"Failed to read schema: {error}")
             self._set_primary_button_idle()
-            self.show_error(f"Failed to initiate schema loading: {str(e)}")
 
-    def _create_load_schema_doer(self, oobi=None, file_path=None, file_content=None,
-                                  create_registry=False, issuer_aid=None, auth_codes=None):
-        """
-        Create and launch the LoadSchemaDoer.
-
-        Args:
-            oobi: Optional OOBI URL
-            file_path: Optional file path
-            file_content: Optional file content bytes
-            create_registry: Whether to create a credential registry
-            issuer_aid: AID of the issuer identifier
-            auth_codes: Optional list of auth codes for witness authentication
-        """
+    def _create_load_schema_doer(self, oobi=None, file_content=None,
+                                 enable_issuance=False, issuer_aid=None):
+        """Schedule schema loading and save the requested issuer selection."""
         try:
-            # Create the LoadSchemaDoer
             doer = LoadSchemaDoer(
-                app=self.app,
-                oobi=oobi,
-                file_path=file_path,
-                file_content=file_content,
-                create_registry=create_registry,
-                issuer_aid=issuer_aid,
-                auth_codes=auth_codes,
-                signal_bridge=self.app.vault.signals if hasattr(self.app.vault, 'signals') else None
+                app=self.app, oobi=oobi,
+                file_content=file_content, enable_issuance=enable_issuance,
+                issuer_aid=issuer_aid, signal_bridge=self.app.vault.signals,
             )
-
-            # Launch the doer
             self.app.vault.extend([doer])
-
-            workflow = "OOBI" if oobi else "file"
-            logger.info(f"LoadSchemaDoer launched for {workflow}" +
-                       (f" with {len(auth_codes)} auth codes" if auth_codes else ""))
-
-        except Exception as e:
-            logger.error(f"Failed to create LoadSchemaDoer: {e}")
+        except Exception as error:
+            logger.exception("Failed to start schema loading")
             self._set_primary_button_idle()
-            self.show_error(f"Failed to initiate schema loading: {str(e)}")
+            self.show_error(f"Failed to load schema: {error}")
 
     def _on_doer_event(self, doer_name: str, event_type: str, data: dict):
         """
@@ -663,21 +465,8 @@ class AddSchemaDialog(LocksmithDialog):
             self._on_failure(error_msg)
 
     def _on_success(self, data):
-        """
-        Handle successful schema loading.
-
-        Args:
-            data: Success data from doer
-        """
-        schema_title = data.get('title', 'Unknown')
-        schema_said = data.get('said', '')
-        registry_name = data.get('registry_name')
-
-        logger.info(f"Successfully loaded schema: {schema_title} ({schema_said})")
-        if registry_name:
-            logger.info(f"Created credential registry: {registry_name}")
-
-        self._show_schema_step(clear_pending=True)
+        """Close after the schema and issuer selection have been saved."""
+        logger.info("Loaded schema %s", data.get('said', ''))
         self.close()
 
     def _on_failure(self, error_msg):

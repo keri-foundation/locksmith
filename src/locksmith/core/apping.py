@@ -117,17 +117,13 @@ class LocksmithApplication:
             # Cleanup
             self.qtask.cleanup()
 
-            # Close LMDB environments so vault can be reopened in this process
-            if self.vault is not None and self.vault.db is not None:
+            # Close dependent stores before the Habery.
+            if self.vault is not None:
                 self.vault.db.close()
-            if hasattr(self.vault, 'rep') and self.vault.rep is not None:
-                if hasattr(self.vault.rep, 'mbx') and self.vault.rep.mbx is not None:
-                    self.vault.rep.mbx.close()
-            if hasattr(self.vault, 'notifier') and self.vault.notifier is not None:
-                if hasattr(self.vault.notifier, 'noter') and self.vault.notifier.noter is not None:
-                    self.vault.notifier.noter.close()
-            if self.rgy is not None and hasattr(self.rgy, 'reger') and self.rgy.reger is not None:
-                self.rgy.reger.close()
+                self.vault.rep.mbx.close()
+                self.vault.notifier.noter.close()
+            if self.rgy is not None:
+                self.rgy.close()
             if self.hby is not None:
                 self.hby.close()
 
@@ -178,39 +174,18 @@ class LocksmithApplication:
             self.qtask.cleanup()
             self.qtask = None
 
-        if self.vault is not None:
-            self.plugin_manager.on_vault_closed(self.vault, clear=True)
+        self.plugin_manager.on_vault_closed(self.vault, clear=True)
 
-        # Collect all database instances to close with clear=True
-        # Order matters: close dependencies first
-        databases_to_clear = []
-
-        # LocksmithBaser (our custom db)
-        if self.vault.db is not None:
-            databases_to_clear.append(('LocksmithBaser', self.vault.db))
-
-        # Mailboxer (from Respondant)
-        if hasattr(self.vault, 'rep') and self.vault.rep is not None:
-            if hasattr(self.vault.rep, 'mbx') and self.vault.rep.mbx is not None:
-                databases_to_clear.append(('Mailboxer', self.vault.rep.mbx))
-
-        # Noter (from Notifier)
-        if hasattr(self.vault, 'notifier') and self.vault.notifier is not None:
-            if hasattr(self.vault.notifier, 'noter') and self.vault.notifier.noter is not None:
-                databases_to_clear.append(('Noter', self.vault.notifier.noter))
-
-        # Reger (from Regery)
-        if self.rgy is not None and hasattr(self.rgy, 'reger') and self.rgy.reger is not None:
-            databases_to_clear.append(('Reger', self.rgy.reger))
-
-        # Current keripy clears the Habery LMDB stores, but does not remove
-        # the persistent Configer file. Delete it here as part of the vault.
-        if self.hby is not None and getattr(self.hby, 'cf', None) is not None:
-            databases_to_clear.append(('HaberyConfiger', self.hby.cf))
-
-        # Habery databases (Baser, Keeper)
-        if self.hby is not None:
-            databases_to_clear.append(('Habery', self.hby))
+        # Close dependent stores before the Habery. Its close method leaves the
+        # Configer file in place, so clear that file explicitly.
+        databases_to_clear = [
+            ('LocksmithBaser', self.vault.db),
+            ('Mailboxer', self.vault.rep.mbx),
+            ('Noter', self.vault.notifier.noter),
+            ('ACDC registry', self.rgy.baser),
+            ('HaberyConfiger', self.hby.cf),
+            ('Habery', self.hby),
+        ]
 
         # Close each with clear=True to delete files
         deleted_count = 0

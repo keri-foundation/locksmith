@@ -53,8 +53,7 @@ class DeleteSchemaDialog(LocksmithResourceDeletionDialog):
 
         try:
             # Delete the schema from the database
-            self.app.vault.rgy.reger.registries.discard(self.said)
-            self.app.vault.rgy.reger.regs.rem(self.said)
+            self.app.vault.db.issuers.rem(keys=(self.said,))
             self.app.vault.hby.db.schema.rem(keys=(self.said,))
 
             # Emit deletion event for UI updates

@@ -19,15 +19,11 @@ from keri.app import (
     oobiing,
     signaling,
 )
-from keri.core import routing as keriRouting, eventing, coring
+from keri.core import routing as keriRouting, eventing, coring, kraming
 from keri.peer import exchanging
-from keri.vc import protocoling
-from keri.vdr import credentialing, verifying
-from keri.vdr.eventing import Tevery
 
-from locksmith.core import indirecting, challenging
+from locksmith.core import indirecting, challenging, ipexing
 from locksmith.core.adjudication import Watchmen, KeyStateVarianceAuthority
-from locksmith.core.credentialing import Registrar
 from locksmith.core.configing import ENABLE_TURRET_BROWSER_PLUGIN
 from locksmith.core.grouping import CounselingCompletionDoer
 from locksmith.core.receipting import LocksmithReceiptor
@@ -58,7 +54,19 @@ class Vault(doing.DoDoer):
         """
         self.app = app
         self.hby = hby
+        # The app closes registry and message stores before the Habery.
+        self.hby.free = False
         self.rgy = rgy
+        config = hby.cf.get()
+        config['kram'] = {
+            'enabled': True,
+            'caches': {'~': (10000, 300000, 3600000, 86400000, 300000, 3600000, 86400000)},
+            'denials': [[[2, 0], 'qry', ''], [[2, 0], 'rpy', ''],
+                        [[2, 0], 'exn', '/multisig'], [[2, 0], 'exn', '/challenge']],
+        }
+        hby.cf.put(config)
+        self.kram_cues = decking.Deck()
+        self.kramer = kraming.Kramer(db=hby.db, cf=hby.cf, cues=self.kram_cues)
         self.db = LocksmithBaser(
             name=self.hby.name,
             base=self.hby.base,
@@ -120,16 +128,6 @@ class Vault(doing.DoDoer):
         # Habery doer
         self.hbyDoer = habbing.HaberyDoer(habery=hby)
 
-        # Credential verification
-        self.verifier = verifying.Verifier(hby=hby, reger=rgy.reger)
-        self.registrar = Registrar(hby=hby, rgy=rgy, counselor=self.counselor)
-        self.credentialer = credentialing.Credentialer(
-            hby=self.hby,
-            rgy=self.rgy,
-            registrar=self.registrar,
-            verifier=self.verifier
-        )
-
         # Signaling and notifications
         signaler = signaling.Signaler()
         self.notifier = notifying.Notifier(
@@ -148,16 +146,16 @@ class Vault(doing.DoDoer):
 
         # Load protocol handlers
         grouping.loadHandlers(exc=self.exc, mux=self.mux)
-        protocoling.loadHandlers(hby=self.hby, exc=self.exc, notifier=self.notifier)
+        for verb in ('apply', 'offer', 'agree', 'grant', 'admit', 'spurn'):
+            self.exc.addHandler(ipexing.IpexHandler(f'/ipex/{verb}', hby, self.notifier, rgy))
         challenging.loadHandlers(db=self.hby.db, exc=self.exc, notifier=self.notifier)
 
         # KEL and credential verification
         self.rvy = keriRouting.Revery(db=hby.db, cues=self.cues)
-        self.kvy = eventing.Kevery(db=hby.db, lax=True, local=False, rvy=self.rvy, cues=self.cues)
+        self.kvy = eventing.Kevery(db=hby.db, lax=True, local=False, rvy=self.rvy,
+                                  cues=self.cues, kramer=self.kramer, exc=self.exc)
+        self.kramer.cues = self.kram_cues
         self.kvy.registerReplyRoutes(router=self.rvy.rtr)
-
-        self.tvy = Tevery(reger=self.verifier.reger, db=hby.db, local=False, cues=self.cues)
-        self.tvy.registerReplyRoutes(router=self.rvy.rtr)
 
         watchmen = Watchmen(hby=hby, tock=15.0)
         kva = KeyStateVarianceAuthority(hby=hby, notifier=self.notifier, cues=watchmen.cues)
@@ -168,9 +166,8 @@ class Vault(doing.DoDoer):
             topics=['/receipt', '/multisig', '/replay', '/delegate', '/credential', '/challenge', '/reply'],
             exc=self.exc,
             kvy=self.kvy,
-            tvy=self.tvy,
             rvy=self.rvy,
-            verifier=self.verifier,
+            rgy=self.rgy,
         )
 
         # Notification toast doer
@@ -196,6 +193,7 @@ class Vault(doing.DoDoer):
             watchmen,
             kva,
             self.mbx,
+            kraming.Pruner(self.kramer, tock=1.0),
             self.toast_doer,
         ]
         if self.turrent_doer is not None:
@@ -452,7 +450,12 @@ def run_vault_controller(app, hby, rgy, expire=0.0):
     Returns:
         tuple: (vault, qtask) - Vault instance and QtTask instance
     """
-    vault = Vault(app=app, hby=hby, rgy=rgy)
+    try:
+        vault = Vault(app=app, hby=hby, rgy=rgy)
+    except Exception:
+        rgy.close()
+        hby.close()
+        raise
     doers = [vault]
 
     tock = 0.03125  # ~31.25ms tick rate

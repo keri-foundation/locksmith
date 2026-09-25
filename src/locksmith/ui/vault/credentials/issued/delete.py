@@ -53,8 +53,8 @@ class DeleteIssuedCredentialDialog(LocksmithResourceDeletionDialog):
         logger.info(f"Attempting to delete issued credential '{self.schema_name}' ({self.said})")
 
         try:
-            # Delete the credential from the registry
-            credentialing.delete_credential(self.app.vault.rgy.reger, self.said)
+            # Remove the credential from this wallet
+            credentialing.delete_credential(self.app.vault, self.said)
 
             # Emit deletion event for UI updates
             if hasattr(self.app.vault, 'signals') and self.app.vault.signals:

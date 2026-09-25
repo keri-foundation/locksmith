@@ -10,7 +10,7 @@ from keri import kering
 from keri.app import habbing, keeping, delegating
 from keri.core import coring, signing
 from keri.core.serdering import SerderKERI
-from keri.vdr import credentialing
+from keri.acdc import registraring
 
 from locksmith.core.vaulting import run_vault_controller
 from locksmith.core.grouping import GroupMultisigInceptDoer
@@ -132,7 +132,7 @@ def open_hby(name, base, bran, app, salt=None):
     except ValueError:
         logger.error(f'Open Habery failed on ValueError for {name}')
         raise
-    rgy = credentialing.Regery(hby=hby, name=hby.name, base=base, temp=False)
+    rgy = registraring.Regery(hby=hby, name=hby.name, base=base, temp=False)
     return run_vault_controller(app=app, hby=hby, rgy=rgy)
 
 
