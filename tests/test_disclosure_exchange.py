@@ -115,7 +115,8 @@ def test_selected_aggregate_exchange_preserves_source_and_reopens(ipex_vaults):
     store.vault.org.update(citizen.pre, {'alias': 'Citizen'})
     request_parent = QWidget()
     parents.append(request_parent)
-    request_dialog = StartExchangeDialog(store, request_parent, 'Apply', schema=root_schema.said)
+    request_dialog = StartExchangeDialog(store, request_parent, 'Apply', schema=root_schema.said,
+                                         intent='presentation')
     request_dialog.sender.setCurrentIndex(request_dialog.sender.combo_box.findData(verifier.pre))
     request_dialog.recipient.setCurrentIndex(request_dialog.recipient.combo_box.findData(citizen.pre))
     request_fields = request_dialog._requests[root_schema.said]
