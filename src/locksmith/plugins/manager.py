@@ -90,6 +90,19 @@ class PluginManager:
         """Return a plugin by its ID, or None if not found."""
         return self._plugins.get(plugin_id)
 
+    async def ensure_messaging(self, vault: Any, pre: str, *, retry: bool = False) -> bool:
+        """Use the first configured provider that can set up receiving."""
+        for plugin in self._plugins.values():
+            if await plugin.ensure_messaging(vault, pre, retry=retry):
+                return True
+        return False
+
+    def messaging_status(self, vault: Any, pre: str) -> tuple[str, str] | None:
+        for plugin in self._plugins.values():
+            if (status := plugin.messaging_status(vault, pre)) is not None:
+                return status
+        return None
+
     def is_setup_complete(self, plugin_id: str, vault: Any) -> bool:
         """Check if a plugin's setup is complete. Non-account plugins always return True."""
         plugin = self._plugins.get(plugin_id)

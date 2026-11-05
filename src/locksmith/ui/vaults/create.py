@@ -117,10 +117,8 @@ class CreateVaultDialog(LocksmithDialog):
             show_overlay=False
         )
 
-        # Set initial size
-        self.setFixedSize(340, 350)
-        self._base_height = 350
-        # Note: Not calling self._2fa_section.set_dialog(self) because we handle resizing directly with hardcoded heights
+        self.fit_content(340)
+        self._base_height = self.height()
 
         # Setup 2FA height animation
         self._2fa_height_animation = QPropertyAnimation(self, b"dialogHeight")
@@ -242,7 +240,6 @@ class CreateVaultDialog(LocksmithDialog):
 
     # Constants for 2FA QR code sizing
     _QR_CODE_SIZE = 300
-    _2FA_EXPANDED_HEIGHT = 350 + _QR_CODE_SIZE
 
     def _on_2fa_expand_changed(self, expanded: bool):
         if expanded:
@@ -270,7 +267,7 @@ class CreateVaultDialog(LocksmithDialog):
                     return
 
             self._otp_enabled = True
-            self._animate_to_height(self._2FA_EXPANDED_HEIGHT)
+            self._animate_to_height(min(self._base_height + self._QR_CODE_SIZE, self._max_dialog_height))
             
         else:
             self.enable_2fa_button.setText("Enable 2-Factor Authentication")

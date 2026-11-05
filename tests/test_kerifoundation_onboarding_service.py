@@ -125,7 +125,7 @@ def _stub_watcher_introduction(monkeypatch):
         calls.append(kwa)
 
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.introduce_watcher_observed_aid",
+        "locksmith.plugins.kerifoundation.onboarding.service.watcher_introduction_doers",
         fake_introduce,
     )
     return calls
@@ -261,6 +261,33 @@ class FakeBootClient:
         self.session_state = "cancelled"
 
 
+    async def send_ephemeral_inception_async(self, *args, vault=None, **kwargs):
+        return self.send_ephemeral_inception(*args, **kwargs)
+
+    async def start_onboarding_async(self, *args, vault=None, **kwargs):
+        return self.start_onboarding(*args, **kwargs)
+
+    async def session_status_async(self, *args, vault=None, **kwargs):
+        return self.session_status(*args, **kwargs)
+
+    async def create_account_async(self, *args, vault=None, **kwargs):
+        return self.create_account(*args, **kwargs)
+
+    async def complete_onboarding_async(self, *args, vault=None, **kwargs):
+        return self.complete_onboarding(*args, **kwargs)
+
+    async def cancel_onboarding_async(self, *args, vault=None, **kwargs):
+        return self.cancel_onboarding(*args, **kwargs)
+
+    async def list_account_watchers_async(self, *args, vault=None, **kwargs):
+        return self.list_account_watchers(*args, **kwargs)
+
+    async def list_account_witnesses_async(self, *args, vault=None, **kwargs):
+        return self.list_account_witnesses(*args, **kwargs)
+
+    async def delete_account_async(self, *args, vault=None, **kwargs):
+        return self.delete_account(*args, **kwargs)
+
 class RetryThenSucceedBootClient(FakeBootClient):
     def __init__(self):
         super().__init__()
@@ -395,6 +422,12 @@ class BlockingStartBootClient(FakeBootClient):
         )
 
 
+    async def start_onboarding_async(self, hab, *, vault=None, **kwargs):
+        self.started.set()
+        await asyncio.to_thread(self.release.wait, 1.0)
+        return FakeBootClient.start_onboarding(self, hab, **kwargs)
+
+
 class FakeWitnessRegistrar:
     def __init__(self):
         self.calls = []
@@ -442,7 +475,11 @@ def stub_rotation(service):
             }
         )
 
+    async def fake_rotate_async(**kwargs):
+        return fake_rotate(**kwargs)
+
     service._rotate_account_to_allocated_witnesses_blocking = fake_rotate
+    service._rotate_account_to_allocated_witnesses_async = fake_rotate_async
     return calls
 
 
@@ -633,7 +670,7 @@ def test_onboarding_service_runs_step_4_5_6_flow(tmp_path, monkeypatch):
         fake_resolve_oobi,
     )
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.introduce_watcher_observed_aid",
+        "locksmith.plugins.kerifoundation.onboarding.service.watcher_introduction_doers",
         fake_introduce_watcher,
     )
 
@@ -1027,12 +1064,12 @@ def test_onboarding_failure_after_account_create_preserves_local_state_for_resum
         fake_resolve_oobi,
     )
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.witnesses.provision.register_with_witness",
-        lambda hab, witness_eid, witness_url, secret=None: {
+        "locksmith.plugins.kerifoundation.witnesses.provision.register_with_witness_async",
+        lambda hab, witness_eid, witness_url, secret=None, vault=None: asyncio.sleep(0, result={
             "eid": witness_eid,
             "totp_seed": "JBSWY3DPEHPK3PXP",
             "oobi": f"{witness_url}/oobi/{witness_eid}/controller",
-        },
+        }),
     )
 
     try:
@@ -1205,6 +1242,14 @@ def test_load_kf_surfaces_uses_local_dev_defaults(monkeypatch):
     assert surfaces.account_url == "http://127.0.0.1:9723/account"
     assert surfaces.bootstrap_url == "http://127.0.0.1:9723/bootstrap/config"
     assert surfaces.health_url == "http://127.0.0.1:9723/health"
+    monkeypatch.setenv("KF_DEV_ONBOARDING_URL", "http://127.0.0.1:9783/onboarding")
+    monkeypatch.setenv("KF_DEV_ACCOUNT_URL", "http://127.0.0.1:9783/account")
+    monkeypatch.setenv("KF_DEV_ACCOUNT_DESTINATION", "BOOT_AID")
+    surfaces = load_kf_surfaces(app)
+    assert surfaces.onboarding_url == "http://127.0.0.1:9783/onboarding"
+    assert surfaces.account_url == "http://127.0.0.1:9783/account"
+    assert surfaces.account_destination == "BOOT_AID"
+    assert surfaces.bootstrap_url == "http://127.0.0.1:9783/bootstrap/config"
 
 
 def test_load_witness_servers_uses_local_dev_defaults(monkeypatch):
@@ -1608,3 +1653,379 @@ def test_boot_client_post_cesr_surfaces_http_error_details(monkeypatch):
             attachment=b"sig",
             require_reply=False,
         )
+
+
+def test_onboarding_keeps_live_identifier_operations_on_vault_loop(tmp_path, monkeypatch):
+    owner = threading.get_ident()
+
+    class LoopOwnedClient(FakeBootClient):
+        def send_ephemeral_inception(self, hab):
+            assert threading.get_ident() == owner, 'Live identifier operation left the vault loop'
+            return super().send_ephemeral_inception(hab)
+
+        def start_onboarding(self, hab, **kwargs):
+            assert threading.get_ident() == owner, 'Live identifier operation left the vault loop'
+            return super().start_onboarding(hab, **kwargs)
+
+        def create_account(self, hab, **kwargs):
+            assert threading.get_ident() == owner, 'Live identifier operation left the vault loop'
+            return super().create_account(hab, **kwargs)
+
+        def complete_onboarding(self, hab, **kwargs):
+            assert threading.get_ident() == owner, 'Live identifier operation left the vault loop'
+            return super().complete_onboarding(hab, **kwargs)
+
+    async def resolve(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr('locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi', resolve)
+    app = FakeApp()
+    db = _make_db(tmp_path, 'loop-owned-onboarding')
+    service = KFOnboardingService(app=app, db=db, boot_client=LoopOwnedClient(),
+                                  witness_registrar=FakeWitnessRegistrar())
+    stub_rotation(service)
+    try:
+        outcome = _run(service.onboard_async(alias='my account', witness_profile_code='3-of-4'))
+        assert db.get_account().status == ACCOUNT_STATUS_ONBOARDED
+        assert outcome.account_aid == db.get_account().account_aid
+    finally:
+        db.close()
+
+
+def test_protocol_wait_runs_and_cancels_on_owning_vault_scheduler(tmp_path):
+    from hio.base import doing
+
+    app = FakeApp()
+    db = _make_db(tmp_path, 'protocol-scheduler-ownership')
+    scheduler = doing.Doist(tock=0.01)
+    scheduler.enter(doers=[])
+    app.vault.extend = scheduler.extend
+    app.vault.remove = scheduler.remove
+    owner = threading.get_ident()
+    state = {'ran': False, 'closed': False}
+    service = KFOnboardingService(app=app, db=db, boot_client=FakeBootClient(),
+                                  witness_registrar=FakeWitnessRegistrar())
+
+    def work(tymth, tock=0.0, **kwargs):
+        try:
+            state['ran'] = threading.get_ident() == owner
+            while True:
+                yield tock
+        finally:
+            state['closed'] = True
+
+    async def run():
+        task = asyncio.create_task(service._run_vault_doer(work))
+        async with asyncio.timeout(2):
+            while not state['ran']:
+                if task.done():
+                    await task
+                await asyncio.sleep(0)
+                scheduler.recur()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert state['closed']
+        assert not scheduler.deeds
+
+    try:
+        _run(run())
+    finally:
+        scheduler.exit()
+        db.close()
+
+
+def test_witness_registration_exports_and_decrypts_on_vault_loop(monkeypatch):
+    from locksmith.plugins.kerifoundation.core import remoting
+    from keri.core import coring
+
+    owner = threading.get_ident()
+    state = {'exported': False, 'decrypted': False, 'worker': False}
+
+    def export(**kwargs):
+        assert threading.get_ident() == owner
+        state['exported'] = True
+        return [b'synthetic-public-kel']
+
+    def decrypt(*, ser):
+        assert threading.get_ident() == owner
+        state['decrypted'] = True
+        return coring.Texter(raw=b'SYNTHETIC-SEED').qb64b
+
+    hab = SimpleNamespace(pre='synthetic-controller', db=SimpleNamespace(clonePreIter=export),
+                          kever=SimpleNamespace(delegated=False), decrypt=decrypt)
+
+    def post(url, **kwargs):
+        state['worker'] = threading.get_ident() != owner
+        return SimpleNamespace(raise_for_status=lambda: None,
+            json=lambda: {'totp': coring.Texter(raw=b'synthetic-ciphertext').qb64, 'oobi': 'https://example.invalid/oobi'})
+
+    monkeypatch.setattr(remoting.requests, 'post', post)
+    result = _run(remoting.register_with_witness_async(hab, 'synthetic-witness', 'https://example.invalid'))
+    assert result['totp_seed'] == 'SYNTHETIC-SEED'
+    assert state == {'exported': True, 'decrypted': True, 'worker': True}
+
+
+def test_protocol_child_failure_reaches_task_without_stopping_vault(tmp_path):
+    from hio.base import doing
+
+    app = FakeApp()
+    db = _make_db(tmp_path, 'protocol-child-failure')
+    scheduler = doing.Doist(tock=0.01)
+    state = {'healthy_ticks': 0, 'work_closed': False, 'child_closed': False}
+
+    def healthy(tymth, tock=0.0, **kwargs):
+        while True:
+            state['healthy_ticks'] += 1
+            yield tock
+
+    def broken(tymth, tock=0.0, **kwargs):
+        try:
+            yield tock
+            raise OSError('synthetic child transport failure')
+        finally:
+            state['child_closed'] = True
+
+    def work(tymth, tock=0.0, **kwargs):
+        try:
+            while True:
+                yield tock
+        finally:
+            state['work_closed'] = True
+
+    healthy_doer = doing.doify(healthy)
+    scheduler.doers = [healthy_doer]
+    scheduler.enter()
+    app.vault.extend = scheduler.extend
+    app.vault.remove = scheduler.remove
+    service = KFOnboardingService(app=app, db=db, boot_client=FakeBootClient(),
+                                  witness_registrar=FakeWitnessRegistrar())
+
+    async def run():
+        task = asyncio.create_task(service._run_vault_doer(work, children=[doing.doify(broken)]))
+        try:
+            for _ in range(50):
+                await asyncio.sleep(0.01)
+                scheduler.recur()
+                if task.done():
+                    break
+            assert task.done(), 'Child failure was not reported to the owning task'
+            with pytest.raises(OSError, match='synthetic child transport failure'):
+                await task
+            assert state['work_closed'] and state['child_closed']
+            ticks = state['healthy_ticks']
+            scheduler.recur()
+            assert state['healthy_ticks'] > ticks
+        finally:
+            if not task.done():
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+    try:
+        _run(run())
+    finally:
+        scheduler.exit()
+        db.close()
+
+
+def test_watcher_partial_startup_closes_started_transports(tmp_path, monkeypatch):
+    from hio.base import doing
+
+    app = FakeApp()
+    db = _make_db(tmp_path, 'watcher-partial-startup')
+    scheduler = doing.Doist(tock=0.01)
+    scheduler.enter()
+    app.vault.extend = scheduler.extend
+    app.vault.remove = scheduler.remove
+    state = {'opened': False, 'closed': False}
+
+    def first(tymth, tock=0.0, **kwargs):
+        state['opened'] = True
+        try:
+            while True:
+                yield tock
+        finally:
+            state['closed'] = True
+
+    def broken(tymth, tock=0.0, **kwargs):
+        raise OSError('synthetic watcher startup failure')
+        yield tock
+
+    monkeypatch.setattr('locksmith.plugins.kerifoundation.onboarding.service.watcher_introduction_doers',
+                        lambda *args, **kwargs: [doing.doify(first), doing.doify(broken)])
+    service = KFOnboardingService(app=app, db=db, boot_client=FakeBootClient(),
+                                  witness_registrar=FakeWitnessRegistrar())
+
+    async def run():
+        with pytest.raises(OSError, match='synthetic watcher startup failure'):
+            await service._introduce_account_to_watcher_async(
+                account_hab=FakeHab('account', 'synthetic-account'),
+                watcher=SimpleNamespace(eid='synthetic-watcher'), witnesses=[SimpleNamespace(
+                    eid='synthetic-witness', witness_url='http://example.invalid', oobi='')])
+        assert state == {'opened': True, 'closed': True}
+        assert not scheduler.deeds
+
+    try:
+        _run(run())
+    finally:
+        scheduler.exit()
+        db.close()
+
+
+def test_protocol_cleanup_error_still_closes_other_transports(tmp_path):
+    from hio.base import doing
+
+    app = FakeApp()
+    db = _make_db(tmp_path, 'protocol-cleanup-failure')
+    scheduler = doing.Doist(tock=0.01)
+    scheduler.enter()
+    app.vault.extend = scheduler.extend
+    app.vault.remove = scheduler.remove
+    state = {'started': False, 'first_closed': False, 'broken_closed': False}
+
+    def first(tymth, tock=0.0, **kwargs):
+        try:
+            while True:
+                yield tock
+        finally:
+            state['first_closed'] = True
+
+    def broken(tymth, tock=0.0, **kwargs):
+        try:
+            while True:
+                yield tock
+        finally:
+            state['broken_closed'] = True
+            raise OSError('synthetic transport close failure')
+
+    def work(tymth, tock=0.0, **kwargs):
+        state['started'] = True
+        while True:
+            yield tock
+
+    service = KFOnboardingService(app=app, db=db, boot_client=FakeBootClient(),
+                                  witness_registrar=FakeWitnessRegistrar())
+
+    async def run():
+        task = asyncio.create_task(service._run_vault_doer(
+            work, children=[doing.doify(first), doing.doify(broken)]))
+        await asyncio.sleep(0)
+        assert state['started']
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert state['first_closed'] and state['broken_closed']
+        assert not scheduler.deeds
+
+    try:
+        _run(run())
+    finally:
+        scheduler.exit()
+        db.close()
+
+
+@pytest.mark.parametrize("retry_status", [None, 429])
+def test_onboarding_close_during_first_start_preserves_owner_for_retry(tmp_path, monkeypatch, retry_status):
+    app = FakeApp()
+    app.vault.closed = False
+    app.vault.hby.db = SimpleNamespace(opened=True)
+    db = _make_db(tmp_path, "kf-onboarding-close-start")
+    started, release = threading.Event(), threading.Event()
+    remote = {}
+
+    class RecoveringStartClient(FakeBootClient):
+        async def start_onboarding_async(self, hab, *, vault=None, **kwargs):
+            principal = hab.name
+
+            def request():
+                if remote.get("principal", principal) != principal:
+                    raise KFBootError("A different onboarding principal owns this session", status_code=409)
+                remote["principal"] = principal
+                started.set()
+                if not release.wait(timeout=2):
+                    raise TimeoutError("Synthetic start was not released")
+                if error := remote.pop("fail_next", None):
+                    raise error
+                return None
+
+            transport = SimpleNamespace(_app=app, request_cesr=request)
+            await KFBootClient._post_cesr_async(transport, vault=vault, require_reply=False)
+            return self.start_onboarding(hab, **kwargs)
+
+    boot_client = RecoveringStartClient()
+    service = KFOnboardingService(app=app, db=db, boot_client=boot_client,
+                                  witness_registrar=FakeWitnessRegistrar())
+
+    async def close_during_start():
+        task = asyncio.create_task(service.onboard_async(alias="my account", witness_profile_code="3-of-4"))
+        async with asyncio.timeout(2):
+            while not started.is_set():
+                await asyncio.sleep(0.01)
+        app.vault.closed = True
+        app.vault.hby.db.opened = False
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    async def resolve(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr("locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi", resolve)
+    try:
+        _run(close_during_start())
+        principal = remote["principal"]
+        assert db.get_account().onboarding_auth_alias == principal
+        assert not db.get_account().onboarding_session_id
+        habs = list(app.vault.hby._by_pre.values())
+        db.close()
+        db.reopen()
+        app.vault = FakeVault(habs=habs)
+        app.vault.closed = False
+        app.vault.hby.db = SimpleNamespace(opened=True)
+        service = KFOnboardingService(app=app, db=db, boot_client=boot_client,
+                                      witness_registrar=FakeWitnessRegistrar())
+        stub_rotation(service)
+        remote["fail_next"] = (OSError("Temporary start transport failure") if retry_status is None else
+                               KFBootError("Temporary start transport failure", status_code=retry_status))
+        with pytest.raises((OSError, KFBootError), match="Temporary start transport failure"):
+            _run(service.onboard_async(alias="my account", witness_profile_code="3-of-4"))
+        assert db.get_account().onboarding_auth_alias == principal
+        with pytest.raises(KFBootError, match="saved settings"):
+            _run(service.onboard_async(alias="different account", witness_profile_code="3-of-4"))
+        assert db.get_account().account_alias == "my account"
+        with pytest.raises(KFBootError, match="saved settings"):
+            _run(service.onboard_async(alias="my account", witness_profile_code="3-of-4", account_aid="AID_OTHER"))
+        outcome = _run(service.onboard_async(alias="my account", witness_profile_code="3-of-4"))
+        assert outcome.session_id == "SESSION_1"
+        assert remote["principal"] == principal
+        assert db.get_account().status == ACCOUNT_STATUS_ONBOARDED
+        assert not db.get_account().onboarding_auth_alias
+        assert app.vault.hby.habByName(principal, ns=ONBOARDING_AUTH_NAMESPACE) is None
+    finally:
+        release.set()
+        db.close(clear=True)
+
+
+def test_first_start_admission_rejection_does_not_retain_unknown_owner(tmp_path):
+    class AdmissionLimitedClient(FakeBootClient):
+        async def start_onboarding_async(self, hab, *, vault=None, **kwargs):
+            self.principal = hab.name
+            raise KFBootError("Session admission is temporarily limited", status_code=429)
+
+    app = FakeApp()
+    db = _make_db(tmp_path, "kf-onboarding-admission-rejected")
+    boot_client = AdmissionLimitedClient()
+    service = KFOnboardingService(app=app, db=db, boot_client=boot_client,
+                                  witness_registrar=FakeWitnessRegistrar())
+    try:
+        with pytest.raises(KFBootError, match="admission"):
+            _run(service.onboard_async(alias="my account", witness_profile_code="3-of-4"))
+        record = db.get_account()
+        assert not record.onboarding_auth_alias
+        assert not record.onboarding_session_id
+        assert not record.account_aid
+        assert app.vault.hby.habByName(boot_client.principal, ns=ONBOARDING_AUTH_NAMESPACE) is None
+    finally:
+        db.close(clear=True)

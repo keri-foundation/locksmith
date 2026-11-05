@@ -16,13 +16,12 @@ from keri.app import (
     grouping,
     habbing,
     notifying,
-    oobiing,
     signaling,
 )
 from keri.core import routing as keriRouting, eventing, coring, kraming
 from keri.peer import exchanging
 
-from locksmith.core import indirecting, challenging, ipexing, registries
+from locksmith.core import indirecting, challenging, ipexing, registries, remoting
 from locksmith.core.adjudication import Watchmen, KeyStateVarianceAuthority
 from locksmith.core.configing import ENABLE_TURRET_BROWSER_PLUGIN
 from locksmith.core.grouping import CounselingCompletionDoer
@@ -54,6 +53,10 @@ class Vault(doing.DoDoer):
         """
         self.app = app
         self.hby = hby
+        # Native KRAM uses kevers.get(), which does not reload accepted state
+        # from disk. Mailboxes may deduplicate earlier KEL introductions.
+        for (pre,), _ in hby.db.states.getTopItemIter():
+            hby.kevers[pre]
         self.closed = False
         # The app closes registry and message stores before the Habery.
         self.hby.free = False
@@ -106,7 +109,7 @@ class Vault(doing.DoDoer):
         self.exchanges = decking.Deck()
 
         # OOBI manager
-        oobiery = oobiing.Oobiery(hby=hby)
+        self.oobiery = oobiery = remoting.Oobiery(hby=hby, db=self.db)
 
         # Core KERI doers
         self.receiptor = LocksmithReceiptor(hby=hby)
@@ -337,7 +340,7 @@ class NotificationToastDoer(doing.Doer):
             return f"Key state update recieved for {signer_name} moving to sequence number {sn} at {dig}"
 
         # Check if this is an IPEX notification
-        if route.startswith('/exn/ipex'):
+        if route.startswith(('/exn/ipex/', '/xip/ipex/')):
             # Try to get IPEX-specific details
             attrs = note.attrs
             said = attrs.get('d', '')
@@ -370,7 +373,7 @@ class NotificationToastDoer(doing.Doer):
                                     if isinstance(schema, dict):
                                         title = schema.get('title', title)
                                     break
-                            tip = self.vault.hby.db.exns.get((tip.sad['p'],)) if tip.sad['p'] else None
+                            tip = self.vault.hby.db.exns.get((tip.sad.get('p', ''),)) if tip.sad.get('p', '') else None
                         return f'{stage} from {sender}: {title}'
                 except Exception as e:
                     logger.warning(f"Error formatting IPEX notification: {e}")

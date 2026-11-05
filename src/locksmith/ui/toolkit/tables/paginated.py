@@ -257,6 +257,7 @@ class PaginatedTableWidget(QWidget):
         self.table.cellEntered.connect(self.table.selectRow)
         self.table.viewport().installEventFilter(self)
         self.table.cellPressed.connect(self._on_cell_clicked)
+        self.table.installEventFilter(self)
 
 
         # Header configuration
@@ -380,7 +381,7 @@ class PaginatedTableWidget(QWidget):
         inner_box.setFixedWidth(550)
         inner_box.setFixedHeight(320)
         # VBox layout for content
-        vbox = QVBoxLayout(inner_box)
+        vbox = self.empty_state_layout = QVBoxLayout(inner_box)
         vbox.setAlignment(Qt.AlignmentFlag.AlignCenter)
         vbox.setContentsMargins(40, 40, 40, 40)
         vbox.setSpacing(40)
@@ -828,6 +829,8 @@ class PaginatedTableWidget(QWidget):
 
         # Show empty state
         self.empty_state.setVisible(True)
+        if self.show_add_button:
+            self.header.add_button.setVisible(not self.empty_state.findChildren(LocksmithButton))
 
         logger.debug("Displaying empty state - no data available")
 
@@ -839,6 +842,8 @@ class PaginatedTableWidget(QWidget):
             data: List of row dictionaries
         """
         self._current_page_data = data
+        if self.show_add_button:
+            self.header.add_button.show()
         # Hide empty state and loading state, show table/pagination
         self.empty_state.setVisible(False)
         self.loading_state.setVisible(False)
@@ -1013,6 +1018,10 @@ class PaginatedTableWidget(QWidget):
 
     def eventFilter(self, source, event: QEvent) -> bool:
         """Handle events for the table viewport."""
+        if (source == self.table and event.type() == QEvent.Type.KeyPress
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)):
+            self._on_cell_clicked(self.table.currentRow(), self.table.currentColumn())
+            return True
         if source == self.table.viewport() and event.type() == QEvent.Type.Leave:
             self.table.clearSelection()
         return super().eventFilter(source, event)

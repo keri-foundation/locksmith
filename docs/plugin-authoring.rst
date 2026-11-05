@@ -4,18 +4,19 @@ Locksmith Plugin Interface
 ==========================
 
 Locksmith loads provider integrations as Python plugins. A plugin can register
-wallet pages, talk to services that operate witnesses or watchers, and keep provider-specific state.
+wallet pages, talk to services that operate witnesses, watchers, or mailboxes,
+and keep provider-specific state.
 
 The ownership boundary is:
 
 * Locksmith owns the wallet, the open vault, and the shared runtime.
 * The plugin owns its pages, provider data, and service calls.
 * Keripy is used to manage keys, events, signatures, receipts, and KERI message parsing.
-* The remote provider owns accounts and any hosted witnesses or watchers.
+* The remote provider owns accounts and any hosted witnesses, watchers, or mailboxes.
 
 The bundled KERI Foundation plugin is the working example used throughout this
-guide. It onboards an account, registers witnesses, connects a watcher, and
-keeps the provider state needed to manage those services.
+guide. It onboards an account, registers witnesses, connects a watcher, sets up
+mailboxes, and keeps the provider state needed to manage those services.
 
 This document describes the interface implemented in the current Locksmith
 source. A third-party provider can use a different service contract, account
@@ -229,6 +230,14 @@ The following optional hooks have host call sites:
 ``after_identifier_authenticated(vault, hab)``
    Run provider work after Locksmith authenticates an identifier or group.
 
+``ensure_messaging(vault, pre, retry=False)``
+   Finish receiving setup for a local identifier. Return true when this provider
+   handles the request. Retain bounded retries and stop work when the vault closes.
+
+``messaging_status(vault, pre)``
+   Return the setup status and error for an identifier managed by this provider,
+   or None. A usable local route must not conceal unfinished service publication.
+
 ``get_witness_state`` is defined on ``PluginBase`` and ``on_account_created`` is
 defined on ``AccountProviderPlugin``. Neither has a current host call site, so a
 plugin cannot depend on either one being called.
@@ -384,6 +393,42 @@ Cancelling ``asyncio.to_thread`` does not stop work already running in the
 thread. If that work may create a remote resource, the plugin must observe the
 late result and run compensating cleanup. The KF witness registrar implements
 this pattern.
+
+Current Concurrency Audit
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The standalone mailbox setup task checks the current bootstrap capability before
+creating pending setup records. Missing or false ``mailbox_enabled`` leaves account
+onboarding and local witness attachment available. The same vault-owned task
+prepares/signs bytes on the vault loop, sends
+only transport bytes through a worker, and parses replies back on that loop.
+Cancellation retains the HTTP worker until it finishes, including repeated
+cancel requests. Native OOBI work uses the captured vault scheduler. Pollers and
+credential issuance/send doers share that same scheduler; Qt advances it without
+blocking sleeps.
+
+Onboarding and hosted-witness registration use the same boundary. Their async
+client methods construct/sign requests and parse responses on the captured
+vault's loop. Workers receive prepared HTTP fields; witness-key export and
+reply decryption stay on the loop. Closed-vault responses are rejected before
+parsing or persistence. The shared ``await_owned_result`` helper waits for an
+already-started worker through repeated cancellation, then delivers any required
+late-result cleanup before propagating cancellation. The owning UI/plugin task
+keeps its vault and cleanup responsibility until that finishes.
+
+Multi-witness receipt collection and watcher introduction run native HIO doers
+on the captured vault scheduler. One operation group owns its child doers and
+contains their exceptions, reports failure to the waiting asyncio task, and
+closes its children on completion, cancellation, or timeout. A transport error
+in that group therefore does not escape into Qt's scheduler tick and stop
+unrelated vault work. Synchronous helpers remain available for synchronous
+callers; async onboarding uses the async client methods and vault scheduler.
+
+Focused regressions check live identifier calls and witness export/decryption
+on the owning loop, closed-vault replies, cancellation ownership, and child-error
+propagation while unrelated HIO work continues. These checks do not establish
+real-service onboarding, provider cutover, or a full SEDI ceremony. Those require
+separate runtime evidence with the actual service versions and persisted state.
 
 State Ownership
 ---------------

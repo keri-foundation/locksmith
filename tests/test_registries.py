@@ -246,7 +246,7 @@ def test_registry_timeout_aborts_request(wallets, service, qapp, monkeypatch):
     assert doer.result is None and doer.manager is None
 
 
-def test_registry_worker_rebuilds_requests_and_refreshes_revocation(wallets, service, qapp, request):
+def test_registry_worker_rebuilds_requests_and_refreshes_revocation(wallets, service, qapp, request, monkeypatch):
     from keri.peer import exchanging
     from locksmith.db.basing import LocksmithBaser
 
@@ -268,7 +268,8 @@ def test_registry_worker_rebuilds_requests_and_refreshes_revocation(wallets, ser
     checks = []
     receiver.signals = SimpleNamespace(emit_doer_event=lambda name, event, data: checks.append(
         (name, event, data, worker.ensure(registry.regk, holder))))
-    worker.Refresh = 0.05
+    clock = [monotonic()]
+    monkeypatch.setattr(registries, 'monotonic', lambda: clock[0])
     assert not worker.ensure(registry.regk, holder)
     assert not worker.ensure(registry.regk, holder)  # Repeated UI reads coalesce.
     runner = doing.Doist(doers=[worker], tyme=monotonic(), tock=0.0)
@@ -284,12 +285,14 @@ def test_registry_worker_rebuilds_requests_and_refreshes_revocation(wallets, ser
         _, update = registrar.issue(registry, acdc=acdc, state='revoked')
         _anchor(issuer, registry, update)
         _copy_kel(issuer, receiver)
+        clock[0] += worker.Refresh
         until(lambda: receiver.rgy.store.headEvent(registry.regk).said == update.said)
         until(lambda: worker.ensure(registry.regk, holder))
         assert [path for method, path, _ in requests if method == 'POST'].count('/') == 2
         assert any(name == 'RegistryEvidence' and event == 'status_checked' and data['success'] and fresh
                    for name, event, data, fresh in checks)
         state['respond'] = lambda method, path, body: (503, b'')
+        clock[0] += worker.Refresh
         until(lambda: registry.regk in worker.errors)
         assert any(name == 'RegistryEvidence' and event == 'status_checked' and not data['success'] and not fresh
                    for name, event, data, fresh in checks)

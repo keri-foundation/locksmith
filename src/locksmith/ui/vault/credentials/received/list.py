@@ -6,6 +6,7 @@ Received credentials list content page (displayed within VaultPage container).
 """
 from typing import Dict, Any, TYPE_CHECKING
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import QVBoxLayout, QSizePolicy
 from keri import help
@@ -14,9 +15,10 @@ from locksmith.ui import colors
 from locksmith.core import credentialing
 from locksmith.ui.vault.credentials.presentation import credential_name, identifier_name, date_label, status_label
 from locksmith.ui.toolkit.tables import PaginatedTableWidget
-from locksmith.ui.toolkit.widgets import LocksmithInvertedButton
+from locksmith.ui.toolkit.tables.components import SkewersMenuButton
 from locksmith.ui.toolkit.widgets.fields import FloatingLabelComboBox
 from locksmith.ui.vault.shared.base_list_page import BaseListPage
+from locksmith.ui.toolkit.widgets import LocksmithButton
 from locksmith.ui.vault.credentials.received.accept import AcceptCredentialDialog
 from locksmith.ui.vault.credentials.received.delete import DeleteReceivedCredentialDialog
 from locksmith.ui.vault.credentials.issued.view import ViewIssuedCredentialDialog
@@ -71,10 +73,10 @@ class ReceivedCredentialsListPage(BaseListPage):
             icon_path=self.icon_path,
             items_per_page=10,
             show_search=True,
-            show_add_button=True,
-            add_button_text="Apply for credential…",
+            show_add_button=False,
             separate_toolbar=True,
             row_actions=["View", "Offer", "View exchange history", "Delete"],
+            row_actions_callback=lambda row: (row['_actions'], self.table.row_action_icons),
             row_action_icons={
                 "View": ":/assets/material-icons/view.svg",
                 "Offer": ":/assets/material-icons/share.svg",
@@ -87,22 +89,51 @@ class ReceivedCredentialsListPage(BaseListPage):
         self.table.search_changed.connect(self._on_search)
         self.table.page_changed.connect(self._on_page_changed)
         self.table.sort_changed.connect(self._on_sort_changed)
-        self.table.add_clicked.connect(lambda: self.parent.start_credential_exchange('Apply'))
         self.table.row_action_triggered.connect(self._on_row_action)
         self.table.row_clicked.connect(self._on_row_clicked)
 
         main_layout.addWidget(self.table)
 
-        import_button = LocksmithInvertedButton('Import Grant…')
-        import_button.clicked.connect(self._on_accept_credential)
-        self.table.header.add_action_button(import_button)
+        header = self.table.header
+        header.layout().removeItem(header.toolbar_layout)
+        header.title_layout.addLayout(header.toolbar_layout)
+        header.title_label.setWordWrap(True)
+        self.request_credential = LocksmithButton('Request credential…')
+        self.request_presentation = LocksmithButton('Request presentation…')
+        self.empty_request_credential = LocksmithButton('Request credential…')
+        self.empty_request_presentation = LocksmithButton('Request presentation…')
+        empty_actions = QVBoxLayout()
+        empty_actions.setSpacing(12)
+        self.table.empty_state_layout.addLayout(empty_actions)
+        for credential_button, presentation_button, layout in (
+                (self.request_credential, self.request_presentation, header.toolbar_layout),
+                (self.empty_request_credential, self.empty_request_presentation, empty_actions)):
+            for button, intent in ((credential_button, 'issuance'), (presentation_button, 'presentation')):
+                button.setFixedHeight(47)
+                button.clicked.connect(
+                    lambda checked=False, intent=intent: self.parent.start_credential_exchange('Apply', intent=intent))
+                if layout is empty_actions:
+                    button.setFixedWidth(360)
+                    layout.addWidget(button, alignment=Qt.AlignmentFlag.AlignCenter)
+                else:
+                    layout.addWidget(button)
+
+        actions = SkewersMenuButton(actions=['Import credential from file…'])
+        actions.setFixedSize(47, 47)
+        actions.setAccessibleName('Received credential actions')
+        actions.setToolTip('More actions')
+        actions.action_triggered.connect(self._on_inventory_action)
         self.inventory = FloatingLabelComboBox('Show')
         self.inventory.addItem('Held credentials', True)
         self.inventory.addItem('Verified presentations', False)
         self.inventory.currentIndexChanged.connect(
             lambda *_: self._load_received_credentials_data(reset_page=True))
         self.table.header.search_layout.addWidget(self.inventory)
-        self.setTabOrder(self.table.header.add_button, self.inventory.combo_box)
+        self.table.header.search_layout.addWidget(actions)
+        self.setTabOrder(self.table.header.search_input.line_edit, self.inventory.combo_box)
+        self.setTabOrder(self.inventory.combo_box, actions)
+        self.setTabOrder(actions, self.request_credential)
+        self.setTabOrder(self.request_credential, self.request_presentation)
 
         logger.info("ReceivedCredentialsListPage initialized with table widget")
 
@@ -132,7 +163,8 @@ class ReceivedCredentialsListPage(BaseListPage):
                     "Accepted": date_label(credential['accepted_at']),
                     "SAID": sad['d'],
                     "_actions": (["View", "Offer", "View exchange history", "Delete"]
-                                 if credential['held'] else ["View", "View exchange history", "Delete"]),
+                                 if status.get('et') in ('issued', 'authenticated')
+                                 else ["View", "View exchange history", "Delete"]),
                 }
                 received_credentials_data.append(cred_dict)
 
@@ -141,6 +173,10 @@ class ReceivedCredentialsListPage(BaseListPage):
         except Exception as e:
             logger.exception(f"Error loading received credentials data: {e}")
             self.table.set_static_data([])
+
+    def _on_inventory_action(self, action):
+        if action == 'Import credential from file…':
+            self._on_accept_credential()
 
     def _on_accept_credential(self):
         """Handle accept credential button click."""

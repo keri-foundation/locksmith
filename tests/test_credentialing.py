@@ -189,16 +189,15 @@ def test_grant_collects_shared_sources_without_hiding_inventory_after_deletion(i
     assert {nest.serder.said for nest in nested} == {child, source, sibling, leaf_a, leaf_b}
 
     holder = app.hby.makeHab(name='holder')
-    outbox = list(app.vault.db.outbox.getTopItemIter())
-    with pytest.raises(kering.ValidationError, match='Offers for linked credentials'):
-        ipexing.start(app.vault, hab, holder.pre, 'Offer', credential_said=child)
-    assert list(app.vault.db.outbox.getTopItemIter()) == outbox
+    offered = ipexing.start(app.vault, hab, holder.pre, 'Offer', credential_said=child)
+    offer = app.hby.db.exns.get((offered,))
+    assert offer.sad['a']['o'] == [child]
+    assert offer.sad['q']['dp'] == grant.sad['q']['dp']
+    assert not exchanging.loadParsedNestedSubstreams(app.hby, offered)
     request = ipexing.start(app.vault, holder, hab.pre, 'Apply', schema=schema.said)
-    outbox = list(app.vault.db.outbox.getTopItemIter())
-    with pytest.raises(kering.ValidationError, match='Offers for linked credentials'):
-        ipexing.respond(app.vault, request, 'Offer', credential_said=child)
-    assert app.hby.db.erpy.get((request,)) is None
-    assert list(app.vault.db.outbox.getTopItemIter()) == outbox
+    offered = ipexing.respond(app.vault, request, 'Offer', credential_said=child)
+    assert app.hby.db.erpy.get((request,)).qb64 == offered
+    assert app.hby.db.exns.get((offered,)).sad['q']['dp'] == grant.sad['q']['dp']
 
     assert credentialing.delete_credential(app.vault, source)
     assert {view['sad']['d'] for view in credentialing.credentials(app.vault)} == {child, sibling, leaf_a, leaf_b}
@@ -235,24 +234,14 @@ def test_grant_preserves_compacted_retained_disclosure(ipex_vaults, hidden_issue
     _deliver_ipex(receiver.vault, issuer.replay(gvrsn=kering.Vrsn_2_0))
     _deliver_ipex(sender.vault, holder.replay(gvrsn=kering.Vrsn_2_0))
 
-    if hidden_issuee:
-        with pytest.raises(kering.ValidationError, match='Disclose the issuee block'):
-            ipexing.grant(sender.vault, issuer, said, holder.pre)
-        # Even an externally built, authenticated Grant cannot establish who
-        # holds the credential when its entire issuee block remains hidden.
-        from keri.acdc import ipexing as native
-        grant, atc = native.grant(issuer, holder.pre, 'Hidden subject', proof,
-                                  modifiers={'dp': [[[schema.said, '/', []]]]})
-        _deliver_ipex(receiver.vault, grant.raw + atc)
-        assert receiver.vault.exc.complete(grant.said)
-        with pytest.raises(kering.ValidationError, match='Disclose the issuee block'):
-            ipexing.admit(receiver.vault, holder, grant.said)
-        assert receiver.vault.db.accepted.get((said,)) is None
-        return
     grant, atc = ipexing.grant(sender.vault, issuer, said, holder.pre)
     assert grant.sad['q']['dp'] == [[[schema.said, '/', []]]]
     _deliver_ipex(receiver.vault, ipexing.prepare(sender.vault, issuer, grant, atc))
     ipexing.admit(receiver.vault, holder, grant.said)
+    view = credentialing.credential(receiver.vault, said)
+    assert view['sad'] == compact.sad
+    assert view['subject'] == (None if hidden_issuee else holder.pre)
+    assert view['held'] is (not hidden_issuee)
     presentation, atc = ipexing.grant(receiver.vault, holder, said, issuer.pre)
     stream = ipexing.prepare(receiver.vault, holder, presentation, atc)
     assert b'private-LEI' not in stream
@@ -334,6 +323,9 @@ def test_registry_free_exchange_uses_mailbox_and_retains_presentation_evidence(
 
     sender, receiver = ipex_vaults('free-sender'), ipex_vaults('free-receiver')
     issuer, holder = sender.hby.makeHab(name='issuer'), receiver.hby.makeHab(name='holder')
+    # Import reciprocal signed routes before respond() validates them.
+    _deliver_ipex(sender.vault, identifier_introduction(holder))
+    _deliver_ipex(receiver.vault, identifier_introduction(issuer))
     schema = _load_schema(sender, issuer)
     receiver.hby.db.schema.pin((schema.said,), schema)
     rules = {'d': '', 'l': 'Example terms: use only for this test.'}
@@ -364,12 +356,9 @@ def test_registry_free_exchange_uses_mailbox_and_retains_presentation_evidence(
     accepted_at = receiver.vault.db.accepted.get((said,)).accepted_at
     assert created_at and accepted_at
     assert offer.sad['a']['ax'] == agree.sad['a']['ax'] == grant.sad['a']['ax'] == [True]
-    preview, = exchanging.loadParsedNestedSubstreams(receiver.hby, offer.said)
-    assert preview.serder.said != said
-    assert preview.serder.sad['u'] == preview.serder.sad['a'] == ''
-    assert preview.serder.sad['r']['l'] == rules['l']
-    assert not any((preview.sigers, preview.cigars, preview.tsgs, preview.lsgs,
-                    preview.sscs, preview.ssts, preview.bsqs, preview.bsss))
+    assert not exchanging.loadParsedNestedSubstreams(receiver.hby, offer.said)
+    assert offer.sad['a']['o'] == [said]
+    assert rules['l'].encode() not in exchanging.serializeMessage(receiver.hby, offer.said)
     assert b'254900OPPU84GM83MG36' not in exchanging.serializeMessage(receiver.hby, offer.said)
     sender.close_vault()
     receiver.close_vault()
@@ -418,7 +407,7 @@ def test_registry_free_exchange_uses_mailbox_and_retains_presentation_evidence(
     importer.close()
 
 
-def test_imported_presentation_requires_subject_sender_and_does_not_transfer_rights(ipex_vaults, ipex_mailbox):
+def test_imported_disclosure_requires_sender_evidence_and_preserves_issuee(ipex_vaults, ipex_mailbox):
     source, receiver = ipex_vaults('subject-source'), ipex_vaults('subject-receiver')
     target = ipex_vaults('subject-verifier')
     issuer, subject = source.hby.makeHab(name='issuer'), source.hby.makeHab(name='subject')
@@ -430,11 +419,7 @@ def test_imported_presentation_requires_subject_sender_and_does_not_transfer_rig
     said = _issue(source, schema, subject, authentication='signature')
     _deliver_ipex(source.vault, identifier_introduction(reviewer))
     _deliver_ipex(receiver.vault, identifier_introduction(issuer))
-    with pytest.raises(kering.ValidationError, match='must address the credential issuee'):
-        ipexing.grant(source.vault, issuer, said, reviewer.pre)
-
-    # The actual subject may present its credential. Its outer signature needs
-    # the subject KEL; knowing only the original issuer is insufficient.
+    # The exchange needs the sender's KEL, independently of the issuer proof.
     grant, atc = ipexing.grant(source.vault, subject, said, reviewer.pre)
     stream = ipexing.prepare(source.vault, subject, grant, atc)
     _deliver_ipex(receiver.vault, stream)
@@ -446,20 +431,17 @@ def test_imported_presentation_requires_subject_sender_and_does_not_transfer_rig
     assert receiver.vault.exc.complete(grant.said)
     ipexing.admit(receiver.vault, reviewer, grant.said)
     assert not credentialing.credential(receiver.vault, said)['held']
-    with pytest.raises(kering.ValidationError, match='issuee or original issuer'):
-        ipexing.grant(receiver.vault, reviewer, said, verifier.pre)
-
-    # A second valid presentation still comes from the subject, not the reviewer.
-    presentation, atc = ipexing.grant(source.vault, subject, said, verifier.pre)
-    stream = ipexing.prepare(source.vault, subject, presentation, atc)
-    ipex_mailbox(source, target, subject, presentation, stream)
+    # A recipient may disclose the credential without becoming its issuee.
+    presentation, atc = ipexing.grant(receiver.vault, reviewer, said, verifier.pre)
+    stream = ipexing.prepare(receiver.vault, reviewer, presentation, atc)
+    ipex_mailbox(receiver, target, reviewer, presentation, stream)
     assert target.vault.exc.complete(presentation.said)
     ipexing.admit(target.vault, verifier, presentation.said)
     view = credentialing.credential(target.vault, said)
     assert view['status']['et'] == 'authenticated'
     assert view['sad']['i'] == issuer.pre
     assert view['sad']['a']['i'] == subject.pre
-    assert view['sender'] == subject.pre
+    assert view['sender'] == reviewer.pre
     assert view['recipient'] == verifier.pre
     assert subject.pre in target.hby.kevers
     assert not view['held']
@@ -467,6 +449,7 @@ def test_imported_presentation_requires_subject_sender_and_does_not_transfer_rig
 
 @pytest.mark.parametrize('authentication', ['anchor', 'signature'])
 def test_issuer_rotation_rechecks_new_acceptance_and_preserves_committed_receipts(ipex_vaults, authentication):
+    from keri.core import parsing
     from keri.peer import exchanging
 
     sender, receiver = ipex_vaults('rotation-sender'), ipex_vaults('rotation-receiver')
@@ -474,6 +457,10 @@ def test_issuer_rotation_rechecks_new_acceptance_and_preserves_committed_receipt
     schema = _load_schema(sender, issuer)
     receiver.hby.db.schema.pin((schema.said,), schema)
     said = _issue(sender, schema, holder, authentication=authentication)
+    proof = sender.vault.db.issued.get((said,)).stream.encode()
+    nest, = parsing.Parser().parse(ims=bytearray(proof), processive=False, version=kering.Vrsn_2_0)
+    with pytest.raises(kering.MissingChainError):
+        credentialing.authentication(receiver.vault, nest)
     _deliver_ipex(sender.vault, holder.replay(gvrsn=kering.Vrsn_2_0))
     _deliver_ipex(receiver.vault, issuer.replay(gvrsn=kering.Vrsn_2_0))
     grants = []
@@ -540,7 +527,7 @@ def test_retained_graph_rechecks_linked_issuer_evidence(ipex_vaults):
     receiver.hby.db.schema.pin((schema.said,), schema)
     source = _issue(sender, schema, holder, authentication='signature')
     origin = _issue(sender, schema, holder, authentication='anchor', edges={
-        'source': {'n': source, 's': schema.said}})
+        'source': {'n': source, 's': schema.said, 'o': 'NI2I'}})
     _deliver_ipex(sender.vault, identifier_introduction(holder))
     _deliver_ipex(receiver.vault, identifier_introduction(issuer))
     grants = []
@@ -553,15 +540,17 @@ def test_retained_graph_rechecks_linked_issuer_evidence(ipex_vaults):
     ipexing.admit(receiver.vault, holder, grants[0].said)
     assert receiver.vault.db.accepted.get((source,)) is None
     assert ipexing.grant(receiver.vault, holder, origin, issuer.pre)[0].route == '/ipex/grant'
-    with pytest.raises(kering.ValidationError, match='Offers for linked credentials'):
-        ipexing.start(receiver.vault, holder, issuer.pre, 'Offer', credential_said=origin)
+    offered = ipexing.start(receiver.vault, holder, issuer.pre, 'Offer', credential_said=origin)
+    assert not exchanging.loadParsedNestedSubstreams(receiver.hby, offered)
     apply = ipexing.start(sender.vault, issuer, holder.pre, 'Apply', schema=schema.said)
     _deliver_ipex(receiver.vault, exchanging.serializeMessage(sender.hby, apply))
-    with pytest.raises(ValueError, match='agreed disclosure plan'):
+    before = list(receiver.vault.db.outbox.getTopItemIter())
+    with pytest.raises(kering.ValidationError, match='protocol verification'):
         ipexing.respond(receiver.vault, apply, 'Grant', credential_said=origin)
-    with pytest.raises(kering.ValidationError, match='Offers for linked credentials'):
-        ipexing.respond(receiver.vault, apply, 'Offer', credential_said=origin)
-    assert receiver.hby.db.erpy.get((apply,)) is None
+    assert list(receiver.vault.db.outbox.getTopItemIter()) == before
+    offered = ipexing.respond(receiver.vault, apply, 'Offer', credential_said=origin)
+    assert receiver.hby.db.erpy.get((apply,)).qb64 == offered
+    assert receiver.hby.db.exns.get((offered,)).sad['a']['o'] == [origin]
     # Explicit presentation still verifies and carries the original graph.
     presentation, atc = ipexing.grant(receiver.vault, holder, origin, issuer.pre)
     _deliver_ipex(sender.vault, ipexing.prepare(receiver.vault, holder, presentation, atc))
@@ -942,6 +931,8 @@ def test_witnessed_five_stage_exchange_over_http_and_reopen(ipex_vaults, anchore
                     assert len(app.hby.db.wigs.get((hab.pre, hab.kever.serder.said))) == 1
                 finally:
                     receipts.exit()
+                # This test service also serves an explicitly authorized mailbox.
+                _deliver_ipex(app.vault, hab.makeEndRole(eid=witness.pre, role=kering.Roles.mailbox))
             _deliver_ipex(issuer_app.vault, identifier_introduction(holder))
             _deliver_ipex(holder_app.vault, identifier_introduction(issuer))
             schema = _load_schema(issuer_app, issuer)

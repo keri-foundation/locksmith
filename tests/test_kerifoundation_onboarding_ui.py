@@ -395,14 +395,15 @@ class TestOnboardingPhases:
         finally:
             db.close()
 
-    def test_failed_record_with_saved_session_shows_resume_message(self, qapp, tmp_path):
+    @pytest.mark.parametrize("session_id", ["SESSION_1", ""])
+    def test_failed_record_with_pending_owner_shows_resume_message(self, qapp, tmp_path, session_id):
         record = KFAccountRecord(
             account_alias="resume-account",
             status=ACCOUNT_STATUS_FAILED,
             witness_profile_code="1-of-1",
             witness_count=1,
             toad=1,
-            onboarding_session_id="SESSION_1",
+            onboarding_session_id=session_id,
             onboarding_auth_alias="kf-onboarding-auth",
         )
         page, db = _make_page(tmp_path, record=record)
@@ -412,8 +413,10 @@ class TestOnboardingPhases:
             assert page.phase == PHASE_REVIEW
             assert not page._progress_section.isHidden()
             assert page._progress_badge.text() == "FAILED"
-            assert "Local progress is preserved" in page._progress_status.text()
-            assert "resume the saved session" in page._progress_status.text()
+            status = page._progress_status.text().lower()
+            assert "preserved" in status
+            assert "resume" in status
+            assert "abandon" not in status
             assert page._confirm_btn.isEnabled()
         finally:
             db.close()
@@ -542,6 +545,55 @@ class TestOnboardingResume:
 
 
 class TestOnboardingConfirm:
+    @pytest.mark.parametrize("status", [ACCOUNT_STATUS_PENDING_ONBOARDING, ACCOUNT_STATUS_FAILED])
+    @pytest.mark.parametrize("choice", ["alias", "profile", "account"])
+    def test_confirm_preserves_pending_owner_settings(self, qapp, tmp_path, status, choice):
+        saved = FakeHab("saved-account", "AID_SAVED")
+        other = FakeHab("other-account", "AID_OTHER")
+        app = FakeApp(habs=[saved, other])
+        record = KFAccountRecord(
+            account_aid=saved.pre,
+            account_alias=saved.name,
+            status=status,
+            witness_profile_code="1-of-1",
+            witness_count=1,
+            toad=1,
+            onboarding_auth_alias="kf-pending-owner",
+        )
+        page, db = _make_page(tmp_path, record=record, app=app)
+        try:
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
+            requested = (saved.name, "1-of-1", saved.pre)
+            if choice == "alias":
+                page._aid_selector.setCurrentIndex(0)
+                page._alias_input.setText("edited-account")
+                requested = ("edited-account", "1-of-1", "")
+            elif choice == "profile":
+                page._panel_3of4.setChecked(True)
+                requested = (saved.name, "3-of-4", saved.pre)
+            else:
+                page._select_existing_account_aid(other.pre)
+                requested = (other.name, "1-of-1", other.pre)
+            received = []
+            page.confirm_requested.connect(lambda alias, profile, aid: received.append((alias, profile, aid)))
+
+            page._on_confirm_clicked()
+
+            pending = db.get_account()
+            assert pending.account_aid == saved.pre
+            assert pending.account_alias == saved.name
+            assert pending.witness_profile_code == "1-of-1"
+            assert pending.witness_count == 1
+            assert pending.toad == 1
+            assert pending.onboarding_auth_alias == "kf-pending-owner"
+            assert not pending.onboarding_session_id
+            assert pending.status == status
+            alias, profile, requested_aid = requested
+            assert received == [(alias, profile, requested_aid or saved.pre)]
+        finally:
+            db.close()
+
     def test_confirm_persists_choices(self, qapp, tmp_path):
         page, db = _make_page(tmp_path)
         try:

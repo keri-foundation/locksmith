@@ -404,10 +404,18 @@ class LocksmithCheckbox(QCheckBox):
             parent: Parent widget.
         """
         super().__init__(text, parent)
+        self.setMinimumHeight(36)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setStyleSheet(f"""
             QCheckBox {{
                 color: {colors.RADIO_BUTTON};
                 spacing: 6px;
+                border: 2px solid transparent;
+                padding: 2px;
+            }}
+            QCheckBox:focus {{
+                border: 2px solid {colors.TEXT_PRIMARY};
+                border-radius: 4px;
             }}
             QCheckBox::indicator {{
                 width: 18px;

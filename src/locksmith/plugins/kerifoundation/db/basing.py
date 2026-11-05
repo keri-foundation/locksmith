@@ -83,6 +83,20 @@ class AttachedIdentifierRecord:
     attached_at: str = ""
 
 
+@dataclass
+class MailboxRecord:
+    """Account allocation and recoverable local mailbox setup state."""
+
+    account_aid: str = ""
+    mailbox_id: str = ""
+    eid: str = ""
+    url: str = ""
+    status: str = "pending"
+    error: str = ""
+    attempts: int = 0
+    retry_at: float = 0.0
+
+
 class KFBaser(dbing.LMDBer):
     """LMDB database for KERI Foundation plugin."""
 
@@ -113,6 +127,7 @@ class KFBaser(dbing.LMDBer):
         self.attachedIdentifiers = koming.Komer(
             db=self, subkey='idn.', klas=AttachedIdentifierRecord
         )
+        self.mailboxes = koming.Komer(db=self, subkey='mbx.', klas=MailboxRecord)
 
         return self.env
 

@@ -4,14 +4,19 @@ locksmith.ui.vault.identifiers.view module
 
 Dialog for viewing identifier details
 """
+import asyncio
+
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QHBoxLayout
+    QApplication, QWidget, QVBoxLayout, QLabel, QHBoxLayout
 )
 from keri import help
 
 from locksmith.core import habbing
+from locksmith.core.messaging import ensure_receiving, receiving_ready
+from locksmith.ui.vault.shared.messaging import prepare_messaging
+from locksmith.ui.toolkit.widgets.collapsible import CollapsibleSection
 from locksmith.core.indirecting import receiving_endpoints
 from locksmith.ui import colors
 from locksmith.ui.toolkit.widgets import (
@@ -67,6 +72,9 @@ class ViewIdentifierDialog(IdentifierViewSectionsMixin, LocksmithDialog):
         layout.addWidget(self.receiving_status)
         self.share_button = LocksmithInvertedButton('Share introduction')
         layout.addWidget(self.share_button)
+        self.copy_link_button = LocksmithInvertedButton('Copy contact link')
+        self.copy_link_button.clicked.connect(self._copy_contact_link)
+        layout.addWidget(self.copy_link_button)
 
         # Key Event Log Section
         self._build_kel_section(layout)
@@ -77,9 +85,21 @@ class ViewIdentifierDialog(IdentifierViewSectionsMixin, LocksmithDialog):
         # Resubmit Section (from mixin)
         self._build_resubmit_section(layout, self.details)
 
-        # OOBI Section (if witnesses exist)
-        if len(self.details['witnesses']) > 0:
-            self._build_oobi_section(layout)
+        self.connection_section = CollapsibleSection(title='Connection details', parent=content_widget)
+        connection_layout = QVBoxLayout()
+        self.connection_details = QLabel()
+        self.connection_details.setWordWrap(True)
+        connection_layout.addWidget(self.connection_details)
+        self.retry_connection = LocksmithInvertedButton('Retry connection')
+        self.retry_connection.clicked.connect(self._retry_connection)
+        connection_layout.addWidget(self.retry_connection)
+        self.export_available = LocksmithInvertedButton('Export available introduction')
+        self.export_available.clicked.connect(lambda: export_identifier_to_cesr(
+            self, self.app, self.identifier_alias, require_messaging=False))
+        connection_layout.addWidget(self.export_available)
+        self._build_oobi_section(connection_layout)
+        self.connection_section.set_content_layout(connection_layout)
+        layout.addWidget(self.connection_section)
 
         # Refresh Key State Section (for group multisig)
         if self.details['is_group_multisig']:
@@ -126,6 +146,8 @@ class ViewIdentifierDialog(IdentifierViewSectionsMixin, LocksmithDialog):
         self.status_timer.timeout.connect(self._refresh_receiving)
         self.status_timer.start(1000)
         self.finished.connect(self.status_timer.stop)
+        self._connection_task = None
+        self.finished.connect(self._cancel_connection)
         self._refresh_receiving()
 
         # Connect to vault signal bridge if available
@@ -140,12 +162,52 @@ class ViewIdentifierDialog(IdentifierViewSectionsMixin, LocksmithDialog):
             self.share_button.setEnabled(False)
             return
         endpoints = receiving_endpoints(self.hab)
-        pollers = [poller for poller in self.vault.mbx.pollers if poller.pre == self.hab.pre]
-        errors = [poller.error for poller in pollers if poller.error]
-        text = ('Receiving is not configured' if not endpoints else
-                'Receiving needs attention: ' + errors[0] if errors else
-                f'Receiving through {len(endpoints)} configured mailbox endpoints')
-        self.receiving_status.setText(text)
+        states = [state for _, state in self.vault.db.connections.getTopItemIter(keys=(self.hab.pre,))]
+        errors = [state.error for state in states if state.error]
+        ready = receiving_ready(self.vault, self.hab)
+        manager = getattr(self.vault, 'plugin_manager', None)
+        setup = manager.messaging_status(self.vault, self.hab.pre) if manager else None
+        if setup and setup[1]:
+            errors.append(setup[1])
+        self.receiving_status.setText('Messaging needs attention' if errors else
+                                     'Messaging ready' if ready else 'Setting up messaging')
+        details = ([f'Setup: {setup[0]}. {setup[1]}'] if setup else [])
+        details.extend(f'Endpoint: {eid}' for eid in sorted(endpoints))
+        details.extend(f'{state.error} (attempts: {state.attempts}/4)' for state in states if state.error)
+        self.connection_details.setText('\n'.join(details) or 'No receiving address is configured.')
+
+    def _cancel_connection(self, *_):
+        if self._connection_task is not None:
+            self._connection_task.cancel()
+
+    def _retry_connection(self):
+        if self._connection_task is not None:
+            return
+        async def retry():
+            self.retry_connection.setEnabled(False)
+            try:
+                await ensure_receiving(self.vault, self.hab, retry=True)
+                self.vault.mbx.retry_receiving(self.hab.pre)
+                self._generate_oobi('mailbox')
+                self._refresh_receiving()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.receiving_status.setText(str(exc))
+            finally:
+                self._connection_task = None
+                self.retry_connection.setEnabled(True)
+        self._connection_task = asyncio.get_running_loop().create_task(retry())
+
+    def _copy_contact_link(self):
+        if prepare_messaging(self, self.app, self.hab, self._copy_contact_link, self.show_error):
+            return
+        result = habbing.generate_oobi(self.app, self.hab, role='mailbox')
+        if result['success']:
+            QApplication.clipboard().setText(result['oobi'])
+            self.show_success('Contact link copied')
+        else:
+            self.show_error('No mailbox link is available. Share the introduction file instead.')
 
     def _share_introduction(self):
         if self.app.vault is self.vault and not getattr(self.vault, 'closed', False):

@@ -32,7 +32,7 @@ OOBI_RE = re.compile(r'\A/oobi/(?P<cid>[^/]+)(?:/(?P<role>[^/]+)(?:/(?P<eid>[^/]
 
 class AddRemoteIdentifierDialog(LocksmithDialog):
     """Dialog for connecting a remote identifier."""
-    def __init__(self, app, parent=None):
+    def __init__(self, app, parent=None, *, expected_pre=None):
         """
         Initialize the AddRemoteIdentifierDialog.
 
@@ -41,6 +41,7 @@ class AddRemoteIdentifierDialog(LocksmithDialog):
             parent: Parent widget
         """
         self.app = app
+        self.expected_pre = expected_pre
 
         # Create content widget
         content_widget = QWidget()
@@ -250,6 +251,10 @@ class AddRemoteIdentifierDialog(LocksmithDialog):
         alias = self.alias_field.text().strip()
         prefix = self.prefix_field.text().strip()
 
+        if self.expected_pre and prefix != self.expected_pre:
+            self.show_error('This introduction belongs to a different identifier.')
+            return False
+
         # Reset field styles
         self.alias_field.setProperty("error", False)
         self.alias_field.style().unpolish(self.alias_field)
@@ -311,6 +316,7 @@ class AddRemoteIdentifierDialog(LocksmithDialog):
             app=self.app,
             pre=prefix,
             oobi=oobi,
+            force=True,
             alias=alias,
             signal_bridge=self.app.vault.signals if hasattr(self.app.vault, 'signals') else None
         )
@@ -368,6 +374,13 @@ class AddRemoteIdentifierDialog(LocksmithDialog):
         Args:
             data: Success data from doer
         """
+        if data.get('pre') != self.prefix_field.text().strip():
+            return
+        from locksmith.core.ipexing import _reachable
+        hab = next(iter(self.app.vault.hby.habs.values()), None)
+        if hab is not None and not _reachable(hab, data['pre']):
+            self._on_failure('Contact saved, but no messaging address was supplied. Import an updated introduction.')
+            return
         alias = data.get('alias', 'Unknown')
         logger.info(f"Successfully connected remote identifier: {alias}")
 

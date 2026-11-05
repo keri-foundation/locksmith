@@ -1,8 +1,7 @@
 Locksmith Documentation
 =======================
 
-These guides cover local Locksmith development and the provider plugin
-interface, including the bundled KERI Foundation implementation.
+These guides cover credential exchange, local development, and provider plugins.
 
 .. toctree::
    :maxdepth: 2
@@ -10,5 +9,6 @@ interface, including the bundled KERI Foundation implementation.
 
    developer-guide
    credential-exchange
+   proofing
    plugin-authoring
    kerifoundation-plugin

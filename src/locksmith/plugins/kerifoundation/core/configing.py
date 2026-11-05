@@ -190,6 +190,11 @@ def load_kf_surfaces(app: Any) -> KFSurfaceConfig:
     env_name = getattr(environment, "value", str(environment or "")).lower()
 
     try:
-        return KF_SURFACES_BY_ENV[env_name]
+        defaults = KF_SURFACES_BY_ENV[env_name]
     except KeyError as exc:
-        raise ValueError(f"Unknown environment: {env_name}")
+        raise ValueError(f"Unknown environment: {env_name}") from exc
+    prefix = {"development": "KF_DEV", "staging": "KF_STAGING", "production": "KF_PROD"}[env_name]
+    return KFSurfaceConfig(**{
+        name: os.environ.get(f"{prefix}_{name.upper()}", getattr(defaults, name)).strip()
+        for name in ("onboarding_url", "account_url", "onboarding_destination", "account_destination")
+    })

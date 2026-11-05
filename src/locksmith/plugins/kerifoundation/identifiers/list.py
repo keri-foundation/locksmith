@@ -7,7 +7,7 @@ hosted witnesses.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 from keri import help
 
@@ -36,17 +36,21 @@ def _shrink_empty_state_title(table: PaginatedTableWidget, font_size: int = 20):
 
 class IdentifierListPage(QWidget):
     add_witnesses_requested = Signal(str)
+    mailbox_requested = Signal(str)
 
     def __init__(self, app=None, parent=None):
         super().__init__(parent)
         self._app = app
         self._db = None
+        self._mailbox_enabled = None
+        self._mailbox_busy = False
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._setup_ui()
 
     def set_db(self, db):
         self._db = db
         if db is None:
+            self.set_mailbox_state()
             self._table.set_static_data([])
 
     def _setup_ui(self):
@@ -54,15 +58,21 @@ class IdentifierListPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        self._mailbox_notice = QLabel()
+        self._mailbox_notice.setWordWrap(True)
+        self._mailbox_notice.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(self._mailbox_notice)
+
         self._table = PaginatedTableWidget(
-            columns=["Alias", "Prefix", "Seq No.", "Witnesses"],
+            columns=["Alias", "Prefix", "Seq No.", "Witnesses", "Mailbox"],
             title="KERI Foundation Identifiers",
             icon_path=":/assets/custom/identifiers.png",
             show_search=True,
             show_add_button=True,
             add_button_text="Add Identifier",
             items_per_page=10,
-            row_actions=["Add Witnesses"],
+            row_actions=["Add Witnesses", "Retry Mailbox"],
+            row_actions_callback=self._row_actions,
             row_action_icons={"Add Witnesses": ":/assets/material-icons/witness1.svg"},
             monospace_columns=["Prefix"],
         )
@@ -70,6 +80,29 @@ class IdentifierListPage(QWidget):
         self._table.add_clicked.connect(self._on_add_identifier_clicked)
         self._table.row_action_triggered.connect(self._on_row_action)
         layout.addWidget(self._table)
+
+    def set_mailbox_state(self, *, enabled=None, busy=False, error=""):
+        self._mailbox_enabled, self._mailbox_busy = enabled, busy
+        if error:
+            notice = f"Could not check mailbox availability: {error}. Try again from this page."
+        elif busy:
+            notice = "Setting up mailboxes…" if enabled is True else "Checking mailbox availability…"
+        elif enabled is False:
+            notice = "This service does not offer mailboxes. You can still add identifiers for hosted witnesses."
+        else:
+            notice = ""
+        self._mailbox_notice.setText(notice)
+        self._mailbox_notice.setVisible(bool(notice))
+        self._table.header.add_button.setEnabled(not busy)
+        for button in self._table.empty_state.findChildren(LocksmithButton):
+            button.setEnabled(not busy)
+        self.on_show()
+
+    def _row_actions(self, row):
+        actions = ["Add Witnesses"]
+        if not self._mailbox_busy and self._mailbox_enabled is not False:
+            actions.append("Retry Mailbox")
+        return actions, {"Add Witnesses": ":/assets/material-icons/witness1.svg"}
 
     def on_show(self):
         self._table.set_static_data(self._build_rows())
@@ -80,16 +113,34 @@ class IdentifierListPage(QWidget):
 
         rows = []
         hby = self._app.vault.hby
-        for prefix in self._db.list_attached_identifier_prefixes():
+        prefixes = set(self._db.list_attached_identifier_prefixes())
+        prefixes.update(prefix for (prefix,), _ in self._db.mailboxes.getTopItemIter())
+        account = self._db.get_account()
+        if account is not None and account.account_aid:
+            prefixes.add(account.account_aid)
+        for prefix in sorted(prefixes):
             hab = hby.habByPre(prefix)
             if hab is None:
                 continue
+            mailbox = self._db.mailboxes.get(keys=(prefix,))
+            status = {"active": "Ready", "pending": "Setting up", "failed": "Setup failed"}
+            mailbox_text = status.get(mailbox.status, mailbox.status) if mailbox else "Not set up"
+            if not mailbox or mailbox.status != "active":
+                if self._mailbox_enabled is False:
+                    mailbox_text = "Setup paused" if mailbox else "Not offered"
+                elif self._mailbox_enabled is None:
+                    mailbox_text = "Setup paused" if mailbox else "Availability unknown"
+            if mailbox and mailbox.error:
+                mailbox_text += f": {mailbox.error}"
+                if not self._mailbox_busy and self._mailbox_enabled is not False:
+                    mailbox_text += " (use Retry Mailbox)"
             rows.append(
                 {
                     "Alias": hab.name,
                     "Prefix": prefix,
                     "Seq No.": hab.kever.sn if hab and hab.kever else "N/A",
                     "Witnesses": len(hab.kever.wits) if hab and hab.kever else "N/A",
+                    "Mailbox": mailbox_text,
                 }
             )
 
@@ -99,10 +150,13 @@ class IdentifierListPage(QWidget):
         if not self._app or self._db is None:
             return []
 
+        account = self._db.get_account()
         return [
             (alias, prefix)
             for alias, prefix in iter_local_identifier_choices(self._app)
             if not self._db.is_identifier_attached(prefix)
+            and self._db.mailboxes.get(keys=(prefix,)) is None
+            and (account is None or prefix != account.account_aid)
         ]
 
     def _choose_identifier_prefix(self) -> str:
@@ -150,17 +204,21 @@ class IdentifierListPage(QWidget):
         return selector.currentData() or ""
 
     def _on_add_identifier_clicked(self):
-        if self._db is None:
+        if self._db is None or self._mailbox_busy:
             return
 
         prefix = self._choose_identifier_prefix()
         if not prefix:
             return
 
-        self._db.attach_identifier(prefix)
-        self._table.set_static_data(self._build_rows())
+        self.mailbox_requested.emit(prefix)
 
     def _on_row_action(self, row_data, action):
+        if action == "Retry Mailbox":
+            if self._mailbox_busy or self._mailbox_enabled is False:
+                return
+            self.mailbox_requested.emit(row_data["Prefix"])
+            return
         if action != "Add Witnesses":
             return
 

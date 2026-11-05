@@ -5,7 +5,10 @@ locksmith.plugins.kerifoundation.core.remoting module
 HTTP clients for provisioning and registering controller AIDs with
 KERI Foundation witnesses.
 """
+import asyncio
 from urllib.parse import urljoin
+
+from locksmith.core.tasking import await_owned_result
 
 import requests
 from keri import help, kering
@@ -42,27 +45,7 @@ def provision_witness(hab_pre, boot_url):
     return {"eid": eid, "oobi": oobi}
 
 
-def register_with_witness(hab, witness_eid, witness_url, secret=None):
-    """Register a controller AID with a witness via POST /aids.
-
-    Sends the controller's KEL to the witness. The witness returns an
-    encrypted TOTP seed that only the controller can decrypt.
-
-    Args:
-        hab: Habery instance for the controller identifier
-        witness_eid: Witness AID (prefix) to register with
-        witness_url: Base URL of the witness server
-        secret: Optional shared secret (base32 str) for batch mode.
-                If provided, all witnesses in the batch use this secret.
-                If None, the witness generates its own secret.
-
-    Returns:
-        dict with keys: totp_seed (str), oobi (str), eid (str)
-
-    Raises:
-        requests.HTTPError: If the witness returns a non-200 response
-        ValueError: If the response is missing expected fields
-    """
+def _witness_registration_fields(hab, witness_eid, secret):
     kel = bytearray()
     for msg in hab.db.clonePreIter(pre=hab.pre, gvrsn=kering.Version):
         kel.extend(msg)
@@ -81,19 +64,19 @@ def register_with_witness(hab, witness_eid, witness_url, secret=None):
 
     headers = {CESR_DESTINATION_HEADER: witness_eid}
 
-    url = urljoin(witness_url, "/aids")
-    logger.info(f"Registering {hab.pre[:12]}... with witness {witness_eid[:12]}... at {url}")
+    return fargs, headers
 
-    # POST multipart/form-data (requests sets Content-Type automatically)
+
+def _request_witness_registration(witness_eid, witness_url, fargs, headers):
     response = requests.post(
-        url,
-        files={k: (None, v) for k, v in fargs.items()},
-        headers=headers,
-        timeout=30,
+        urljoin(witness_url, "/aids"), files={k: (None, v) for k, v in fargs.items()},
+        headers=headers, timeout=30,
     )
     response.raise_for_status()
+    return response.json()
 
-    data = response.json()
+
+def _witness_registration_result(hab, witness_eid, data):
     if "totp" not in data:
         raise ValueError(f"Witness response missing 'totp' field: {data}")
 
@@ -109,6 +92,25 @@ def register_with_witness(hab, witness_eid, witness_url, secret=None):
         "oobi": data.get("oobi", ""),
         "eid": witness_eid,
     }
+
+def register_with_witness(hab, witness_eid, witness_url, secret=None):
+    """Synchronous registration for callers that own the identifier's thread."""
+    fargs, headers = _witness_registration_fields(hab, witness_eid, secret)
+    data = _request_witness_registration(witness_eid, witness_url, fargs, headers)
+    return _witness_registration_result(hab, witness_eid, data)
+
+
+async def register_with_witness_async(hab, witness_eid, witness_url, secret=None, *, vault=None):
+    """Export/decrypt on the vault loop and run only multipart HTTP in a worker."""
+    if vault is not None and getattr(vault, "closed", False):
+        raise asyncio.CancelledError
+    fargs, headers = _witness_registration_fields(hab, witness_eid, secret)
+    data = await await_owned_result(asyncio.to_thread(
+        _request_witness_registration, witness_eid, witness_url, fargs, headers,
+    ))
+    if vault is not None and getattr(vault, "closed", False):
+        raise asyncio.CancelledError
+    return _witness_registration_result(hab, witness_eid, data)
 
 
 def deprovision_witness(eid: str, boot_url: str) -> bool:

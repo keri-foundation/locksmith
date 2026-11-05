@@ -193,7 +193,7 @@ class AcceptGrantDialog(LocksmithDialog):
         names.setStyleSheet(f'color: {colors.TEXT_SECONDARY};')
         layout.addWidget(names)
         notice = QLabel('Review the values below before adding this credential.\n' + (
-                        'Adding it exports a receipt. No acknowledgment is sent.' if self.save else
+                        'Adding it exports a receipt for your records.' if self.save else
                         f'Adding it confirms receipt to {sender}.'))
         notice.setTextFormat(Qt.TextFormat.PlainText)
         notice.setWordWrap(True)

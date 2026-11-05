@@ -13,6 +13,14 @@ uv run --locked python -m locksmith.main
 See the [developer guide](docs/developer-guide.rst) for tests, dependency updates,
 and asset generation.
 
+Use the checked-in lockfile to install the pinned keripy source and its matching
+dependencies. KF account onboarding works with Boot services that do not offer
+mailboxes. Mailbox setup starts only when Boot advertises it in bootstrap config;
+see the [KF plugin guide](docs/kerifoundation-plugin.rst) for provider configuration.
+
+To send a credential between two wallets, follow the
+[credential exchange guide](docs/credential-exchange.rst).
+
 ## To run with local witness, watchers
 
 ### in witness-hk

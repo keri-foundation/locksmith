@@ -21,7 +21,8 @@ from locksmith.core.configing import ENABLE_TURRET_BROWSER_PLUGIN, LocksmithConf
 from locksmith.ui import colors
 from locksmith.ui.styles import get_monospace_font_family
 from locksmith.ui.toolkit.widgets.buttons import LocksmithButton, LocksmithIconButton, LocksmithRadioButton, LocksmithCopyButton
-from locksmith.ui.toolkit.widgets.fields import FloatingLabelLineEdit
+from locksmith.ui.toolkit.widgets.collapsible import CollapsibleSection
+from locksmith.ui.toolkit.widgets.fields import FloatingLabelLineEdit, LocksmithLineEdit
 from locksmith.ui.toolkit.widgets.toggle import ToggleSwitch
 from locksmith.ui.vault.settings.delete_dialog import DeleteVaultDialog
 
@@ -103,23 +104,44 @@ class SettingsPage(QWidget):
         logger.info("SettingsPage initialized")
 
     def _create_registry_section(self, layout):
-        layout.addWidget(QLabel('Credential status services'))
-        description = QLabel('Publish issuer registry updates to a registrar. Check received credential status '
-                             'through an observer. These settings apply to this vault.')
+        section = self.registry_section = CollapsibleSection(title='Advanced credential services')
+        body = QVBoxLayout(section.content_area)
+        body.setContentsMargins(20, 12, 20, 20)
+        body.setSpacing(16)
+        description = QLabel('Configure registry publication and status checks for this vault. '
+                             'Only needed for credentials that use a registry.')
         description.setWordWrap(True)
-        layout.addWidget(description)
-        self.registrar_url = FloatingLabelLineEdit('Registrar publication URL')
-        self.observer_url = FloatingLabelLineEdit('Observer URL')
-        layout.addWidget(self.registrar_url)
-        layout.addWidget(self.observer_url)
+        body.addWidget(description)
+        self.registrar_url = LocksmithLineEdit()
+        self.observer_url = LocksmithLineEdit()
+        for title, field, hint in (
+            ('Registrar URL', self.registrar_url, 'Publishes issuer registry updates.'),
+            ('Observer URL', self.observer_url, 'Checks credential status before sending or accepting credentials.'),
+        ):
+            field_layout = QVBoxLayout()
+            field_layout.setSpacing(6)
+            label = QLabel(title)
+            label.setBuddy(field)
+            field.setAccessibleName(title)
+            field.setAccessibleDescription(hint)
+            field_layout.addWidget(label)
+            field_layout.addWidget(field)
+            help_text = QLabel(hint)
+            help_text.setWordWrap(True)
+            help_text.setStyleSheet(f'color: {colors.TEXT_SECONDARY}; font-size: 12px;')
+            field_layout.addWidget(help_text)
+            body.addLayout(field_layout)
         self.registry_notice = QLabel()
         self.registry_notice.setWordWrap(True)
-        layout.addWidget(self.registry_notice)
-        save = LocksmithButton('Save status services')
+        self.registry_notice.hide()
+        body.addWidget(self.registry_notice)
+        save = LocksmithButton('Save service URLs')
         save.clicked.connect(self._save_registry_services)
-        layout.addWidget(save)
+        body.addWidget(save, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(section)
 
     def _save_registry_services(self):
+        self.registry_notice.show()
         vault = self.app.vault if self.app else None
         if vault is None or vault.closed:
             self.registry_notice.setText('Open a vault first.')
@@ -670,6 +692,8 @@ class SettingsPage(QWidget):
         self.registrar_url.setText(services.get('registrar', ''))
         self.observer_url.setText(services.get('observer', ''))
         self.registry_notice.clear()
+        self.registry_notice.hide()
+        self.registry_section.toggle_button.setChecked(False)
 
         # Load existing browser plugin settings if available
         if ENABLE_TURRET_BROWSER_PLUGIN and self.app and self.app.vault and self.app.vault.pluginSettings:

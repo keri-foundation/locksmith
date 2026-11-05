@@ -74,6 +74,7 @@ class IssuedCredentialsListPage(BaseListPage):
             show_add_button=True,
             add_button_text="Issue Credential",
             row_actions=["View", "Offer", "Grant", "View exchange history", "Revoke", "Delete"],
+            row_actions_callback=lambda row: (row['_actions'], self.table.row_action_icons),
             row_action_icons={
                 "View": ":/assets/material-icons/view.svg",
                 "Offer": ":/assets/material-icons/share.svg",
@@ -111,13 +112,22 @@ class IssuedCredentialsListPage(BaseListPage):
                 status = credential.get("status", {})
                 status_text = status_label(status)
                 recipient_name = identifier_name(self.app.vault, credential['recipient'])
+                actions = ["View"]
+                if status.get('et') in ('issued', 'authenticated'):
+                    actions += ["Offer", "Grant"]
+                actions.append("View exchange history")
+                # Keep access to the existing retry path for a pending registry update.
+                if sad.get('rd') and status.get('et') in ('issued', 'pending'):
+                    actions.append("Revoke")
+                actions.append("Delete")
                 cred_dict = {
                     "Credential": credential_name(schemer),
                     "Recipient": recipient_name,
                     "Issuer": sad['i'],
                     "Status": status_text,
                     "Created": date_label(credential['created_at']),
-                    "SAID": sad['d']  # Store SAID for view operation
+                    "SAID": sad['d'],
+                    "_actions": actions,
                 }
                 issued_credentials_data.append(cred_dict)
 
