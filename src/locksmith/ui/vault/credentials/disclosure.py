@@ -7,10 +7,10 @@ from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from locksmith.core import credentialing, ipexing
 from locksmith.ui import colors
-from locksmith.ui.toolkit.widgets.buttons import LocksmithCheckbox
+from locksmith.ui.toolkit.widgets.buttons import LocksmithButton, LocksmithCheckbox
 from locksmith.ui.vault.credentials.presentation import (
     attribute_view, credential_name, identifier_name, rules_text, disclosure_fields, disclosure_paths,
-    attribute_label, details_section, display_claims,
+    attribute_label, consent_action, details_section, display_claims,
 )
 
 
@@ -163,6 +163,14 @@ class DisclosureSelection(QWidget):
             opened_additional = opened_additional or bool(fields.checkboxes)
             self.field_widgets[prefix] = fields
             fields.changed.connect(self._changed)
+            if prefix == '/' and fields.checkboxes:
+                self.select_all_issuance = LocksmithButton('Select all for credential issuance')
+                consent_action(self.select_all_issuance)
+                self.select_all_issuance.clicked.connect(self._select_issuance_fields)
+                card_layout.addWidget(self.select_all_issuance)
+                card_layout.addWidget(DisclosureFields._explanation(
+                    f'Selects all available {credential_name(schema)} fields. '
+                    'Linked credential field selections stay unchanged.'))
             card_layout.addWidget(fields)
             required = [field for field in fields.descriptions if field['required']]
             if required:
@@ -194,6 +202,10 @@ class DisclosureSelection(QWidget):
         if isinstance(value, list):
             return ', '.join(DisclosureSelection._compact(item, schema.get('items', {})) for item in value) or '[]'
         return ('Yes' if value else 'No') if isinstance(value, bool) else '—' if value is None else str(value)
+
+    def _select_issuance_fields(self):
+        for checkbox in self.field_widgets['/'].checkboxes.values():
+            checkbox.setChecked(True)
 
     def _changed(self):
         selections = self.selected_fields()

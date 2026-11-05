@@ -995,6 +995,7 @@ class ExchangeResponseDialog(LocksmithDialog):
                 self._disclosure_selection = DisclosureSelection(self.vault, sad['d'], choices,
                     requested=request.sad['q'].get('dp', []))
                 choice_layout.addWidget(self._disclosure_selection)
+                self._disclosure_selection.show()
                 self.credential_details.toggle_button.setText('  Credential options')
                 return
             _, _, plan, nodes = ipexing._credential_evidence(self.vault, sad['d'])

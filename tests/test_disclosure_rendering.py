@@ -92,3 +92,38 @@ def test_schema_title_is_consistent_between_choices_details_and_summary(qapp, mo
     assert 'Scope' in labels
     assert 'Scope: read' in widget.required_summary.text()
     assert all('Long schema documentation' not in label for label in labels)
+
+
+def test_issuance_selection_keeps_linked_and_unavailable_fields_unchanged(qapp, monkeypatch):
+    block = {'oneOf': [{'type': 'string'}, {'type': 'object', 'properties': {
+        'd': {'type': 'string'}, 'u': {'type': 'string'}, 'value': {'type': 'string'}}}]}
+    schema = {'$id': 'schema', 'title': 'Identity credential', 'properties': {'a': {
+        'type': 'object', 'properties': {'i': {'type': 'string'}, 'name': block,
+                                       'birthDate': block, 'unavailable': block}}}}
+    nodes = {
+        'root': {'d': 'root', 'i': 'issuer', 's': 'schema',
+                 'a': {'i': 'holder', 'name': {'value': 'Name'},
+                       'birthDate': {'value': 'Date'}, 'unavailable': 'digest'},
+                 'e': {'source': {'n': 'linked'}}},
+        'linked': {'d': 'linked', 'i': 'source issuer', 's': 'schema',
+                   'a': {'i': 'issuer', 'name': {'value': 'Source'},
+                         'birthDate': {'value': 'Private'}}},
+    }
+    monkeypatch.setattr(disclosure.ipexing, '_credential_evidence', lambda *args: (
+        None, None, [[['schema', '/', []], ['schema', '/e/source/_/', []]]], nodes))
+    vault = schema_vault({'schema': schema})
+    widget = disclosure.DisclosureSelection(vault, 'root',
+        selections={'/e/source/_/': ['a/name/value']})
+    before = deepcopy(nodes)
+    widget.select_all_issuance.click()
+    assert widget.selected_fields() == {
+        '/': ['a/name/value', 'a/birthDate/value'], '/e/source/_/': ['a/name/value']}
+    assert nodes == before
+    widget.field_widgets['/'].checkboxes['a/name/value'].setChecked(False)
+    assert widget.selected_fields()['/'] == ['a/birthDate/value']
+    assert any('Selects all available Identity credential fields.' in label.text()
+               and 'Linked credential field selections stay unchanged.' in label.text()
+               for label in widget.findChildren(QLabel))
+    reopened = disclosure.DisclosureSelection(vault, 'root')
+    assert reopened.selected_fields() == {'/': [], '/e/source/_/': []}
+    assert reopened.select_all_issuance.isEnabled()

@@ -11,7 +11,7 @@ from hio.base import doing
 from keri.core import scheming, SerderACDC
 
 from locksmith.core.credentialing import IssueCredentialDoer
-from locksmith.ui.vault.credentials.disclosure import DisclosureFields
+from locksmith.ui.vault.credentials.disclosure import DisclosureFields, DisclosureSelection
 from locksmith.ui.vault.credentials.schema.list import SchemaListPage
 from locksmith.ui.vault.credentials.start import RequestDisclosure, StartExchangeDialog
 from locksmith.ui.toolkit.widgets.collapsible import CollapsibleSection
@@ -188,6 +188,16 @@ def test_unsolicited_offer_sends_only_explicit_choices_and_keeps_original(wallet
                        if said not in before]
         credentials.append(credential)
     first, other = credentials
+    # An existing credential gets the issuance shortcut without a creation callback.
+    all_fields = DisclosureSelection(app.vault, first.said)
+    assert all_fields.selected_fields() == {'/': []}
+    assert all_fields.select_all_issuance.text() == 'Select all for credential issuance'
+    all_fields.select_all_issuance.click()
+    full_plan, _, full_nodes = all_fields.prepare()
+    assert set(full_plan[0][0][2]) == {'a/i', 'a/name/value', 'a/birthDate/value'}
+    assert full_nodes[first.said]['a']['name']['value'] == 'Alice'
+    assert full_nodes[first.said]['a']['birthDate']['value'] == '2010-01-01'
+    all_fields.close()
     parent = QWidget()
     dialog = StartExchangeDialog(app, parent, 'Offer')
     choose(dialog.selection, first.said)
