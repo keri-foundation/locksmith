@@ -745,7 +745,14 @@ class LocksmithDialog(QDialog):
 
     def fit_content(self, width):
         """Fit current content and update the base height for collapsible sections."""
-        width = min(width, max(1, self.screen().availableGeometry().width() - 32))
+        # Platform fonts and controls may need more room than the preferred width.
+        # Reserve the scrollbar width so scrolling does not clip field controls.
+        self.ensurePolished()
+        self.content_layout.invalidate()
+        self.content_layout.activate()
+        minimum_width = (self.content_layout.minimumSize().width()
+                         + self.scroll_area.verticalScrollBar().sizeHint().width())
+        width = min(max(width, minimum_width), max(1, self.screen().availableGeometry().width() - 32))
         if self._dialog_resize_animation is not None:
             self._dialog_resize_animation.stop()
         # Remove the old scrollbar's width before measuring wrapped content.

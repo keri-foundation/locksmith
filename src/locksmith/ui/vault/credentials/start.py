@@ -237,6 +237,11 @@ class StartExchangeDialog(LocksmithDialog):
         self._select_sender()
         self._update_recipients()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Hidden schema choices acquire their final layout metrics when shown.
+        self.fit_content(self.width())
+
     def _name(self, pre):
         return identifier_name(self.vault, pre)
 
