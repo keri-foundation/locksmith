@@ -15,6 +15,7 @@ from locksmith.ui.vault.credentials.issued.list import IssuedCredentialsListPage
 from locksmith.ui.vault.credentials.received.list import ReceivedCredentialsListPage
 from locksmith.ui.vault.credentials.schema.list import SchemaListPage
 from locksmith.ui.vault.credentials.activity import CredentialActivityPage
+from locksmith.ui.vault.credentials.proofing import ProofingSessionsPage
 from locksmith.ui.vault.identifiers.list import IdentifierListPage
 from locksmith.ui.vault.groups.list import GroupIdentifierListPage
 from locksmith.ui.vault.menu import VaultNavMenu
@@ -94,6 +95,7 @@ class VaultPage(BasePage):
         self.register_page("issued_credentials", IssuedCredentialsListPage(self))
         self.register_page("received_credentials", ReceivedCredentialsListPage(self))
         self.register_page("credential_activity", CredentialActivityPage(self))
+        self.register_page("proofing", ProofingSessionsPage(self))
         self.register_page("schema", SchemaListPage(self))
         self.register_page("notifications", NotificationsListPage(self))
 
@@ -146,6 +148,10 @@ class VaultPage(BasePage):
         )
         self.nav_menu.activity_clicked.connect(
             lambda: self._show_credentials_page("credential_activity")
+        )
+
+        self.nav_menu.proofing_clicked.connect(
+            lambda: self._show_credentials_page('proofing')
         )
 
         self._pages['credential_activity'].attention_changed.connect(
@@ -234,10 +240,12 @@ class VaultPage(BasePage):
         self.nav_menu.activity_button.click()
         self._pages['credential_activity'].show_exchange(said, received=received, open_dialog=open_dialog)
 
-    def start_credential_exchange(self, action, *, schema=None, credential_said=None, received=False):
+    def start_credential_exchange(self, action, *, schema=None, credential_said=None, received=False,
+                                  intent='issuance'):
         from locksmith.ui.vault.credentials.start import StartExchangeDialog
         self._credential_exchange_dialog = StartExchangeDialog(
-            self.app, self, action, schema=schema, credential_said=credential_said, received=received)
+            self.app, self, action, schema=schema, credential_said=credential_said, received=received,
+            intent=intent)
         self._credential_exchange_dialog.submitted.connect(
             lambda said: self.show_credential_activity(said, received=action == 'Apply', open_dialog=False))
         self._credential_exchange_dialog.open()

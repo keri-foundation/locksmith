@@ -73,7 +73,7 @@ class LocksmithConfig:
     salt: str = "0123456789abcdef"  # Default salt for key derivation
     algo: str = "salty"  # Algorithm for key derivation
     tier: str = "low"  # Security tier for key derivation
-    base: str = ""  # Base directory for KERI databases (will be set in __init__)
+    base: str = ""  # Storage base shared by this wallet's databases
 
     def __new__(cls):
         if cls._instance is None:

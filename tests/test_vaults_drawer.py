@@ -17,6 +17,7 @@ import pytest
 from PySide6.QtWidgets import QWidget
 
 from locksmith.core.apping import LocksmithApplication
+from locksmith.core.configing import LocksmithConfig
 from locksmith.db.basing import LocksmithBaser
 from locksmith.ui.vaults import drawer as drawer_module
 from locksmith.ui.vaults.drawer import VaultDrawer
@@ -26,19 +27,27 @@ from locksmith.ui.vaults.drawer import VaultDrawer
 VAULTS = ["zeta", "megalith", "Gamma", "alpine", "gallium"]
 
 
-def test_vault_discovery_excludes_namespace_directories(tmp_path, monkeypatch):
-    for name, base in [('personal', ''), ('holder', 'demo-holder')]:
-        db = LocksmithBaser(name=name, base=base, headDirPath=str(tmp_path))
+@pytest.mark.parametrize('base, expected', [
+    (None, ['personal']),
+    ('demo-issuer', ['issuer']),
+    ('demo-holder', ['holder']),
+])
+def test_vault_discovery_excludes_namespace_directories(tmp_path, monkeypatch, base, expected):
+    for name, storage_base in [('personal', ''), ('issuer', 'demo-issuer'), ('holder', 'demo-holder')]:
+        db = LocksmithBaser(name=name, base=storage_base, headDirPath=str(tmp_path))
         db.close()
     root = tmp_path / LocksmithBaser.TailDirPath
     (root / 'empty').mkdir()
     monkeypatch.setattr(LocksmithBaser, 'TailDirPath', str(root))
     monkeypatch.setattr(LocksmithBaser, 'AltTailDirPath', str(root))
-    app = LocksmithApplication(config=SimpleNamespace(base=''))
+    monkeypatch.setattr(LocksmithConfig, '_instance', None)
+    if base is None:
+        monkeypatch.delenv('LOCKSMITH_BASE', raising=False)
+    else:
+        monkeypatch.setenv('LOCKSMITH_BASE', base)
+    app = LocksmithApplication()
 
-    assert app.environments() == ['personal']
-    app.config.base = 'demo-holder'
-    assert app.environments() == ['holder']
+    assert app.environments() == expected
     assert (root / 'demo-holder' / 'holder' / 'data.mdb').is_file()
 
 

@@ -24,12 +24,11 @@ logger = help.ogler.getLogger(__name__)
 
 class LocksmithDialog(QDialog):
     """
-    Reusable dialog class with fade-in animation, overlay, and structured layout.
+    Reusable custom dialog with an optional overlay and structured layout.
 
     Features:
-    - Modal by default (can be disabled with show_overlay=False)
+    - Window modal when opened with open(); modeless with show() unless requested
     - 8px border radius
-    - Fade-in animation
     - Optional semi-transparent overlay behind dialog
     - Optional header with icon, title, and close button
     - Scrollable content area
@@ -43,7 +42,7 @@ class LocksmithDialog(QDialog):
 
         # Non-modal dialog without overlay
         dialog = LocksmithDialog(parent, content=my_widget, show_overlay=False)
-        dialog.open()
+        dialog.show()
 
         # Full-featured dialog
         button_layout = QHBoxLayout()
@@ -99,7 +98,7 @@ class LocksmithDialog(QDialog):
             show_title_divider: Whether to show horizontal line below header (default True).
             content: Optional widget to display in scrollable content area.
             buttons: Optional QHBoxLayout containing buttons to display at bottom.
-            show_overlay: Whether to show overlay and make dialog modal (default True).
+            show_overlay: Whether to show an overlay and make show() modal (default False).
             margin_for_max_height: Margin (in pixels) to leave when calculating max height.
             initial_focus: Input to focus when the dialog opens, if visible and enabled.
         """
@@ -138,14 +137,6 @@ class LocksmithDialog(QDialog):
         dialog_layout.setContentsMargins(0, 0, 0, 0)
         dialog_layout.addWidget(self.container)
 
-        # Use window opacity instead of QGraphicsOpacityEffect to avoid rendering artifacts
-        self._opacity = 1.0
-        self.fade_animation = QPropertyAnimation(self, b"dialogOpacity")
-        self.fade_animation.setDuration(300)
-        self.fade_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self.fade_animation.setStartValue(0.0)
-        self.fade_animation.setEndValue(1.0)
-
         # Build dialog structure inside the container
         self._build_dialog(title, title_icon, title_content, show_close_button, show_title_divider, content, buttons)
 
@@ -156,8 +147,8 @@ class LocksmithDialog(QDialog):
         # Collapsible section management
         self._collapsible_sections = []
         self._base_content_height = None
-        self._max_dialog_height = None
         self._margin_for_max_height = margin_for_max_height
+        self._max_dialog_height = self._calculate_max_dialog_height()
         self._is_scrollable = False
 
     def _build_dialog(
@@ -235,8 +226,10 @@ class LocksmithDialog(QDialog):
         # Add close button if requested
         if show_close_button:
             close_button = QPushButton()
+            close_button.setAccessibleName('Close dialog')
+            close_button.setToolTip('Close dialog')
             close_button.setIcon(QIcon(":/assets/material-icons/close.svg"))
-            close_button.setFixedSize(32, 32)
+            close_button.setFixedSize(40, 40)
             close_button.setCursor(Qt.CursorShape.PointingHandCursor)
             close_button.setStyleSheet(f"""
                 QPushButton {{
@@ -249,6 +242,9 @@ class LocksmithDialog(QDialog):
                 }}
                 QPushButton:pressed {{
                     background-color: {colors.BACKGROUND_NEUTRAL_HOVER};
+                }}
+                QPushButton:focus {{
+                    border: 2px solid {colors.TEXT_PRIMARY};
                 }}
             """)
             close_button.clicked.connect(self.reject)
@@ -414,13 +410,25 @@ class LocksmithDialog(QDialog):
         self.overlay_animation.setDuration(300)
         self.overlay_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
 
+    def open(self):
+        # QDialog.open() otherwise replaces the custom flags with Qt.Sheet on macOS.
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        super().open()
+
     def showEvent(self, event):
-        """Override showEvent to trigger fade-in animation."""
-        # Close any existing dialog before showing this one
-        if (LocksmithDialog._current_dialog is not None
-                and isValid(LocksmithDialog._current_dialog)
-                and LocksmithDialog._current_dialog != self):
-            LocksmithDialog._current_dialog.close()
+        """Show the custom frame and coordinate its owned dialog stack."""
+        # Keep ancestors open for child dialogs; replace unrelated dialogs.
+        ancestors = []
+        parent = self.parentWidget()
+        while parent is not None:
+            ancestors.append(parent)
+            parent = parent.parentWidget()
+        current = LocksmithDialog._current_dialog
+        while (current is not None and isValid(current) and current.isVisible()
+               and current != self and current not in ancestors):
+            if not current.close():
+                break
+            current = LocksmithDialog._current_dialog
 
         # Track this as the current dialog
         LocksmithDialog._current_dialog = self
@@ -451,18 +459,21 @@ class LocksmithDialog(QDialog):
         # Raise dialog above overlay
         self.raise_()
 
-        # Start fade animation (window opacity doesn't need the timing workarounds)
-        self.setWindowOpacity(0.0)
-        self.fade_animation.start()
+        self.setWindowOpacity(1.0)
 
         if self._initial_focus is not None and self._initial_focus.isVisible() and self._initial_focus.isEnabled():
             self._initial_focus.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def hideEvent(self, event):
         """Clear dialog state after closing, accepting, or rejecting."""
-        # Clear the current dialog reference if this is it
+        # Return control to a surviving parent after a child closes.
         if LocksmithDialog._current_dialog == self:
-            LocksmithDialog._current_dialog = None
+            parent = self.parentWidget()
+            while parent is not None and isValid(parent):
+                if isinstance(parent, LocksmithDialog) and parent.isVisible():
+                    break
+                parent = parent.parentWidget()
+            LocksmithDialog._current_dialog = parent if parent is not None and isValid(parent) else None
 
         # Hide overlay
         if self.overlay:
@@ -504,17 +515,6 @@ class LocksmithDialog(QDialog):
                 parent_center.x() - self.width() // 2,
                 parent_center.y() - self.height() // 2
             )
-
-    @Property(float)
-    def dialogOpacity(self):
-        """Get dialog opacity for animation."""
-        return self._opacity
-
-    @dialogOpacity.setter
-    def dialogOpacity(self, value):
-        """Set dialog opacity for animation."""
-        self._opacity = value
-        self.setWindowOpacity(value)
 
     def show_error(self, message: str):
         """
@@ -561,7 +561,7 @@ class LocksmithDialog(QDialog):
             self._dialog_resize_animation.finished.connect(self._re_enable_scrollbars)
 
         self._dialog_resize_animation.setStartValue(self.height())
-        self._dialog_resize_animation.setEndValue(self._base_height + banner_height)
+        self._dialog_resize_animation.setEndValue(min(self._base_height + banner_height, self._max_dialog_height))
         self._dialog_resize_animation.start()
 
     def clear_error(self, resize_dialog: bool = True):
@@ -639,7 +639,7 @@ class LocksmithDialog(QDialog):
             self._dialog_resize_animation.finished.connect(self._re_enable_scrollbars)
 
         self._dialog_resize_animation.setStartValue(self.height())
-        self._dialog_resize_animation.setEndValue(self._base_height + banner_height)
+        self._dialog_resize_animation.setEndValue(min(self._base_height + banner_height, self._max_dialog_height))
         self._dialog_resize_animation.start()
 
     def clear_success(self, resize_dialog: bool = True):
@@ -745,6 +745,7 @@ class LocksmithDialog(QDialog):
 
     def fit_content(self, width):
         """Fit current content and update the base height for collapsible sections."""
+        width = min(width, max(1, self.screen().availableGeometry().width() - 32))
         if self._dialog_resize_animation is not None:
             self._dialog_resize_animation.stop()
         # Remove the old scrollbar's width before measuring wrapped content.
@@ -818,8 +819,8 @@ class LocksmithDialog(QDialog):
                 return cast(QWidget, widget).height() - self._margin_for_max_height
             widget = widget.parent()
 
-        # Fallback: use a reasonable default
-        return 1000
+        # Detached dialogs must keep their action buttons on the current screen.
+        return min(1000, self.screen().availableGeometry().height() - self._margin_for_max_height)
 
     def _update_dialog_height(self, target_height):
         """
@@ -869,13 +870,10 @@ class LocksmithDialog(QDialog):
         self._dialog_resize_animation.start()
 
     def _on_resize_animation_finished(self):
-        """Handle animation completion - re-enable scrollbars if needed."""
-        if self._is_scrollable:
-            # Enable vertical scrollbar
-            self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        else:
-            # Content fits - no scrollbars needed
-            self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        """Keep actual overflow reachable after dynamic content changes."""
+        # Nested layouts can grow beyond the height measured before animation.
+        # Let the scroll area use its actual viewport, not the earlier estimate.
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         # Horizontal scrollbar always off
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)

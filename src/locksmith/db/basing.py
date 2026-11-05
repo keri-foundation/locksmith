@@ -8,6 +8,7 @@ locksmith.core.basing package
 
 from dataclasses import dataclass
 
+from keri.core import SerderACDC
 from keri.db import dbing, koming, subing
 
 
@@ -69,6 +70,23 @@ class IssuedCredential:
 
 
 @dataclass
+class PresentationProof:
+    blinder: str
+    update: str
+
+
+@dataclass
+class CredentialRequest:
+    sender: str
+    recipient: str
+    schema: str
+    plan: list
+    ax: list | None = None
+    stream: str = ''
+    submitted: bool = False
+
+
+@dataclass
 class AcceptedCredential:
     grant: str
     admit: str
@@ -85,6 +103,18 @@ class GrantReceipt:
 
 
 @dataclass
+class ProofingSession:
+    citizen: str
+    proofer: str
+    nonce: str
+    expires_at: float
+    anchor_sn: int = -1
+    anchor_said: str = ''
+    receipt: str = ''
+    status: str = 'challenge'
+
+
+@dataclass
 class IpexSubmission:
     status: str = 'pending'
     attempts: int = 0
@@ -96,6 +126,22 @@ class IpexSubmission:
 @dataclass
 class MailboxFrame:
     raw: str
+
+
+@dataclass
+class MailboxMigration:
+    until: float
+    witnesses: list[str]
+
+
+@dataclass
+class ConnectionRecord:
+    """Consecutive connection failures, retained across wallet reopen."""
+
+    attempts: int = 0
+    retry_at: float = 0.0
+    error: str = ''
+    paused: bool = False
 
 
 class LocksmithBaser(dbing.LMDBer):
@@ -144,7 +190,17 @@ class LocksmithBaser(dbing.LMDBer):
         self.issued = koming.Komer(db=self, subkey='issued.', klas=IssuedCredential)
         self.accepted = koming.Komer(db=self, subkey='accepted.', klas=AcceptedCredential)
         self.receipts = koming.Komer(db=self, subkey='receipts.', klas=GrantReceipt)
+        self.proofing = koming.Komer(db=self, subkey='proofing.', klas=ProofingSession)
+        # Private creation intent: registry alias -> native inception, not an accepted registry.
+        self.registry_creations = subing.SerderSuber(db=self, subkey='rcrt.', klas=SerderACDC)
+        # Private request intent: operation ID -> inputs and exact signed Apply.
+        # Retain across restart so creation and delivery retries reuse one registry.
+        self.requests = koming.Komer(db=self, subkey='crqs.', klas=CredentialRequest)
+        # Private presentation proofs: one returned blinder/update per (Grant, registry).
+        self.presentations = koming.Komer(db=self, subkey='prpf.', klas=PresentationProof)
         self.outbox = koming.Komer(db=self, subkey='outbox.', klas=IpexSubmission)
         self.inbox = koming.Komer(db=self, subkey='inbox.', klas=MailboxFrame)
+        self.mailboxMigrations = koming.Komer(db=self, subkey='mailboxMigrations.', klas=MailboxMigration)
+        self.connections = koming.Komer(db=self, subkey='connections.', klas=ConnectionRecord)
 
         return self.env

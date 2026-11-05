@@ -60,14 +60,9 @@ class AcceptCredentialDialog(LocksmithDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
 
-        # Instructions section
-        instructions_label = QLabel("Import Grant")
-        instructions_label.setStyleSheet("font-weight: bold; font-size: 14px;")
-        layout.addWidget(instructions_label)
-
         description = QLabel(
-            "Select an IPEX grant message file (.cesr) from your local machine "
-            "to admit the credential into your vault."
+            "Select a .cesr file containing an IPEX grant. "
+            "You can review the credential before accepting it."
         )
         description.setStyleSheet(f"color: {colors.TEXT_SECONDARY}; font-size: 13px;")
         description.setWordWrap(True)
@@ -76,7 +71,7 @@ class AcceptCredentialDialog(LocksmithDialog):
         layout.addSpacing(10)
 
         # File selection section
-        file_label = QLabel("Grant Message File")
+        file_label = QLabel("Credential file")
         file_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         layout.addWidget(file_label)
 
@@ -113,7 +108,7 @@ class AcceptCredentialDialog(LocksmithDialog):
         # Initialize parent dialog
         super().__init__(
             parent=parent,
-            title="Import Grant",
+            title="Import credential from file",
             title_icon=":/assets/material-icons/in-badge.svg",
             content=content_widget,
             initial_focus=self.browse_button,
@@ -136,7 +131,7 @@ class AcceptCredentialDialog(LocksmithDialog):
         # Open file dialog
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Select Grant Message File",
+            "Select credential file",
             current_path if current_path else "",
             "CESR Files (*.cesr);;All Files (*)"
         )

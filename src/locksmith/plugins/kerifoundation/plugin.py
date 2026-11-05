@@ -8,6 +8,9 @@ Locksmith users.
 from __future__ import annotations
 
 import asyncio
+import time
+
+import requests
 from typing import Any
 
 from PySide6.QtGui import QIcon, QPixmap
@@ -15,13 +18,17 @@ from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QDialog
 from PySide6.QtCore import Qt, QEvent, QObject
 from keri import help
 
+from locksmith.core.messaging import RETRY_DELAYS
+from locksmith.plugins.kerifoundation.core.identifiers import iter_local_identifier_choices
 from locksmith.plugins.base import AccountProviderPlugin, PluginBase, WitnessProviderPlugin
 from locksmith.plugins.kerifoundation.db.basing import (
     ACCOUNT_STATUS_FAILED,
     ACCOUNT_STATUS_ONBOARDED,
     KFBaser,
     KFAccountRecord,
+    MailboxRecord,
 )
+from locksmith.plugins.kerifoundation.mailboxes import KFMailboxService
 from locksmith.plugins.kerifoundation.onboarding.page import KFOnboardingPage
 from locksmith.plugins.kerifoundation.onboarding.service import (
     KFBootClient,
@@ -65,6 +72,8 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
         self._wat_btn = None
         self._boot_client = KFBootClient(app)
         self._onboarding_task: asyncio.Task | None = None
+        self._mailbox_task: asyncio.Task | None = None
+        self._identifier_connection = None
         self._deferred_db_close_tasks: set[asyncio.Task] = set()
         self._closing_vault = False
 
@@ -89,6 +98,7 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
 
         self._witness_overview.add_witnesses_requested.connect(self._show_identifiers)
         self._identifiers_page.add_witnesses_requested.connect(self._on_add_witnesses)
+        self._identifiers_page.mailbox_requested.connect(self._queue_mailbox)
         self._witness_provision.completed.connect(self._on_provision_completed)
         self._witness_provision.cancelled.connect(self._on_provision_cancelled)
 
@@ -156,6 +166,8 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
         self._watcher_list.set_boot_client(self._boot_client)
         self._watcher_register.set_db(self._db)
         self._sync_boot_client_destination()
+        self._identifier_connection = vault.signals.doer_event.connect(self._on_identifier_event)
+        self._resume_mailboxes()
         logger.info(f"KF plugin DB opened for vault '{vault.hby.name}'")
 
     def prepare_vault_deletion(self, vault: Any) -> None:
@@ -172,8 +184,12 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
 
     def on_vault_closed(self, vault: Any, *, clear: bool = False) -> None:
         self._closing_vault = True
+        if self._identifier_connection is not None:
+            QObject.disconnect(self._identifier_connection)
+            self._identifier_connection = None
         stopped = self._shutdown_background_work(require_onboarding_stopped=False)
         stateful_tasks = self._stateful_shutdown_tasks()
+        self._mailbox_task = None
         db = self._db
         self._db = None
         self._onboarding_page.set_db(None)
@@ -195,6 +211,12 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
 
     def _shutdown_background_work(self, *, require_onboarding_stopped: bool) -> bool:
         stopped = True
+        if self._mailbox_task is not None and not self._mailbox_task.done():
+            self._mailbox_task.cancel()
+            loop = self._mailbox_task.get_loop()
+            if not loop.is_running():
+                loop.run_until_complete(asyncio.gather(self._mailbox_task, return_exceptions=True))
+            stopped = self._mailbox_task is None or self._mailbox_task.done()
         if not self._shutdown_onboarding_task():
             message = (
                 "KF onboarding is still active and could not stop promptly. "
@@ -239,6 +261,7 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
         tasks = []
         for task in (
             self._onboarding_task,
+            self._mailbox_task,
             getattr(self._witness_provision, "_provision_task", None),
         ):
             if task is not None and not task.done():
@@ -519,6 +542,7 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
             results=outcome.witness_registration.results,
             batch_mode=outcome.witness_registration.batch_mode,
         )
+        self._start_mailboxes(bootstrap=outcome.bootstrap)
         self._emit_identifier_created(alias=alias, pre=outcome.account_aid)
         logger.info(
             "KF onboarding completed for alias='%s' account_aid='%s'",
@@ -531,17 +555,16 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
             return
 
         record = self._get_account_record()
-        preserved_session = bool(
-            record is not None and record.onboarding_session_id and record.onboarding_auth_alias
-        )
         if record is not None:
             record.status = ACCOUNT_STATUS_FAILED
             self._db.pin_account(record)
-        follow_up = (
-            "Local progress was preserved. Start onboarding again to resume the saved session."
-            if preserved_session
-            else "This onboarding attempt was abandoned. Start again to continue."
-        )
+        follow_up = "This onboarding attempt was abandoned. Start again to continue."
+        if record is not None and record.onboarding_auth_alias:
+            follow_up = (
+                "Local progress was preserved. Start onboarding again to resume the saved session."
+                if record.onboarding_session_id
+                else "Local progress was preserved. Start onboarding again to resume setup with the saved choices."
+            )
         self._onboarding_page.fail_run(
             f"Onboarding failed: {message}\n\n{follow_up}"
         )
@@ -549,6 +572,140 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
 
     def _finish_onboarding_run(self):
         self._onboarding_task = None
+
+    def _on_identifier_event(self, doer_name, event_type, data):
+        if event_type == "identifier_created":
+            self._start_mailboxes(requested_prefix=data.get("pre"))
+
+    def _resume_mailboxes(self):
+        self._start_mailboxes()
+
+    def _queue_mailbox(self, prefix):
+        self._start_mailboxes(requested_prefix=prefix, retry=True)
+
+    def messaging_status(self, vault, pre):
+        if vault is self._app.vault and self._db is not None:
+            record = self._db.mailboxes.get((pre,))
+            if record is not None:
+                return record.status, record.error
+        return None
+
+    async def ensure_messaging(self, vault, pre, *, retry=False):
+        if vault is not self._app.vault or not self._has_onboarded_account():
+            return False
+        self._start_mailboxes(requested_prefix=pre, retry=retry)
+        task = self._mailbox_task
+        while task is not None and not task.done():
+            if vault is not self._app.vault or self._db is None:
+                raise ValueError("The vault is closed")
+            record = self._db.mailboxes.get((pre,))
+            if record is not None and record.status in ("active", "failed"):
+                break
+            await asyncio.sleep(0.1)
+        if vault is not self._app.vault or self._db is None:
+            raise ValueError("The vault is closed")
+        record = self._db.mailboxes.get((pre,))
+        if record is None or record.status != "active":
+            raise ValueError(record.error if record and record.error else
+                             "Messaging is unavailable. Open Connection details to retry.")
+        return True
+
+    def _start_mailboxes(self, *, requested_prefix=None, bootstrap=None, retry=False):
+        if self._closing_vault or not self._has_onboarded_account():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        account = self._db.get_account()
+        prefixes = ([requested_prefix] if requested_prefix else
+                    [pre for _, pre in iter_local_identifier_choices(self._app)])
+        for prefix in prefixes:
+            hab = self._app.vault.hby.habByPre(prefix)
+            if hab is None or not hab.accepted:
+                continue
+            record = self._db.mailboxes.get((prefix,))
+            if record is None:
+                record = MailboxRecord(account_aid=account.account_aid)
+            elif record.status == "active":
+                continue
+            if record.status == "pending" and record.attempts > len(RETRY_DELAYS):
+                record.status = "failed"
+                record.error = "Connection attempts exhausted. Retry to resume."
+            if retry:
+                record.status, record.error = "pending", ""
+                record.attempts, record.retry_at = 0, 0.0
+            self._db.mailboxes.pin((prefix,), record)
+        if self._mailbox_task is not None and not self._mailbox_task.done():
+            return
+        self._mailbox_task = loop.create_task(self._run_mailboxes(
+            vault=self._app.vault, db=self._db, client=self._boot_client.clone(),
+            requested_prefix=requested_prefix, bootstrap=bootstrap))
+        self._identifiers_page.set_mailbox_state(busy=True)
+
+    def _is_current_mailbox_task(self, task, *, vault, db):
+        return (task is self._mailbox_task and not self._closing_vault
+                and vault is self._app.vault and not getattr(vault, "closed", False)
+                and db is self._db and db.opened)
+
+    async def _run_mailboxes(self, *, vault, db, client, requested_prefix=None, bootstrap=None):
+        task = asyncio.current_task()
+        enabled, error = None, ""
+        try:
+            service = KFMailboxService(vault=vault, db=db, boot_client=client)
+            while self._is_current_mailbox_task(task, vault=vault, db=db):
+                pending = [(prefix, record) for (prefix,), record in db.mailboxes.getTopItemIter()
+                           if record.status == "pending" and record.attempts <= len(RETRY_DELAYS)]
+                if not pending:
+                    break
+                prefix, record = min(pending, key=lambda item: item[1].retry_at)
+                if record.retry_at > time.time():
+                    await asyncio.sleep(min(1.0, record.retry_at - time.time()))
+                    continue
+                record.attempts += 1
+                db.mailboxes.pin((prefix,), record)
+                try:
+                    if bootstrap is None:
+                        bootstrap = await KFOnboardingService._await_blocking_result(client.fetch_bootstrap_config)
+                    if not self._is_current_mailbox_task(task, vault=vault, db=db):
+                        return
+                    enabled = getattr(bootstrap, "mailbox_enabled", False) is True
+                    if not enabled:
+                        record.attempts -= 1
+                        db.mailboxes.pin((prefix,), record)
+                        if requested_prefix:
+                            db.attach_identifier(requested_prefix)
+                        return
+                    self._identifiers_page.set_mailbox_state(enabled=True, busy=True)
+                    await service.provision(prefix)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if not self._is_current_mailbox_task(task, vault=vault, db=db):
+                        return
+                    record = db.mailboxes.get((prefix,))
+                    status = getattr(exc, "status_code", None)
+                    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+                        status = exc.response.status_code
+                    transient = (status in (408, 429) or (status is not None and status >= 500)
+                                 or isinstance(exc, (OSError, requests.ConnectionError, requests.Timeout)))
+                    record.error = str(exc)
+                    record.status = ("pending" if transient and record.attempts <= len(RETRY_DELAYS)
+                                     else "failed")
+                    if record.status == "pending":
+                        record.retry_at = time.time() + RETRY_DELAYS[record.attempts - 1]
+                    db.mailboxes.pin((prefix,), record)
+                    error = record.error
+                if self._is_current_mailbox_task(task, vault=vault, db=db):
+                    self._identifiers_page.on_show()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            current = self._is_current_mailbox_task(task, vault=vault, db=db)
+            if self._mailbox_task is task:
+                self._mailbox_task = None
+            if current:
+                self._identifiers_page.set_mailbox_state(enabled=enabled, error=error)
 
     def _emit_identifier_created(self, *, alias: str, pre: str) -> None:
         vault = getattr(self._app, "vault", None)
@@ -601,6 +758,7 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
             f"account_lookup={self._describe_account_record(self._get_account_record())}"
         )
         self._navigate("kf_identifiers")
+        self._resume_mailboxes()
         self._identifiers_page.on_show()
         self._set_active_nav(self._id_btn)
 

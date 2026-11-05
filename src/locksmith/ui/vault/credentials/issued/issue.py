@@ -40,7 +40,7 @@ class IssueCredentialDialog(LocksmithDialog):
     """Dialog for issuing a credential."""
     credential_created = Signal(str)
 
-    def __init__(self, app, parent=None, *, request_said=None):
+    def __init__(self, app, parent=None, *, request_said=None, nonce=None):
         """
         Initialize the IssueCredentialDialog.
 
@@ -51,6 +51,7 @@ class IssueCredentialDialog(LocksmithDialog):
         self.app = app
         self.vault = app.vault
         self.request_said = request_said
+        self.nonce = nonce
         self._issuance_id = None
         self._schema_supported = False
 
@@ -538,6 +539,14 @@ class IssueCredentialDialog(LocksmithDialog):
                               else self._create_field_widget(child))
                 container.fields[name] = (widget, child)
                 layout.addWidget(widget)
+                if 'const' not in prop and (hint := child.get('hint')):
+                    help_label = QLabel(hint)
+                    help_label.setWordWrap(True)
+                    help_label.setFixedWidth(400)
+                    help_label.setStyleSheet(f'font-size: 12px; color: {colors.TEXT_SECONDARY};')
+                    layout.addWidget(help_label)
+                    widget.setToolTip(hint)
+                    widget.line_edit.setAccessibleDescription(hint)
                 if container.include is not None and 'const' not in prop:
                     widget.setEnabled(False)
                     container.include.toggled.connect(widget.setEnabled)
@@ -685,10 +694,7 @@ class IssueCredentialDialog(LocksmithDialog):
         # Parse schema to get field definitions
         field_defs = self._parse_schema_fields(schema_said)
 
-        # Parse edge requirements
-        edge_reqs = []
         self._edge_widget = self._rules_widget = None
-
 
         # Start adding fields to the control layout
         # First add some space
@@ -709,6 +715,11 @@ class IssueCredentialDialog(LocksmithDialog):
 
             # Generate and add widgets
             for field_def in field_defs:
+                if field_def['name'] == 'rd' and self.request_said:
+                    request = self.vault.hby.db.exns.get((self.request_said,))
+                    if request and request.sad['a'].get('preg'):
+                        self._const_fields_values['rd'] = request.sad['a']['preg']
+                        continue
                 if field_def.get('const', None) is not None:
                     self._const_fields_values[field_def['name']] = field_def['const']
                     continue
@@ -1110,6 +1121,9 @@ class IssueCredentialDialog(LocksmithDialog):
             return
         logger.debug(f"IssueCredentialDialog received doer_event: {doer_name} - {event_type}")
 
+        if event_type == 'progress':
+            self.issue_button.setText(data['message'])
+
         # Handle credential issuance success
         if event_type == "credential_issued":
             self._issuance_id = None
@@ -1181,6 +1195,8 @@ class IssueCredentialDialog(LocksmithDialog):
                 rules=rules,
                 codes=codes,
                 authentication=self.authentication_dropdown.currentData(),
+                nonce=self.nonce,
+                request_said=self.request_said,
                 signal_bridge=self.vault.signals if hasattr(self.vault, 'signals') else None
             )
             self._issuance_id = doer.issuance_id

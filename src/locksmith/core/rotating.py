@@ -7,11 +7,12 @@ Functions for working with KERI Identifiers
 from hio.base import doing
 from keri import help
 from keri import kering
-from keri.core import coring
-from keri.db import dbing
+from keri.core import coring, serdering
 from keri.help import helping
 
 from locksmith.db.basing import IdentifierMetaInfo
+from locksmith.core.credentialing import CredentialUpdateDoer
+from locksmith.core.receipting import LocksmithReceiptor
 
 logger = help.ogler.getLogger(__name__)
 
@@ -233,191 +234,101 @@ class RotateDoer(doing.DoDoer):
                 self.app.vault.db.idm.pin(keys=(self.hab.pre,), val=identifier_meta_info)
             return
 
-class AuthenticateWitnessesDoer(doing.DoDoer):
-    """
-    Doer for witness authentication and delegation after rotation.
-
-    Handles the complete post-rotation workflow including:
-    - Waiting for witness receipts with authentication
-    - Waiting for delegation approval (if delegated)
-    - Sending events to delegator
-    - Updating auth_pending state
-    - Signaling completion to UI
-    """
+class AuthenticateWitnessesDoer(CredentialUpdateDoer):
+    """Finish saved witness receipts in order, then complete authentication."""
 
     def __init__(self, app, hab, codes, proxy=None, signal_bridge=None):
-        """
-        Initialize the AuthenticateWitnessesDoer.
-
-        Args:
-            app: Application instance with vault
-            hab: Habitat (identifier) to authenticate
-            codes: List of "witness_id:passcode" strings
-            proxy: Optional proxy Hab for delegation
-            signal_bridge: DoerSignalBridge for UI communication
-        """
-        self.app = app
-        self.hab = hab
-        self.hby = self.app.vault.hby
-        self.codes = codes
-        self.proxy = proxy
+        self.app, self.vault, self.hab = app, app.vault, hab
+        self.hby = self.vault.hby
+        self.codes, self.proxy = list(codes or []), proxy
         self.signal_bridge = signal_bridge
+        self.swain, self.postman = self.vault.swain, self.vault.postman
+        self.tip, self.error = hab.kever.serder.said, ''
+        super().__init__(doers=[doing.doify(self.authenticate_do)])
 
-        # Setup doers from vault
-        self.swain = self.app.vault.swain
-        self.postman = self.app.vault.postman
+    def _check_current(self):
+        if (self.app.vault is not self.vault or getattr(self.vault, 'closed', False)
+                or not self.vault.db.opened or self.hby.habByPre(self.hab.pre) is not self.hab
+                or self.hab.kever.serder.said != self.tip):
+            raise kering.ValidationError('The vault or identifier changed. Review authentication again.')
 
-        doers = [doing.doify(self.authenticate_do)]
-        super().__init__(doers=doers)
+    def _failed(self, error):
+        self.error = str(error)
+        if self.vault.db.opened:
+            self.vault.db.idm.pin((self.hab.pre,), IdentifierMetaInfo(self.hab.pre, auth_pending=True))
+        if self.signal_bridge and self.app.vault is self.vault:
+            self.signal_bridge.emit_doer_event('AuthenticateWitnessesDoer', 'witness_authentication_failed',
+                {'alias': self.hab.name, 'pre': self.hab.pre, 'error': self.error, 'success': False})
+
+    def recur(self, tyme, deeds=None):
+        try:
+            return super().recur(tyme, deeds)
+        except Exception as ex:
+            self._failed(ex)
+            return True
 
     def authenticate_do(self, tymth, tock=0.0, **opts):
-        """
-        Generator method for witness authentication and delegation.
-
-        Handles both witness authentication and delegation approval after rotation.
-
-        Args:
-            tymth: Tymist function for time management
-            tock: Initial tock value
-
-        Yields:
-            tock: Current tock value for doer scheduling
-        """
         self.wind(tymth)
         self.tock = tock
-        _ = (yield self.tock)
-
+        yield self.tock
+        receiptor = None
         try:
-            # Build authentication dict from codes
+            self._check_current()
+            code_time = helping.nowIso8601()
             auths = {}
-            if self.codes:
-                code_time = helping.nowIso8601()
-                for arg in self.codes:
-                    wit, code = arg.split(":")
-                    auths[wit] = f"{code}#{code_time}"
-
-            # Handle delegation if present
+            for entry in self.codes:
+                witness, code = entry.split(':', 1)
+                auths[witness] = f'{code}#{code_time}'
+            self.codes.clear()
             if self.hab.kever.delpre:
-                logger.info(f"Waiting for delegation approval for {self.hab.pre}...")
-                self.swain.delegation(
-                    pre=self.hab.pre,
-                    sn=self.hab.kever.sn,
-                    auths=auths,
-                    proxy=self.proxy
-                )
-
-                # Wait for delegation to complete
+                self.swain.delegation(pre=self.hab.pre, sn=self.hab.kever.sn,
+                                      auths=auths, proxy=self.proxy)
                 while not self.swain.complete(self.hab.kever.prefixer, coring.Seqner(sn=self.hab.kever.sn)):
+                    self._check_current()
                     yield self.tock
-
-            # Handle witness authentication if present
-            elif self.hab.kever.wits:
-                logger.info(f"Authenticating witnesses for {self.hab.pre} with {len(auths)} codes")
-
-                # Attempt to collect receipts with authentication
-                yield from self.app.vault.receiptor.receipt(
-                    self.hab.pre,
-                    sn=self.hab.kever.sn,
-                    auths=auths
-                )
-
-                # Verify we got enough receipts to meet TOAD
-                wigs = self.hab.db.wigs.get(keys=dbing.dgKey(self.hab.pre, self.hab.kever.serder.said))
-                if len(wigs) < self.hab.kever.toader.num:
-                    error_msg = f"Insufficient witness receipts: got {len(wigs)}, need {self.hab.kever.toader.num}"
-                    logger.error(error_msg)
-
-                    # Set auth_pending flag
-                    identifier_meta_info = IdentifierMetaInfo(prefix=self.hab.pre, auth_pending=True)
-                    self.app.vault.db.idm.pin(keys=(self.hab.pre,), val=identifier_meta_info)
-
-                    # Signal failure
-                    if self.signal_bridge:
-                        self.signal_bridge.emit_doer_event(
-                            doer_name="AuthenticateWitnessesDoer",
-                            event_type="witness_authentication_failed",
-                            data={
-                                'alias': self.hab.name,
-                                'pre': self.hab.pre,
-                                'error': error_msg,
-                                'success': False
-                            }
-                        )
-                    return
-
-            # Send event to delegator if needed
-            if self.hab.kever.delpre:
                 sender = self.proxy if self.proxy is not None else self.hab
-                yield from self.postman.sendEventToDelegator(
-                    hab=self.hab,
-                    sender=sender,
-                    fn=self.hab.kever.sn
-                )
-
-            # Update witness states for all current witnesses after successful authentication
-            # via plugin hooks (marks them as active / no longer reserved for rotation)
-            if hasattr(self.app, 'plugin_manager') and self.app.plugin_manager:
-                for wit in self.hab.kever.wits:
-                    self.app.plugin_manager.update_witness_state_after_auth(self.app.vault, wit)
-                    logger.info(f"Notified plugins about authenticated witness {wit}")
-
-            # Clear auth_pending flag if it was set
-            identifier_meta_info = IdentifierMetaInfo(prefix=self.hab.pre, auth_pending=False)
-            self.app.vault.db.idm.pin(keys=(self.hab.pre,), val=identifier_meta_info)
-
-            # Signal success
+                yield from self.postman.sendEventToDelegator(hab=self.hab, sender=sender, fn=self.hab.kever.sn)
+            else:
+                for sn in range(self.hab.kever.sn + 1):
+                    self._check_current()
+                    yield self.tock
+                    self._check_current()
+                    event = serdering.SerderKERI(raw=self.hab.msgOwnEvent(sn=sn))
+                    threshold = self.hab.kvy.fetchEstEvent(self.hab.pre, sn).bner.num
+                    if len(self.hab.db.wigs.get((self.hab.pre, event.said))) >= threshold:
+                        continue
+                    if receiptor is None:
+                        receiptor = LocksmithReceiptor(hby=self.hby)
+                        self.extend([receiptor])
+                    # A witness may already have advanced beyond this saved event.
+                    fetch = receiptor.get(self.hab.pre, sn=sn)
+                    deadline = self.tyme + 15.0
+                    try:
+                        for _ in fetch:
+                            self._check_current()
+                            if self.tyme >= deadline:
+                                raise TimeoutError(f'Receipt lookup timed out for event {sn}')
+                            yield self.tock
+                    finally:
+                        fetch.close()
+                    if len(self.hab.db.wigs.get((self.hab.pre, event.said))) >= threshold:
+                        continue
+                    witnesses = [wit.qb64 for wit in self.hab.kvy.fetchWitnessState(self.hab.pre, sn)]
+                    if witnesses != self.hab.kever.wits or threshold != self.hab.kever.toader.num:
+                        raise kering.ValidationError(f'Event {sn} needs its original witness configuration')
+                    yield from self.receipt(self.hab, event, receiptor, auths)
+            self._check_current()
+            if self.app.plugin_manager:
+                for witness in self.hab.kever.wits:
+                    self.app.plugin_manager.update_witness_state_after_auth(self.vault, witness)
+            self.vault.db.idm.pin((self.hab.pre,), IdentifierMetaInfo(self.hab.pre, auth_pending=False))
             if self.signal_bridge:
-                self.signal_bridge.emit_doer_event(
-                    doer_name="AuthenticateWitnessesDoer",
-                    event_type="witness_authentication_success",
-                    data={
-                        'alias': self.hab.name,
-                        'pre': self.hab.pre,
-                        'sn': self.hab.kever.sn,
-                        'success': True
-                    }
-                )
-
-            logger.info(f"Witness authentication and delegation complete for {self.hab.name} ({self.hab.pre})")
-            return
-
-        except (kering.ValidationError, kering.AuthError) as e:
-            logger.error(f"Witness authentication/delegation failed: {e}")
-
-            # Set auth_pending flag
-            identifier_meta_info = IdentifierMetaInfo(prefix=self.hab.pre, auth_pending=True)
-            self.app.vault.db.idm.pin(keys=(self.hab.pre,), val=identifier_meta_info)
-
-            if self.signal_bridge:
-                self.signal_bridge.emit_doer_event(
-                    doer_name="AuthenticateWitnessesDoer",
-                    event_type="witness_authentication_failed",
-                    data={
-                        'alias': self.hab.name,
-                        'pre': self.hab.pre,
-                        'error': str(e),
-                        'success': False
-                    }
-                )
-            return
-
-        except Exception as e:
-            logger.exception(f"AuthenticateWitnessesDoer failed with exception: {e}")
-
-            # Set auth_pending flag
-            if self.hab:
-                identifier_meta_info = IdentifierMetaInfo(prefix=self.hab.pre, auth_pending=True)
-                self.app.vault.db.idm.pin(keys=(self.hab.pre,), val=identifier_meta_info)
-
-            if self.signal_bridge:
-                self.signal_bridge.emit_doer_event(
-                    doer_name="AuthenticateWitnessesDoer",
-                    event_type="witness_authentication_failed",
-                    data={
-                        'alias': self.hab.name if self.hab else None,
-                        'pre': self.hab.pre if self.hab else None,
-                        'error': str(e),
-                        'success': False
-                    }
-                )
-            return
+                self.signal_bridge.emit_doer_event('AuthenticateWitnessesDoer', 'witness_authentication_success',
+                    {'alias': self.hab.name, 'pre': self.hab.pre, 'sn': self.hab.kever.sn, 'success': True})
+        except Exception as ex:
+            logger.exception('Witness authentication failed')
+            self._failed(ex)
+        finally:
+            self.codes.clear()
+            if receiptor is not None:
+                self.remove([receiptor])

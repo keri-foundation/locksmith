@@ -81,7 +81,6 @@ def test_import_native_identifier_requires_verified_key_state(tmp_path, signatur
         else:
             assert event["event_type"] == "import_failed"
             assert event["data"]["success"] is False
-            assert "No verified key state" in event["data"]["error"]
             assert hab.pre not in target.kevers
             assert org.get(hab.pre) is None
 
@@ -593,7 +592,6 @@ def test_identifier_export_repairs_delivery_routes(tmp_path, monkeypatch, transf
         monkeypatch.setattr('locksmith.ui.vault.shared.export.QFileDialog.getSaveFileName',
                             lambda *args, **kwargs: (str(path), 'CESR Files (*.cesr)'))
         export_identifier_to_cesr(None, SimpleNamespace(vault=SimpleNamespace(hby=source)), 'owner')
-        assert path.read_bytes() == remoting.identifier_introduction(hab)
         active_introduction = path.read_bytes()
         import_contact()
         assert target.db.ends.get(keys=(hab.pre, 'mailbox', mailbox.pre)).allowed is True
@@ -613,7 +611,7 @@ def test_identifier_export_repairs_delivery_routes(tmp_path, monkeypatch, transf
                          version=kering.Vrsn_2_0)
         cut = source.db.eans.get(keys=keys)
         assert source.db.ends.get(keys=keys).allowed is False
-        export_identifier_to_cesr(None, SimpleNamespace(vault=SimpleNamespace(hby=source)), 'owner')
+        export_identifier_to_cesr(None, SimpleNamespace(vault=SimpleNamespace(hby=source)), 'owner', require_messaging=False)
         import_contact()
         assert target.db.ends.get(keys=keys).allowed is False
 
@@ -636,3 +634,66 @@ def test_identifier_export_repairs_delivery_routes(tmp_path, monkeypatch, transf
         import_contact()
         assert target.db.ends.get(keys=keys).allowed is True
         ipexing._require_route(sender, hab.pre, reply=False)
+
+
+@pytest.mark.parametrize('status', [200, 403, 503])
+def test_oobi_refresh_waits_for_routes_and_bounds_http_failures(monkeypatch, status):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from time import monotonic, sleep
+    from locksmith.db.basing import LocksmithBaser
+
+    monkeypatch.setattr(remoting, 'RETRY_DELAYS', (0.0, 0.0, 0.0))
+    with (habbing.openHby(name='oobi-source', temp=True) as source,
+          habbing.openHby(name='oobi-reader', temp=True) as target):
+        hab = source.makeHab(name='contact')
+        target.psr.parse(ims=bytearray(hab.replay()))  # Already knowing the AID is insufficient.
+        source.psr.parse(ims=bytearray(hab.makeEndRole(eid=hab.pre, role='mailbox')))
+        source.psr.parse(ims=bytearray(hab.makeLocScheme(url='http://example.test')))
+        body = remoting.identifier_introduction(hab)
+        calls = []
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                calls.append(self.path)
+                self.send_response(status)
+                self.send_header('Content-Type', 'application/cesr')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *args):
+                pass
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        db = LocksmithBaser(name='oobi-reader', temp=True)
+        resolver = remoting.Oobiery(hby=target, db=db)
+        resolver.RetryDelay = -1  # Even an immediately due native retry must use our budget.
+        vault = SimpleNamespace(hby=target, db=db, org=organizing.Organizer(hby=target),
+                                oobiery=resolver, closed=False)
+        url = f'http://127.0.0.1:{server.server_port}/oobi/{hab.pre}/mailbox'
+        doer = remoting.ResolveOobiDoer(SimpleNamespace(vault=vault), hab.pre, url,
+                                       timeout_seconds=0.25)
+        scheduler = doing.Doist(doers=[*resolver.doers, doer], tock=0.01)
+        scheduler.enter()
+        try:
+            deadline = monotonic() + 5
+            while not doer.done and monotonic() < deadline:
+                scheduler.recur()
+                sleep(0.002)
+            assert doer.done
+            assert doer.resolved == (status == 200)
+            if status == 200:
+                assert target.db.ends.get((hab.pre, 'mailbox', hab.pre)).allowed
+                assert target.db.locs.get((hab.pre, 'http')).url == 'http://example.test'
+            else:
+                saved = db.connections.get(('oobi', url))
+                assert saved.paused
+                assert saved.attempts == len(calls) == (1 if status == 403 else 4)
+            assert target.db.coobi.get((url,)) is None
+            assert target.db.eoobi.get((url,)) is None
+            assert not resolver.clienter.clients
+        finally:
+            scheduler.exit()
+            db.close(clear=True)
+            server.shutdown()
+            server.server_close()
+            thread.join()

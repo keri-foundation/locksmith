@@ -859,17 +859,13 @@ def generate_oobi(app, hab, role='witness'):
                     oobis.append(urljoin(up.geturl(), f'/oobi/{hab.pre}/controller'))
 
         elif role == 'mailbox':
-            # Fetch agent/mailbox URL OOBIs
-            roleUrls = hab.fetchRoleUrls(
-                hab.pre, scheme=kering.Schemes.http, role=kering.Roles.agent
-            ) or hab.fetchRoleUrls(hab.pre, scheme=kering.Schemes.https, role=kering.Roles.agent)
-
-            if roleUrls and 'agent' in roleUrls:
-                for eid, urls in roleUrls['agent'].items():
-                    url = urls[kering.Schemes.http] if kering.Schemes.http in urls else urls.get(kering.Schemes.https)
-                    if url:
-                        up = urlparse(url)
-                        oobis.append(urljoin(up.geturl(), f'/oobi/{hab.pre}/agent/{eid}'))
+            for (_, _, eid), end in hab.db.ends.getTopItemIter(keys=(hab.pre, kering.Roles.mailbox)):
+                if not end.allowed:
+                    continue
+                urls = hab.fetchUrls(eid=eid, scheme="")
+                url = urls.get(kering.Schemes.https) or urls.get(kering.Schemes.http)
+                if url:
+                    oobis.append(urljoin(url, f'/oobi/{hab.pre}/mailbox/{eid}'))
 
         if not oobis:
             return {

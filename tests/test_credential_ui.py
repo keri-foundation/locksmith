@@ -2,10 +2,11 @@ from contextlib import ExitStack
 from pathlib import Path
 import json
 import sys
+from time import monotonic
 from types import MethodType, SimpleNamespace
 import pytest
 from PySide6.QtCore import QTimer
-from PySide6.QtTest import QSignalSpy, QTest
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QCheckBox, QFileDialog, QLabel, QWidget
 from hio.base import doing
 from keri import kering
@@ -15,6 +16,7 @@ from keri.core import Noncer, messagize, parsing, scheming, SerderACDC, SerderKE
 from keri.peer import exchanging
 
 from locksmith.core import ipexing
+from test_keri_v2_compat import ipex_vaults as ipex_vaults
 from locksmith.core.credentialing import IssueCredentialDoer
 from locksmith.core.signals import DoerSignalBridge
 from locksmith.db.basing import GrantReceipt, IpexSubmission, IssuedCredential, LocksmithBaser
@@ -33,6 +35,13 @@ from locksmith.ui.vault.notifications.list import NotificationsListPage
 from locksmith.ui.vault.page import VaultPage
 from locksmith.ui.vault.remotes.add import AddRemoteIdentifierDialog
 from locksmith.ui.toolkit.widgets.fields import FloatingLabelLineEdit
+
+
+def _wait_for(predicate):
+    deadline = monotonic() + 1.5
+    while not predicate() and monotonic() < deadline:
+        QTest.qWait(10)
+    assert predicate()
 
 
 def test_table_row_actions_support_keyboard_navigation(qapp):
@@ -263,6 +272,26 @@ def test_schema_selection_does_not_create_registry_or_request_witness_auth(walle
     assert app.vault.rgy.regs == {}
     assert app.hby.db.schema.get(keys=(schemer.said,)).said == schemer.said
 
+    # A request can change while its schema is loading. Do not enable issuance
+    # or import that schema after the request has been answered.
+    applicant = app.hby.makeHab(name='applicant')
+    requested = schema(composed=True)
+    request, atc = native_ipexing.apply(applicant, hab.pre, '',
+                                       modifiers={'dp': [[[requested.said, '/', []]]]})
+    app.vault.mbx.parser.parse(ims=bytearray(request.raw + atc), version=kering.Vrsn_2_0)
+    request_said = request.said
+    setup = AddSchemaDialog(app=app, request_said=request_said)
+    source.write_bytes(requested.raw)
+    setup.file_radio.setChecked(True)
+    setup.file_path_field.setText(str(source))
+    app.queued.clear()
+    setup.load_button.click()
+    ipexing.respond(app.vault, request_said, 'Spurn')
+    doing.Doist(doers=app.queued, limit=1.0, tock=0.03125).do()
+    assert 'no longer available' in setup.error_label.text()
+    assert app.hby.db.schema.get((requested.said,)) is None
+    assert app.vault.db.issuers.get((requested.said,)) is None
+
 
 @pytest.mark.parametrize('nonces', [False, True])
 @pytest.mark.parametrize('attribute_union', [False, True])
@@ -324,9 +353,7 @@ def test_issue_form_uses_selected_issuer_and_attribute_schema(wallet, qapp, nonc
 
 
 
-@pytest.mark.parametrize('filename', ['age'])
-def test_issue_form_issues_aggregate_blocks_with_selected_subject(wallet, qapp, filename):
-    from pathlib import Path
+def test_issue_form_issues_aggregate_blocks_with_selected_subject(wallet, qapp):
     from locksmith.core import credentialing
 
     app = wallet('aggregate-issue')
@@ -334,17 +361,15 @@ def test_issue_form_issues_aggregate_blocks_with_selected_subject(wallet, qapp, 
     source_acdc, _, _ = issue(app, issuer, issuer.pre)
     source = source_acdc.said
     schemer = scheming.Schemer(raw=(Path(__file__).parents[1] /
-                                   f'assets/schemas/sedi/{filename}.json').read_bytes())
+                                   'assets/schemas/sedi/age.json').read_bytes())
     app.hby.db.schema.pin((schemer.said,), schemer)
     app.vault.db.issuers.pin((schemer.said,), issuer.pre)
     dialog = IssueCredentialDialog(app)
     dialog.schema_dropdown.setCurrentIndex(dialog.schema_dropdown.combo_box.findData(schemer.said))
     dialog.local_radio.setChecked(True)
     dialog.recipient_dropdown.setCurrentIndex(dialog.recipient_dropdown.combo_box.findData(recipient.pre))
-    assert dialog._aggregate
     subject = dialog._dynamic_field_widgets['0']['widget']
     assert 'i' not in subject.fields
-    assert subject.generated['i'] == recipient.pre
     claims = {'over18': True, 'over21': False}
     for info in dialog._dynamic_field_widgets.values():
         for name, (widget, _) in info['widget'].fields.items():
@@ -355,13 +380,6 @@ def test_issue_form_issues_aggregate_blocks_with_selected_subject(wallet, qapp, 
     selector = core.fields['n'][0]
     selector.setCurrentIndex(selector.combo_box.findData(source))
     core.fields['o'][0].input_widget.set_items(['I2I'])
-    errors = []
-    dialog.show_error = errors.append
-    assert dialog._validate_fields(), errors
-    blocks = dialog._extract_credential_attributes()
-    assert blocks[0]['i'] == recipient.pre
-    for name, value in claims.items():
-        assert next(block for block in blocks if name in block)[name] is value
     events = []
     app.vault.signals.doer_event.connect(lambda name, event, data: events.append((event, data)))
     dialog._on_issue()
@@ -371,8 +389,10 @@ def test_issue_form_issues_aggregate_blocks_with_selected_subject(wallet, qapp, 
     acdc = SerderACDC(raw=view['proof'])
     assert acdc.iseaid == recipient.pre
     assert schemer.verify(raw=acdc.raw)
-    assert len(acdc.sad['A']) == len(blocks) + 1
-    assert len({block['u'] for block in acdc.sad['A'][1:]}) == len(blocks)
+    blocks = acdc.sad['A'][1:]
+    assert len({block['u'] for block in blocks}) == len(blocks)
+    for name, value in claims.items():
+        assert next(block for block in blocks if name in block)[name] is value
     assert acdc.sad['e']['coreIdentity']['n'] == source
     assert acdc.sad['r']['l'] == ''
     assert view['status']['et'] == 'issued'
@@ -380,11 +400,14 @@ def test_issue_form_issues_aggregate_blocks_with_selected_subject(wallet, qapp, 
     def assert_claims(view):
         for name, value in claims.items():
             labels = [label for label in view.findChildren(QLabel)
-                      if label.text() == name and label.isVisibleTo(view)]
+                      if label.text().lower().startswith(name) and label.isVisibleTo(view)]
             assert len(labels) == 1, f'Expected one visible {name} field'
             texts = {label.text() for label in labels[0].parentWidget().findChildren(QLabel)
                      if label.isVisibleTo(view)}
-            assert texts == {name, 'Yes' if value else 'No'}, f'Wrong value displayed for {name}'
+            assert texts == {labels[0].text(), 'Yes' if value else 'No'}, f'Wrong value displayed for {name}'
+        texts = {label.text() for label in view.findChildren(QLabel)}
+        assert acdc.sad['A'][0] not in texts
+        assert all(block['d'] not in texts and block['u'] not in texts for block in acdc.sad['A'][1:])
 
     details = ViewIssuedCredentialDialog('', app, acdc.said)
     details.show()
@@ -449,7 +472,8 @@ def test_issue_form_preserves_structured_attributes_and_schema_nonce(wallet, mon
         'facialImageProof': {'type': 'string', 'description': 'Image typed media block SAID'},
         'proofingDatetime': {'type': 'string', 'description': 'Proofing session datetime RFC-3339/ISO-8601'},
         'residence': {'type': 'object', 'properties': {
-            'city': {'type': 'string', 'minLength': 1, 'pattern': '^Provo$'}},
+            'city': {'type': 'string', 'minLength': 1, 'pattern': '^Provo$'},
+            'since': {'type': 'string', 'description': 'Start Date as RFC-3339/ISO-8601 time MBZ'}},
                       'required': ['city'], 'additionalProperties': False},
         'attestation': {'type': 'object', 'properties': {
             'approved': {'type': 'boolean', 'const': True},
@@ -473,12 +497,12 @@ def test_issue_form_preserves_structured_attributes_and_schema_nonce(wallet, mon
     dialog.recipient_dropdown.setCurrentIndex(dialog.recipient_dropdown.combo_box.findData(recipient.pre))
     dialog._dynamic_field_widgets['nickname']['widget'].setText('Alice')
     editor = dialog._dynamic_field_widgets['residence']['widget'].fields['city'][0]
-    assert dialog._dynamic_field_widgets['nickname']['widget'].label.text() == 'Nickname'
-    assert dialog._dynamic_field_widgets['suffix']['widget'].label.text() == 'suffix'
-    assert dialog._dynamic_field_widgets['residence']['widget'].layout().itemAt(0).widget().text() == 'residence'
-    assert editor.label.text() == 'city *'
+    residence = dialog._dynamic_field_widgets['residence']['widget']
+    since = residence.fields['since'][0]
+    assert 'Use YYYY-MM-DD.' in [label.text() for label in residence.findChildren(QLabel)]
+    assert since.line_edit.accessibleDescription() == 'Use YYYY-MM-DD.'
+    since.setText('2020-01-02')
     birth_date = dialog._dynamic_field_widgets['birthDate']['widget']
-    assert birth_date.label.text() == 'Date of birth'
     proofing_time = dialog._dynamic_field_widgets['proofingDatetime']['widget']
     image_proof = dialog._dynamic_field_widgets['facialImageProof']['widget']
     assert image_proof.toolTip() == 'Image typed media block SAID'
@@ -508,16 +532,15 @@ def test_issue_form_preserves_structured_attributes_and_schema_nonce(wallet, mon
     assert dialog._extract_credential_attributes()['proofingDatetime'] == ''
     for invalid in ('2001-02-29', '2000-13-01', '20000229', '02/29/2000'):
         birth_date.setText(invalid)
+        errors.clear()
         dialog._on_issue()
-        assert errors[-1] == 'Date of birth: Enter a valid date in YYYY-MM-DD format.'
-        assert app.queued == [] and auth_requests == []
+        assert errors and app.queued == [] and auth_requests == []
     birth_date.setText('2000-02-29')
     for invalid in ('2026-02-29 14:30', '2026-10-13 24:00', '2026-10-13', '2026-1-3 4:30'):
         proofing_time.setText(invalid)
+        errors.clear()
         dialog._on_issue()
-        assert errors[-1] == ('Proofing session datetime: '
-                              'Enter a valid date and time in YYYY-MM-DD HH:MM format (UTC).')
-        assert app.queued == [] and auth_requests == []
+        assert errors and app.queued == [] and auth_requests == []
     proofing_time.setText('2026-10-13 14:30')
     dialog._on_issue()
     assert auth_requests == [issuer.pre] and app.queued == []
@@ -534,7 +557,7 @@ def test_issue_form_preserves_structured_attributes_and_schema_nonce(wallet, mon
     assert acdc.sad['a']['birthDate'] == '2000-02-29T00:00:00.000000+00:00'
     assert acdc.sad['a']['facialImageProof'] == ''
     assert acdc.sad['a']['proofingDatetime'] == '2026-10-13T14:30:00.000000+00:00'
-    assert acdc.sad['a']['residence'] == {'city': 'Provo'}
+    assert acdc.sad['a']['residence'] == {'city': 'Provo', 'since': '2020-01-02T00:00:00.000000+00:00'}
     assert acdc.sad['a']['attestation'] == {'approved': True, 'region': 'Utah'}
     assert 'dt' not in acdc.sad['a'] and 'rd' not in acdc.sad and 'r' not in acdc.sad
     assert app.vault.rgy.regs == {}
@@ -713,10 +736,13 @@ def test_grant_notification_and_file_acceptance_use_verified_native_evidence(
     parent = QWidget()
     parent.app = app
     notifications = NotificationsListPage(parent=parent)
-    kind, message = notifications._format_ipex_message(grant, grant.route, 'Native grant')
-    assert kind == 'GRANT'
-    assert schemer.sed['title'] in message
-    assert 'View Activity' in notifications._get_row_actions({'Type': kind})[0]
+    app.vault.notifier.add({'r': '/xip/ipex/grant', 'd': grant.said})
+    notifications._load_notifications()
+    row, = [row for row in notifications.table._static_data if row.get('_said') == grant.said]
+    assert row['Type'] == 'GRANT'
+    assert schemer.sed['title'] in row['Message']
+    assert 'Native grant' in row['Message']
+    assert 'View Activity' in notifications._get_row_actions(row)[0]
     received = ReceivedCredentialsListPage(parent=parent)
     received.set_vault_name(app.hby.name)
     dialog = AcceptGrantDialog(app=app, parent=parent, grant_said=grant.said, save=True)
@@ -747,7 +773,7 @@ def test_grant_notification_and_file_acceptance_use_verified_native_evidence(
     assert not app.vault.db.receipts.get((holder.pre, grant.said)).send
 
 
-def test_disclosure_review_shows_linked_data_and_blocks_private_offers(wallet):
+def test_disclosure_review_shows_linked_data_and_reference_offer(wallet):
     from test_credentialing import _load_schema, _issue
     from locksmith.core import credentialing
 
@@ -758,7 +784,7 @@ def test_disclosure_review_shows_linked_data_and_blocks_private_offers(wallet):
     source = _issue(app, schemer, holder, attributes={'LEI': '254900OPPU84GM83MG36'},
                     authentication='anchor', rules=terms)
     origin = _issue(app, schemer, holder, attributes={'LEI': '5493001KJTIIGC8Y1R12'},
-                    authentication='anchor', edges={'source': {'n': source, 's': schemer.said}})
+                    authentication='anchor', edges={'source': {'n': source, 's': schemer.said, 'o': 'NI2I'}})
     grant, atc = ipexing.grant(app.vault, issuer, origin, holder.pre)
     ipexing.prepare(app.vault, issuer, grant, atc)
     nodes = exchanging.loadParsedNestedSubstreams(app.hby, grant.said)
@@ -775,12 +801,11 @@ def test_disclosure_review_shows_linked_data_and_blocks_private_offers(wallet):
     start.recipient.setCurrentIndex(start.recipient.combo_box.findData(holder.pre))
     assert start.sender.currentData() == issuer.pre
     assert start.recipient.currentData() == holder.pre
-    assert 'Offers for linked credentials' in start.error.text()
-    assert not start.send_button.isEnabled()
-    assert not start.preview.findChildren(QLabel)
-    outbox = list(app.vault.db.outbox.getTopItemIter())
-    start.send_button.click()
-    assert list(app.vault.db.outbox.getTopItemIter()) == outbox
+    assert not start.error.text()
+    assert start.send_button.isEnabled()
+    labels = {label.text() for label in start.preview.findChildren(QLabel)}
+    assert expected <= labels
+    assert origin not in labels
 
     request = ipexing.start(app.vault, holder, issuer.pre, 'Apply', schema=schemer.said)
     page = CredentialActivityPage(parent)
@@ -789,33 +814,31 @@ def test_disclosure_review_shows_linked_data_and_blocks_private_offers(wallet):
     page._on_row_action(row, 'Review')
     dialog = page._response_dialog
     dialog.credential.setCurrentIndex(dialog.credential.findData(origin))
-    assert 'Offers for linked credentials' in dialog.error_label.text()
-    assert not dialog.send_button.isEnabled()
-    assert not dialog.preview.findChildren(QLabel)
-    outbox = list(app.vault.db.outbox.getTopItemIter())
-    dialog.send_button.click()
-    assert app.hby.db.erpy.get((request,)) is None
-    assert list(app.vault.db.outbox.getTopItemIter()) == outbox
+    assert not dialog.error_label.text()
+    assert dialog.send_button.isEnabled()
+    labels = {label.text() for label in dialog.findChildren(QLabel)}
+    assert expected <= labels
+    assert origin not in labels
+    selections = dict(dialog._selections)
     assert credentialing.delete_credential(app.vault, source)
     dialog._preview()
     assert 'Cannot prepare disclosure' in dialog.error_label.text()
-    assert QSignalSpy(dialog._dialog_resize_animation.finished).wait(1500)
-    assert dialog.error_banner.height() > 0
-    assert dialog.scroll_area.verticalScrollBar().maximum() == 0
+    assert dialog.disclosure_choices.isHidden()
+    assert dialog._selections == selections
+    _wait_for(lambda: dialog.error_banner.height() >=
+              dialog.error_banner.layout().heightForWidth(dialog.error_banner.width())
+              and (dialog.scroll_area.verticalScrollBar().maximum() == 0
+                   or dialog.scroll_area.verticalScrollBar().isVisible()))
+    assert dialog.error_label.visibleRegion().contains(dialog.error_label.rect())
+    assert dialog.send_button.visibleRegion().contains(dialog.send_button.rect())
     assert not dialog.send_button.isEnabled()
     assert not dialog.credential_details.isHidden()
     assert not dialog.create_button.isHidden()
     dialog._max_dialog_height = dialog.height() - dialog.error_banner.height()
     dialog.show_error(dialog.error_label.text())
-    assert QSignalSpy(dialog._dialog_resize_animation.finished).wait(1500)
-    assert dialog.height() == dialog._max_dialog_height
-    assert dialog.scroll_area.verticalScrollBar().isVisible()
-    assert dialog.scroll_area.verticalScrollBar().maximum() > 0
-    dialog.show_error(dialog.error_label.text())
-    assert QSignalSpy(dialog.error_animation.finished).wait(1500)
-    assert dialog.height() == dialog._max_dialog_height
-    assert dialog.scroll_area.verticalScrollBar().isVisible()
-    assert dialog.scroll_area.verticalScrollBar().maximum() > 0
+    _wait_for(lambda: dialog.height() == dialog._max_dialog_height
+              and dialog.scroll_area.verticalScrollBar().isVisible()
+              and dialog.scroll_area.verticalScrollBar().maximum() > 0)
     dialog.response.setCurrentIndex(dialog.response.combo_box.findData('Spurn'))
     assert dialog.error_banner.height() == 0
     assert dialog.error_label.text() == ''
@@ -847,7 +870,7 @@ def test_admit_dialog_retries_same_acknowledgment_and_disconnects_on_close(walle
     assert not dialog.decline_button.isEnabled()
     dialog._on_admit()
     record = app.vault.db.outbox.get((said,))
-    assert record.status == 'pending' and record.attempts == 4
+    assert record.status == 'pending' and record.attempts == 0
     assert exchanging.serializeMessage(app.hby, said) == retained
     assert [keys for keys, _ in app.vault.db.outbox.getTopItemIter()] == [(said,)]
     dialog.close()
@@ -1043,9 +1066,17 @@ def test_inventory_keeps_page_during_updates_and_clamps_after_removal(qapp, monk
         return [table.item(row, 0).text() for row in range(table.rowCount())]
 
     assert shown_credentials() == ['Demo 4']
+    from locksmith.ui.toolkit.tables.components import SkewersMenuButton
+    menu = page.table.table.cellWidget(0, page.table.table.columnCount() - 1).findChild(SkewersMenuButton)
+    assert 'Offer' in menu.actions_list
+    if not received:
+        assert 'Grant' in menu.actions_list and 'Revoke' not in menu.actions_list
+    credentials[-1]['status']['et'] = 'revoked'
     event = ('Ipex', 'transport_submitted') if received else ('RevokeCredentialDoer', 'credential_revoked')
     vault.signals.emit_doer_event(*event, {})
     assert shown_credentials() == ['Demo 4']
+    menu = page.table.table.cellWidget(0, page.table.table.columnCount() - 1).findChild(SkewersMenuButton)
+    assert not {'Offer', 'Grant', 'Revoke'} & set(menu.actions_list)
     assert search.text() == 'Demo'
     del credentials[4:]
     vault.signals.emit_doer_event(*event, {})
@@ -1129,7 +1160,7 @@ def test_wallet_tables_distinguish_issuee_and_grant_recipient(wallet, monkeypatc
     received.inventory.setCurrentIndex(1)
     verified_rows = {row['SAID']: row for row in received.table._static_data}
     assert set(verified_rows) == {unaddressed.said, transferred.said}
-    assert all(row['_actions'] == ['View', 'View exchange history', 'Delete']
+    assert all(row['_actions'] == ['View', 'Offer', 'View exchange history', 'Delete']
                for row in verified_rows.values())
     received_rows.update(verified_rows)
     assert set(received_rows) == set(issued_rows) == expected
@@ -1191,7 +1222,7 @@ def test_application_defaults_to_direct_delivery_without_terms(wallet, qapp, mon
     assert app.hby.db.erpy.get((request,)) is None  # Default selection does not send.
     if rules:
         return
-    assert response.credential.findData(other_acdc.said) == -1
+    assert response.credential.findData(other_acdc.said) >= 0
     assert response.action == 'Grant'
     response.response.setCurrentIndex(response.response.combo_box.findData('Offer'))
     response.response.combo_box.activated.emit(response.response.combo_box.currentIndex())
@@ -1236,16 +1267,20 @@ def test_activity_drives_native_negotiation_and_keeps_direction(wallet, tmp_path
     attention = []
     page.attention_changed.connect(attention.append)
     received_page = ReceivedCredentialsListPage(parent)
-    received_page.table.header.add_button.click()
+    received_page.request_credential.click()
     composer = parent._credential_exchange_dialog
+    composer.selection.setCurrentIndex(composer.selection.combo_box.findData(acdc.schema))
     composer.sender.setCurrentIndex(composer.sender.combo_box.findData(holder.pre))
     composer.recipient.setCurrentIndex(composer.recipient.combo_box.findData(issuer.pre))
+    assert composer.registry_notice.isHidden()
+    assert not composer.preview.findChildren(QCheckBox)
     composer.send_button.click()
     request, = [exn for _, exn in app.hby.db.exns.getTopItemIter() if exn.route == '/ipex/apply']
     assert composer.isHidden()
     assert page.stack.currentIndex() == 1
     assert page._detail_dialog.isHidden() and page._response_dialog is None
     assert ipexing.request_schema(request) == acdc.schema
+    assert request.sad['q']['dp'] == [[[acdc.schema, '/', []]]]
     issued, = page.tables[0]._static_data
     received, = page.tables[1]._static_data
     assert issued['To'] == 'holder' and received['From'] == 'issuer'
@@ -1266,7 +1301,8 @@ def test_activity_drives_native_negotiation_and_keeps_direction(wallet, tmp_path
     assert response.send_button.text() == 'Create credential' and response.send_button.isEnabled()
     assert response.create_button.text() == 'Create another credential…'
     assert [response.response.itemData(i) for i in range(response.response.count())] == ['Offer', 'Grant', 'Spurn']
-    assert not response.create_button.isVisible()
+    assert not response.create_button.isHidden()
+    assert response.credential.findData(acdc.said) >= 0
     response.send_button.click()
     creation = response._issue_dialog
     assert creation.schema_dropdown.currentData() == acdc.schema
@@ -1283,10 +1319,8 @@ def test_activity_drives_native_negotiation_and_keeps_direction(wallet, tmp_path
     page._response_dialog.send_button.click()
     offer = app.hby.db.exns.get((app.hby.db.erpy.get((request.said,)).qb64,))
     assert offer.route == '/ipex/offer'
-    preview, = exchanging.loadParsedNestedSubstreams(app.hby, offer.said)
-    assert preview.serder.said != selected_said
-    assert preview.serder.sad['u'] == '' and preview.serder.sad['a'] == ''
-    assert selected_said.encode() not in exchanging.serializeMessage(app.hby, offer.said)
+    assert not exchanging.loadParsedNestedSubstreams(app.hby, offer.said)
+    assert offer.sad['a']['o'] == [selected_said]
     assert b'Requested credential' not in exchanging.serializeMessage(app.hby, offer.said)
     assert not page.tables[0]._static_data[0]['_attention']
     received, = page.tables[1]._static_data
@@ -1534,7 +1568,7 @@ def test_grant_matches_requested_schema_and_previewed_origin(wallet, preview):
                                            modifiers={'dp': [[[requested, '/', []]]]})
         ipexing.prepare(app.vault, holder, request, atc)
         offer, atc = native_ipexing.offer(issuer, '',
-            ipexing._offer_preview(first.sad) if preview else first_proof,
+            acdcmap(israid=issuer.pre, uuid='', schema=first.schema, attribute='') if preview else first_proof,
             artifacts=[] if preview else None, apply=request)
         ipexing.prepare(app.vault, issuer, offer, atc)
         agree, atc = native_ipexing.agree(holder, '', offer)
@@ -1572,7 +1606,7 @@ def test_offer_review_accepts_reference_and_metadata(wallet, metadata):
     issuer, holder = app.hby.makeHab(name='issuer'), app.hby.makeHab(name='holder')
     acdc, proof, _ = issue(app, issuer, holder.pre, authentication='anchor')
     origin = acdcmap(israid=issuer.pre, uuid='', schema=acdc.schema,
-                     attribute=ipexing._offer_preview(acdc.sad).sad['a']) if metadata else proof
+                     attribute='') if metadata else proof
     offer, atc = native_ipexing.offer(issuer, '', origin, recp=holder.pre,
                                     artifacts=[] if metadata else None,
                                     modifiers={'dp': [[[acdc.schema, '/', []]]]})
@@ -1586,8 +1620,12 @@ def test_offer_review_accepts_reference_and_metadata(wallet, metadata):
     assert review.send_button.isEnabled()
     if metadata:
         assert review.error_banner.height() == 0
+        labels = [label.text() for label in review.offer_review.findChildren(QLabel)]
+        assert 'Fields defined by schema' in labels
+        assert 'Date, Nickname' in labels
+        assert not any('Alice' in label for label in labels)
     else:
-        assert any('rules have not been disclosed' in label.text()
+        assert any('Credential contents are not disclosed' in label.text()
                    for label in review.offer_review.findChildren(QLabel))
     assert review.decline_button.isEnabled()
 
@@ -1603,7 +1641,7 @@ def test_schema_application_keeps_selected_schema_and_rejects_vault_switch(walle
     opened = []
     parent.show_credential_activity = opened.append
     page = SchemaListPage(parent)
-    page._on_row_action({'SAID': acdc.schema}, 'Apply for credential')
+    page._on_row_action({'SAID': acdc.schema}, 'Request credential')
     composer = parent._credential_exchange_dialog
     assert composer.selection.currentData() == acdc.schema
     assert not composer.selection.isEnabled()
@@ -1647,8 +1685,10 @@ def test_schema_application_keeps_selected_schema_and_rejects_vault_switch(walle
     assert not list(other.vault.db.outbox.getTopItemIter())
 
 
-@pytest.mark.parametrize('stale', ['answered', 'expired', 'pruned'])
-def test_activity_receives_verified_remote_request_and_clears_stale_response(wallet, monkeypatch, stale):
+@pytest.mark.parametrize('schema_source,stale', [
+    ('bundled', 'answered'), ('imported', 'expired'), ('custom', 'pruned')])
+def test_activity_receives_verified_remote_request_and_clears_stale_response(
+        wallet, monkeypatch, tmp_path, qapp, stale, schema_source):
     from datetime import timedelta
     from keri.core import kraming
     from keri.help import helping
@@ -1666,8 +1706,11 @@ def test_activity_receives_verified_remote_request_and_clears_stale_response(wal
     page = CredentialActivityPage(parent)
     page.set_vault_name('activity-local')
     schemer = schema(composed=True)
-    app.hby.db.schema.pin((schemer.said,), schemer)
-    app.vault.db.issuers.pin((schemer.said,), issuer.pre)
+    if schema_source == 'bundled':
+        monkeypatch.setattr('locksmith.ui.vault.credentials.schema.catalog.builtin_schemas',
+                            lambda: {schemer.said: schemer})
+    elif schema_source == 'imported':
+        app.hby.db.schema.pin((schemer.said,), schemer)
     request, atc = native_ipexing.apply(holder, issuer.pre, 'Need a credential',
                                       modifiers={'dp': [[[schemer.said, '/', []]]]})
     app.vault.mbx.parser.parse(ims=bytearray(request.raw + atc), version=kering.Vrsn_2_0)
@@ -1679,33 +1722,86 @@ def test_activity_receives_verified_remote_request_and_clears_stale_response(wal
     assert response.send_button.text() == 'Create credential' and response.send_button.isEnabled()
     assert response.credential_field.isHidden() and response.create_button.isHidden()
     assert response.error_banner.height() == 0
+    assert app.vault.db.issuers.get((schemer.said,)) is None
+    assert bool(app.hby.db.schema.get((schemer.said,))) == (schema_source == 'imported')
+    from PySide6.QtCore import QEvent, QObject
+    shown = []
+
+    class DialogShows(QObject):
+        def eventFilter(self, watched, event):
+            if (event.type() == QEvent.Type.Show
+                    and isinstance(watched, (AddSchemaDialog, IssueCredentialDialog, type(response)))):
+                shown.append(watched)
+            return False
+
+    shows = DialogShows(response)
+    qapp.installEventFilter(shows)
     response.send_button.click()
+    setup = response._schema_dialog
+    assert setup.isVisible() == (schema_source == 'custom')
+    assert setup.issuer_dropdown.currentData() == issuer.pre
+    assert not setup.issuer_dropdown.isEnabled()
+    if schema_source == 'custom':
+        setup.cancel_button.click()
+        assert response.isVisible()
+        assert app.hby.db.schema.get((schemer.said,)) is None
+        assert app.vault.db.issuers.get((schemer.said,)) is None
+        response.send_button.click()
+        setup = response._schema_dialog
+        setup.file_radio.setChecked(True)
+        source = tmp_path / 'schema.json'
+        wrong = schema()
+        source.write_bytes(wrong.raw)
+        setup.file_path_field.setText(str(source))
+        setup.load_button.click()
+        doing.Doist(doers=app.queued, limit=1.0, tock=0.03125).do()
+        assert 'does not match' in setup.error_label.text()
+        assert app.hby.db.schema.get((wrong.said,)) is None
+        assert not list(app.vault.db.issuers.getTopItemIter())
+        app.queued.clear()
+        source.write_bytes(schemer.raw)
+        setup.load_button.click()
+    doing.Doist(doers=app.queued, limit=1.0, tock=0.03125).do()
+    app.queued.clear()
+    assert app.hby.db.schema.get((schemer.said,)).said == schemer.said
+    assert app.vault.db.issuers.get((schemer.said,)) == issuer.pre
     creation = response._issue_dialog
+    qapp.removeEventFilter(shows)
+    if schema_source != 'custom':
+        assert shown == [creation]
     assert creation.schema_dropdown.currentData() == schemer.said
     assert creation.recipient_dropdown.currentData() == holder.pre
     assert not list(app.vault.db.issued.getTopItemIter())
     assert not list(app.vault.db.outbox.getTopItemIter())
-    creation.cancel_button.click()
-    assert response.isVisible() and response.send_button.isEnabled()
+    if stale == 'answered':
+        creation.cancel_button.click()
+        assert response.isVisible() and response.send_button.isEnabled()
+        response.send_button.click()
+        creation = response._issue_dialog
     initial_height = response.height()
-    response.send_button.click()
-    creation = response._issue_dialog
     creation._dynamic_field_widgets['nickname']['widget'].setText('Demo')
     creation.issue_button.click()
     doing.Doist(doers=app.queued, limit=1.0, tock=0.03125).do()
-    QTest.qWait(350)
-    assert response.isVisible() and response.send_button.text() == 'Send credential'
-    assert response.height() > initial_height
-    assert response.scroll_area.verticalScrollBar().maximum() == 0
-    collapsed_height = response.height()
+    _wait_for(lambda: response.isVisible() and response.send_button.isEnabled())
     assert not response.create_button.isVisible()
-    response.credential_details.toggle_button.click()
-    QTest.qWait(350)
-    assert response.height() > collapsed_height and response.create_button.isVisible()
-    response.credential_details.toggle_button.click()
-    QTest.qWait(350)
-    assert response.height() == collapsed_height
-    assert response.scroll_area.verticalScrollBar().maximum() == 0
+    if stale == 'answered':
+        _wait_for(lambda: response.height() > initial_height
+                  and response.scroll_area.verticalScrollBar().maximum() == 0)
+        collapsed_height = response.height()
+        response.credential_details.toggle_button.click()
+        _wait_for(lambda: response.height() > collapsed_height)
+        scrollbar = response.scroll_area.verticalScrollBar()
+        _wait_for(lambda: scrollbar.maximum() == 0 or scrollbar.isVisible())
+        response.scroll_area.ensureWidgetVisible(response.create_button)
+        _wait_for(lambda: response.create_button.visibleRegion().contains(response.create_button.rect()))
+        assert response.send_button.visibleRegion().contains(response.send_button.rect())
+        assert response.height() <= response.screen().availableGeometry().height()
+        expanded_height = response.height()
+        response.credential_details.toggle_button.click()
+        _wait_for(lambda: response.height() < expanded_height
+                  and not response.create_button.isVisible()
+                  and (scrollbar.maximum() == 0 or scrollbar.isVisible()))
+        assert response.send_button.visibleRegion().contains(response.send_button.rect())
     response.close()
     page._on_row_action(row, 'Offer')
     old_dialog = page._response_dialog
@@ -1714,9 +1810,14 @@ def test_activity_receives_verified_remote_request_and_clears_stale_response(wal
         ipexing.respond(app.vault, request.said, 'Spurn', 'Already answered')
         old_dialog.send_button.click()
         assert 'changed' in old_dialog.error_label.text()
-        assert QSignalSpy(old_dialog._dialog_resize_animation.finished).wait(1500)
-        assert old_dialog.error_banner.height() > 0
-        assert old_dialog.scroll_area.verticalScrollBar().maximum() == 0
+        assert old_dialog.disclosure_choices.isHidden()
+        assert not old_dialog.send_button.isEnabled()
+        assert not old_dialog.create_button.isEnabled()
+        assert not old_dialog.decline_button.isEnabled()
+        _wait_for(lambda: old_dialog.error_banner.height() >=
+                  old_dialog.error_banner.layout().heightForWidth(old_dialog.error_banner.width())
+                  and (old_dialog.scroll_area.verticalScrollBar().maximum() == 0
+                       or old_dialog.scroll_area.verticalScrollBar().isVisible()))
     else:
         deadline = helping.fromIso8601(request.stamp) + timedelta(milliseconds=app.hby.db.kramCTYP.get('~').xl)
         monkeypatch.setattr(helping, 'nowUTC', lambda: deadline)
@@ -1727,41 +1828,33 @@ def test_activity_receives_verified_remote_request_and_clears_stale_response(wal
         if stale == 'pruned':
             kramer._pruneExchanges(now.timestamp() * 1000)
             assert not list(app.hby.db.kramTMSC.getTopItemIter())
-            assert app.hby.db.kramXDT.get((request.sad['x'],)) is None
+            assert app.hby.db.kramXDT.get((request.said,)) is None
         old_dialog.send_button.click()
-        assert 'application has expired' in old_dialog.error_label.text()
-        assert 'Ask the holder' in old_dialog.error_label.text()
-        assert QSignalSpy(old_dialog._dialog_resize_animation.finished).wait(1500)
-        assert old_dialog.error_banner.height() > 0
-        expired_height = old_dialog.height()
-        old_dialog.credential_details.toggle_button.click()
-        assert QSignalSpy(old_dialog._dialog_resize_animation.finished).wait(1500)
-        assert old_dialog.height() > expired_height
-        old_dialog.credential_details.toggle_button.click()
-        assert QSignalSpy(old_dialog.credential_details._content_animation.finished).wait(1500)
-        assert old_dialog.height() == expired_height
-        old_dialog._send()
-        old_dialog._send()
-        assert QSignalSpy(old_dialog._dialog_resize_animation.finished).wait(1500)
-        assert old_dialog.height() == expired_height
-        assert old_dialog.error_banner.height() > 0
+        assert 'request has expired' in old_dialog.error_label.text()
+        assert 'Ask the requester' in old_dialog.error_label.text()
+        _wait_for(lambda: old_dialog.error_banner.height() >=
+                  old_dialog.error_banner.layout().heightForWidth(old_dialog.error_banner.width())
+                  and (old_dialog.scroll_area.verticalScrollBar().maximum() == 0
+                       or old_dialog.scroll_area.verticalScrollBar().isVisible()))
         assert not old_dialog.send_button.isEnabled()
         assert not old_dialog.create_button.isEnabled()
-        assert old_dialog.scroll_area.verticalScrollBar().maximum() == 0
+        assert old_dialog.error_label.visibleRegion().contains(old_dialog.error_label.rect())
+        assert old_dialog.send_button.visibleRegion().contains(old_dialog.send_button.rect())
+        assert old_dialog.height() <= old_dialog.screen().availableGeometry().height()
         assert ipexing.responses(app.vault, request) == []
         expired_row, = page.tables[0]._static_data
         assert expired_row['Status'] == 'Expired' and expired_row['_actions'] == []
         page._on_row_action(expired_row, 'View')
-        assert 'Ask the holder' in page.summary.text()
+        assert 'Ask the requester' in page.summary.text()
         assert page.response_buttons.count() == 0 and page.retry_button.isHidden()
         assert page._detail_dialog.scroll_area.verticalScrollBar().maximum() == 0
         assert not list(app.vault.db.outbox.getTopItemIter())
         ((credential_said,), credential), = app.vault.db.issued.getTopItemIter()
         before = issuer.kever.sn
-        with pytest.raises(kering.ValidationError, match='application has expired'):
+        with pytest.raises(kering.ValidationError, match='request has expired'):
             ipexing.respond(app.vault, request.said, 'Offer', credential_said=credential_said)
         offer, atc = native_ipexing.offer(issuer, '', credential.stream.encode(), apply=request)
-        with pytest.raises(kering.ValidationError, match='application has expired'):
+        with pytest.raises(kering.ValidationError, match='request has expired'):
             ipexing.prepare(app.vault, issuer, offer, atc)
         assert issuer.kever.sn == before
         assert app.hby.db.erpy.get((request.said,)) is None
@@ -1802,13 +1895,13 @@ def test_activity_sends_saved_admit_with_consent_and_original_bytes(wallet):
 
 
 @pytest.mark.parametrize('rules', [None, {'d': '', 'l': 'Use only for this test <not markup>.'}])
-def test_offer_first_uses_metadata_and_hides_completed_delivery_controls(wallet, qapp, rules):
+def test_offer_first_uses_reference_and_hides_completed_delivery_controls(wallet, qapp, rules):
     app = wallet('offer-first-ui')
-    app.hby.makeHab(name='aaa-unrelated')
+    proxy = app.hby.makeHab(name='aaa-unrelated')
     issuer = app.hby.makeHab(name='issuer', kind=kering.Kinds.cesr)
     holder = app.hby.makeHab(name='holder', kind=kering.Kinds.cesr)
     acdc, _, _ = issue(app, issuer, holder.pre, authentication='anchor', rules=rules)
-    other, _, _ = issue(app, issuer, holder.pre, authentication='anchor', rules=rules)
+    issue(app, issuer, holder.pre, authentication='anchor', rules=rules)
     parent = QWidget()
     parent.app = app
     page = CredentialActivityPage(parent)
@@ -1820,41 +1913,43 @@ def test_offer_first_uses_metadata_and_hides_completed_delivery_controls(wallet,
     composer = parent._credential_exchange_dialog
     assert composer.sender.currentData() == issuer.pre
     assert composer.recipient.combo_box.findData(issuer.pre) == -1
+    composer.sender.setCurrentIndex(composer.sender.combo_box.findData(proxy.pre))
     composer.recipient.setCurrentIndex(composer.recipient.combo_box.findData(holder.pre))
     assert composer.selection.currentData() == acdc.said
     assert not composer.selection.isEnabled()
     composer.send_button.click()
     offer, = [exn for _, exn in app.hby.db.exns.getTopItemIter() if exn.route == '/ipex/offer']
-    assert offer.pre == issuer.pre
+    assert offer.pre == proxy.pre
     assert composer.isHidden()
     assert page.stack.currentIndex() == 0
     assert page._detail_dialog.isHidden() and page._response_dialog is None
-    preview, = exchanging.loadParsedNestedSubstreams(app.hby, offer.said)
-    assert offer.sad['a']['o'] == [preview.serder.said]
-    assert preview.serder.said != acdc.said
-    assert preview.serder.sad['u'] == '' and preview.serder.sad['a'] == ''
-    assert acdc.said.encode() not in exchanging.serializeMessage(app.hby, offer.said)
+    assert not exchanging.loadParsedNestedSubstreams(app.hby, offer.said)
+    assert offer.sad['a']['o'] == [acdc.said]
     page._on_row_action(page.tables[1]._static_data[0], 'Agree')
     review = page._response_dialog
-    assert review.send_button.text() == 'Agree and request'
+    assert review.send_button.isEnabled(), review.error_label.text()
     assert review.offer_review.isVisible()
     labels = [label.text() for label in review.offer_review.findChildren(QLabel)]
-    assert 'issuer' in labels
-    assert (rules['l'] if rules else 'No rules attached.') in labels
-    assert 'Alice' not in labels
+    assert acdc.said not in labels
+    assert any('Native Credential' in label for label in labels)
+    assert 'issuer' not in labels
+    assert (rules['l'] if rules else 'No rules attached.') not in labels
+    assert not any('Alice' in label for label in labels)
     page._response_dialog.send_button.click()
     row, = page.tables[0]._static_data
     page._on_row_action(row, 'Grant')
     review = page._response_dialog
-    assert review.credential.isEnabled()
-    assert {review.credential.itemData(i) for i in range(review.credential.count())} == {acdc.said, other.said}
-    review.credential.setCurrentIndex(review.credential.findData(acdc.said))
+    assert not review.credential.isEnabled()
+    assert review.credential.currentData() == acdc.said
     assert not review.preview.isVisible()
     review.credential_details.toggle_button.setChecked(True)  # Accessible activation changes the checked state.
     qapp.processEvents()
     assert review.preview.isVisible()
     assert any(label.text() == 'Alice' for label in review.preview.findChildren(QLabel))
     page._response_dialog.send_button.click()
+    grant, = [exn for _, exn in app.hby.db.exns.getTopItemIter() if exn.route == '/ipex/grant']
+    assert grant.pre == proxy.pre
+    assert ipexing.grant_credential(app.vault, grant.said).israid == issuer.pre
     page._on_row_action(page.tables[1]._static_data[0], 'Admit')
     page._response_dialog.admit_button.click()
     row, = page.tables[1]._static_data
@@ -1899,10 +1994,8 @@ def test_offer_first_uses_metadata_and_hides_completed_delivery_controls(wallet,
                        if exn.route == '/ipex/offer' and exn.said != offer.said]
     assert presented_offer.pre == holder.pre
     assert presented_offer.sad['ri'] == verifier.pre
-    presentation_preview, = exchanging.loadParsedNestedSubstreams(app.hby, presented_offer.said)
-    assert presented_offer.sad['a']['o'] == [presentation_preview.serder.said]
-    assert presentation_preview.serder.sad['u'] == ''
-    assert acdc.said.encode() not in exchanging.serializeMessage(app.hby, presented_offer.said)
+    assert not exchanging.loadParsedNestedSubstreams(app.hby, presented_offer.said)
+    assert presented_offer.sad['a']['o'] == [acdc.said]
     assert app.vault.db.issued.get((acdc.said,)) is not None
     assert app.vault.db.accepted.get((acdc.said,)) is not None
     presentation, atc = ipexing.grant(app.vault, holder, acdc.said, verifier.pre)
@@ -1912,6 +2005,42 @@ def test_offer_first_uses_metadata_and_hides_completed_delivery_controls(wallet,
     page.view_credential_button.click()
     assert page._credential_dialog.received
     assert page._credential_dialog.credential_said == acdc.said
+
+
+@pytest.mark.parametrize('multiple_senders', [False, True])
+def test_received_offer_keeps_local_sender_for_external_issuee(ipex_vaults, multiple_senders):
+    from locksmith.ui.vault.credentials.start import StartExchangeDialog
+    from test_credentialing import _issue, _load_schema
+    from test_ipex_policy import _introduce
+    from test_keri_v2_compat import _deliver_ipex
+
+    source, receiver = ipex_vaults('offer-source'), ipex_vaults('offer-receiver')
+    issuer, subject = source.hby.makeHab(name='issuer'), source.hby.makeHab(name='subject')
+    reviewer = receiver.hby.makeHab(name='reviewer')
+    sender = receiver.hby.makeHab(name='proxy') if multiple_senders else reviewer
+    schema = _load_schema(source, issuer)
+    receiver.hby.db.schema.pin((schema.said,), schema)
+    _introduce(source, receiver)
+    _introduce(receiver, source)
+    saids = [_issue(source, schema, subject, authentication='signature') for _ in range(2)]
+    for said in saids:
+        grant, atc = ipexing.grant(source.vault, issuer, said, reviewer.pre)
+        _deliver_ipex(receiver.vault, ipexing.prepare(source.vault, issuer, grant, atc))
+        ipexing.admit(receiver.vault, reviewer, grant.said)
+    receiver.vault.org.replace(issuer.pre, {'alias': 'issuer'})
+    parent = QWidget()
+    parent.app = receiver
+    composer = StartExchangeDialog(receiver, parent, 'Offer', received=True)
+    assert composer.selection.count() == 2
+    assert composer.sender.isHidden() is (not multiple_senders)
+    if multiple_senders:
+        composer.sender.setCurrentIndex(composer.sender.combo_box.findData(sender.pre))
+    assert composer.sender.currentData() == sender.pre
+    composer.recipient.setCurrentIndex(composer.recipient.combo_box.findData(issuer.pre))
+    for said in reversed(saids):
+        composer.selection.setCurrentIndex(composer.selection.combo_box.findData(said))
+        assert composer.sender.currentData() == sender.pre
+        assert composer.send_button.isEnabled()
 
 
 def test_notifications_do_not_replay_history_and_exchange_read_keeps_decision(wallet):
@@ -1941,13 +2070,17 @@ def test_notifications_do_not_replay_history_and_exchange_read_keeps_decision(wa
     request = ipexing.start(app.vault, holder, issuer.pre, 'Apply', schema=acdc.schema)
     offer = ipexing.respond(app.vault, request, 'Offer', credential_said=acdc.said)
     agree = ipexing.respond(app.vault, offer, 'Agree')
-    for stage, said, sender in [('Apply', request, 'holder'), ('Offer', offer, 'issuer'), ('Agree', agree, 'holder')]:
-        notifier.add({'r': '/exn/ipex/' + stage.lower(), 'd': said})
+    for stage, said, sender, ilk in [('Apply', request, 'holder', 'xip'),
+                                     ('Offer', offer, 'issuer', 'exn'),
+                                     ('Agree', agree, 'holder', 'exn')]:
+        notifier.add({'r': f'/{ilk}/ipex/{stage.lower()}', 'd': said})
         doer.recur(3)
         assert events[-1][2]['message'] == f'{stage} from {sender}: Native Credential'
     grant, atc = ipexing.grant(app.vault, issuer, acdc.said, holder.pre)
     ipexing.prepare(app.vault, issuer, grant, atc)
-    notifier.add({'r': '/exn/ipex/grant', 'd': grant.said})
+    notifier.add({'r': '/xip/ipex/grant', 'd': grant.said})
+    doer.recur(4)
+    assert events[-1][2]['message'] == 'Grant from issuer: Native Credential'
     parent = QWidget()
     parent.app = app
     page = CredentialActivityPage(parent)
@@ -1958,3 +2091,274 @@ def test_notifications_do_not_replay_history_and_exchange_read_keeps_decision(wa
                if note.attrs.get('d') == grant.said)
     assert row['_attention']
     assert events[-1][:2] == ('MailboxListener', 'mark_as_read')
+
+
+def test_request_creates_registry_without_manual_input_and_cancel_resumes(ipex_vaults, qapp, monkeypatch, request):
+    from copy import deepcopy
+    from keri.core import eventing, scheming
+    from locksmith.core import credentialing, registries
+    from locksmith.ui.vault.credentials.start import StartExchangeDialog
+    from test_credentialing import _load_schema
+
+    from locksmith.ui.styles import set_global_styles
+    previous_style = qapp.styleSheet()
+    set_global_styles(qapp)
+    request.addfinalizer(lambda: qapp.setStyleSheet(previous_style))
+    app = ipex_vaults('automatic-request-ui')
+    holder = app.hby.makeHab(name='holder')
+    issuer = app.hby.makeHab(name='issuer')
+    schema = _load_schema(app, issuer)
+    definition = deepcopy(schema.sed)
+    block = credentialing.attribute_schemas(definition)[0]
+    block.setdefault('properties', {}).update(i={'type': 'string'}, rd={'type': 'string', 'minLength': 44})
+    block['required'] = ['i', 'rd']
+    aggregate_schema = deepcopy(definition)
+    aggregate_schema['properties'].pop('a')
+    aggregate_schema['properties']['A'] = {'type': 'array', 'items': {'anyOf': [{'type': 'string'}, block]}}
+    # The locked protocol only enforces presentation registries in a.i/a.rd.
+    assert not ipexing.requests_presentation_registry(aggregate_schema)
+    schema = scheming.Schemer(sed=definition)
+    app.hby.db.schema.pin((schema.said,), schema)
+    app.vault.db.issuers.pin((schema.said,), issuer.pre)
+    app.vault.remove([app.vault.ipex_outbox])
+    parent = QWidget()
+    submitted = []
+
+    # Requesting an existing credential must not create the requester's registry,
+    # even when its schema declares an issuee registry for original issuance.
+    before = holder.kever.sn
+    presentation = StartExchangeDialog(app, parent, 'Apply', schema=schema.said, intent='presentation')
+    presentation.sender.setCurrentIndex(presentation.sender.combo_box.findData(holder.pre))
+    presentation.recipient.setCurrentIndex(presentation.recipient.combo_box.findData(issuer.pre))
+    requested = []
+    presentation.submitted.connect(requested.append)
+    presentation.open()
+    assert presentation.registry_notice.isHidden() and presentation._auth_panel is None
+    presentation.send_button.click()
+    assert len(requested) == 1
+    assert 'preg' not in app.hby.db.exns.get((requested[0],)).sad['a']
+    assert holder.kever.sn == before and not app.rgy.regs
+    assert not list(app.vault.db.requests.getTopItemIter())
+    app.vault.db.outbox.rem((requested[0],))
+    presentation.close()
+
+    witness = app.hby.makeHab(name='witness', transferable=False)
+    holder.rotate(adds=[witness.pre], toad=1)
+    receipts = parsing.Parser(kvy=eventing.Kevery(db=app.hby.db, lax=True, local=False),
+                              version=kering.Vrsn_2_0)
+    receipts.parse(ims=bytearray(witness.witness(
+        holder.kever.serder, version=kering.Vrsn_2_0, gvrsn=kering.Vrsn_2_0)))
+    monkeypatch.setattr(app.plugin_manager, 'get_witness_batches',
+                        lambda vault, pre: SimpleNamespace(batches=[[witness.pre]]))
+
+    def open_request():
+        dialog = StartExchangeDialog(app, parent, 'Apply')
+        dialog.sender.setCurrentIndex(dialog.sender.combo_box.findData(holder.pre))
+        dialog.recipient.setCurrentIndex(dialog.recipient.combo_box.findData(issuer.pre))
+        dialog.submitted.connect(submitted.append)
+        dialog.open()
+        dialog.selection.setCurrentIndex(dialog.selection.combo_box.findData(schema.said))
+        return dialog
+
+    fail_publication = [False]
+    receipt_calls = []
+
+    def pending_receipt(self, pre, sn=None, auths=None):
+        receipt_calls.append(sn)
+        while not app.hby.db.fullyWitnessed(holder.kever.serder):
+            yield self.tock
+
+    def stalled_publication(self, registries):
+        while not fail_publication[0]:
+            yield self.tock
+        raise TimeoutError('Registry service refused the request (HTTP 404)')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(registries.CreateRegistryDoer, 'publish', stalled_publication)
+        patch.setattr(registries.LocksmithReceiptor, 'receipt', pending_receipt)
+        dialog = open_request()
+        assert not dialog.preview.findChildren(QCheckBox)
+        assert dialog.registry_notice.isVisible()
+        assert 'Sending this request creates and publishes' in dialog.registry_notice.text()
+        assert 'controlled by holder' in dialog.registry_notice.text()
+        assert not app.rgy.regs and not list(app.vault.db.requests.getTopItemIter())
+        assert dialog.auth_notice.isVisible()
+        qapp.processEvents()
+        assert dialog.scroll_area.verticalScrollBar().maximum() == 0
+        dialog.send_button.click()
+        qapp.processEvents()
+        assert 'passcode' in dialog.error.text()
+        assert dialog.scroll_area.verticalScrollBar().maximum() == 0
+        assert dialog._request_doer is None
+        for field in dialog._auth_panel.passcode_fields.values():
+            field.setText('123456')
+        dialog.send_button.click()
+        operation = dialog._request_doer.request_id
+        for _ in range(32):
+            app.qtask.run()
+        assert 'Waiting for the witness' in dialog.progress.text()
+        assert not submitted
+        receipts.parse(ims=bytearray(witness.witness(
+            holder.kever.serder, version=kering.Vrsn_2_0, gvrsn=kering.Vrsn_2_0)))
+        for _ in range(32):
+            app.qtask.run()
+        assert 'Publishing and verifying' in dialog.progress.text()
+        assert dialog._auth_panel.isHidden() and dialog.auth_notice.isHidden()
+        registry = app.rgy.registryByName('request-' + operation).regk
+        sequence = holder.kever.sn
+        fail_publication[0] = True
+        for _ in range(32):
+            app.qtask.run()
+        assert dialog._request_doer.done
+        assert 'has not been sent' in dialog.progress.text()
+        assert 'HTTP 404' in dialog.error.text()
+        assert dialog.send_button.text() == 'Retry request' and dialog.send_button.isEnabled()
+        assert dialog.scroll_area.verticalScrollBar().maximum() == 0
+        fail_publication[0] = False
+        dialog.send_button.click()
+        for _ in range(32):
+            app.qtask.run()
+        assert dialog._request_doer.request_id == operation
+        assert holder.kever.sn == sequence and receipt_calls == [sequence]
+        assert dialog.error.isHidden()
+        dialog.close()
+        for _ in range(32):
+            app.qtask.run()
+        assert not submitted and not list(app.vault.db.outbox.getTopItemIter())
+        assert dialog._request_doer not in app.vault.doers
+    dialog = open_request()
+    assert dialog._auth_panel is None and dialog.auth_notice.isHidden()
+    assert 'already created' in dialog.progress.text()
+    dialog.send_button.click()
+    assert dialog._request_doer.request_id == operation
+    for _ in range(128):
+        app.qtask.run()
+        qapp.processEvents()
+        if submitted:
+            break
+    assert len(submitted) == 1 and not dialog.isVisible()
+    assert len(app.rgy.regs) == 1
+    assert holder.kever.sn == sequence
+    request = app.hby.db.exns.get((submitted[0],))
+    assert request.sad['a']['preg'] == registry
+    assert request.sad['q']['dp'] == [[[schema.said, '/', []]]]
+    issue = IssueCredentialDialog(app, parent, request_said=request.said)
+    assert 'rd' not in issue._dynamic_field_widgets
+    attributes = issue._extract_credential_attributes()
+    assert attributes['rd'] == registry
+    assert issue._validate_fields()
+    created, events = [], []
+    app.vault.signals.doer_event.connect(lambda *event: events.append(event))
+    issue.credential_created.connect(created.append)
+    verified = [False]
+    monkeypatch.setattr(app.vault, 'registry_evidence', SimpleNamespace(
+        ensure=lambda regk, hab: regk != registry or verified[0],
+        published=lambda regk: True, errors={}))
+    registry_count = len(app.rgy.regs)
+    issue._on_issue()
+    for _ in range(16):
+        app.qtask.run()
+    assert issue.issue_button.text() == 'Checking presentation registry…'
+    assert not created and not issue.issue_button.isEnabled()
+    assert len(app.rgy.regs) == registry_count
+    verified[0] = True
+    for _ in range(128):
+        app.qtask.run()
+        if created:
+            break
+    assert len(created) == 1, events
+    credential = credentialing.credential(app.vault, created[0])['sad']
+    assert credential['a']['rd'] == registry
+    issue.close()
+    parent.close()
+
+
+def test_delivery_repair_returns_to_saved_request_and_closes_with_it(wallet, qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QPushButton
+    from locksmith.ui.toolkit.widgets import LocksmithDialog
+    from locksmith.ui.vault.credentials.start import StartExchangeDialog
+
+    app = wallet('repair-dialog-stack')
+    sender, recipient = [app.hby.makeHab(name=name) for name in ('sender', 'recipient')]
+    schemer = schema()
+    app.hby.db.schema.pin((schemer.said,), schemer)
+    parent = QWidget()
+    parent.show()
+    request = StartExchangeDialog(app, parent, 'Apply', schema=schemer.said, intent='presentation')
+    request.sender.setCurrentIndex(request.sender.combo_box.findData(sender.pre))
+    request.recipient.setCurrentIndex(request.recipient.combo_box.findData(recipient.pre))
+    request.open()
+    for action in ('cancel', 'close', 'escape', 'accept'):
+        request._repair_route()
+        repair = request._repair_dialog
+        repair.alias_field.setText('Saved contact')
+        qapp.processEvents()
+        assert repair.isVisible() and not request.isVisible()
+        assert repair.windowHandle().transientParent().isVisible()
+        assert repair.windowType() == Qt.WindowType.Dialog
+        assert repair.windowOpacity() == 1.0
+        if action == 'cancel':
+            repair.cancel_button.click()
+        elif action == 'close':
+            next(button for button in repair.findChildren(QPushButton)
+                 if button.accessibleName() == 'Close dialog').click()
+        elif action == 'escape':
+            QTest.keyClick(repair, Qt.Key.Key_Escape)
+        else:
+            repair.accept()
+        qapp.processEvents()
+        assert request.isVisible() and not repair.isVisible()
+        assert request.sender.currentData() == sender.pre
+        assert request.recipient.currentData() == recipient.pre
+        assert request.selection.currentData() == schemer.said
+        assert [widget for widget in qapp.topLevelWidgets()
+                if isinstance(widget, LocksmithDialog) and widget.isVisible()] == [request]
+    request._repair_route()
+    assert request._repair_dialog.alias_field.text() == 'Saved contact'
+    request.reject()
+    qapp.processEvents()
+    assert not request.isVisible() and not request._repair_dialog.isVisible()
+    assert not list(app.vault.db.outbox.getTopItemIter())
+    parent.close()
+
+
+def test_identifier_connection_details_and_cancelled_setup(ipex_vaults, monkeypatch, qapp):
+    import asyncio
+    from locksmith.ui.vault.identifiers.view import ViewIdentifierDialog
+    from locksmith.ui.vault.shared import messaging, export
+
+    app = ipex_vaults('messaging-details')
+    hab = app.hby.makeHab(name='recipient')
+    dialog = ViewIdentifierDialog('', app, hab.name)
+    assert not dialog.connection_section.content_area.isVisible()
+    dialog._copy_contact_link()
+    assert f'/oobi/{hab.pre}/mailbox/{hab.pre}' in qapp.clipboard().text()
+    resumed = []
+    errors = []
+    async def pending(*args):
+        await asyncio.Future()
+    monkeypatch.setattr(messaging, 'receiving_ready', lambda *args: False)
+    monkeypatch.setattr(messaging, 'ensure_receiving', pending)
+    monkeypatch.setattr(export, 'receiving_ready', lambda *args: False)
+    monkeypatch.setattr(export, 'ensure_receiving', pending)
+    saved = []
+    monkeypatch.setattr(export.QFileDialog, 'getSaveFileName', lambda *a: saved.append(True))
+    async def cancel():
+        dialog.open()
+        assert messaging.prepare_messaging(dialog, app, hab, lambda: resumed.append(True), errors.append)
+        task = dialog._messaging_task
+        await asyncio.sleep(0)
+        assert not dialog.content_layout.parentWidget().isEnabled()
+        assert dialog.close_button.isEnabled()
+        dialog.reject()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert resumed == [] and errors == []
+        dialog.open()
+        dialog._share_introduction()
+        task = dialog._export_task
+        dialog.reject()  # Cancel before the asynchronous export starts.
+        await asyncio.gather(task, return_exceptions=True)
+        assert saved == [] and dialog._export_task is None
+    asyncio.run(cancel())

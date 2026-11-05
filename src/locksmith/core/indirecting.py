@@ -10,6 +10,7 @@ import time
 import functools
 
 from hio.base import doing
+from hio.core.http.httping import HTTPException
 from hio.help import decking
 from keri import help, kering
 from keri.app import httping, agenting
@@ -18,7 +19,8 @@ from keri.core import Diger, Texter, parsing, routing
 from keri.db import basing
 from keri.help import helping
 from ordered_set import OrderedSet as oset
-from locksmith.db.basing import MailboxFrame
+from locksmith.db.basing import ConnectionRecord, MailboxFrame, MailboxMigration
+from locksmith.core.messaging import NETWORK_TIMEOUT, RETRY_DELAYS
 
 logger = help.ogler.getLogger()
 
@@ -141,16 +143,19 @@ class MailboxDirector(doing.DoDoer):
         _ = (yield self.tock)
 
         while True:
-            wanted = {(hab.pre, eid): hab for hab in self.hby.habs.values()
-                      for eid in receiving_endpoints(hab)}
-            for poller in list(self.pollers):
-                if (poller.pre, poller.mailbox) not in wanted:
-                    self.remove_poller(poller.hab, poller.mailbox)
-            for (pre, eid), hab in wanted.items():
-                self.add_poller(hab, eid)
+            # Retain queued frames before a stopped or changed poller is removed.
             for item in self.processPollIter():
                 self.messages.append(item)
                 _ = (yield self.tock)
+            wanted = {(hab.pre, eid): (hab, topics) for hab in self.hby.habs.values()
+                      for eid, topics in self.receiving_topics(hab).items()}
+            for poller in list(self.pollers):
+                target = wanted.get((poller.pre, poller.mailbox))
+                if (target is None or poller.topics != target[1]
+                        or (poller.done and not poller.state.paused and time.time() >= poller.retry_at)):
+                    self.remove_poller(poller.hab, poller.mailbox)
+            for (pre, eid), (hab, topics) in wanted.items():
+                self.add_poller(hab, eid, topics=topics)
             _ = (yield 1.0)
 
     def add_pollers(self, hab):
@@ -162,10 +167,35 @@ class MailboxDirector(doing.DoDoer):
         Parameters:
             hab: The habitat whose messages are polled.
         """
-        for eid in receiving_endpoints(hab):
-            self.add_poller(hab, eid)
+        for eid, topics in self.receiving_topics(hab).items():
+            self.add_poller(hab, eid, topics=topics)
 
-    def add_poller(self, hab, mailbox):
+    def receiving_topics(self, hab):
+        """Keep witness control traffic separate from explicit credential mailboxes."""
+        endpoints = receiving_endpoints(hab)
+        mailboxes = {eid for (_, _, eid), end in hab.db.ends.getTopItemIter(
+            keys=(hab.pre, kering.Roles.mailbox)) if end.allowed}
+        migration = self.db.mailboxMigrations.get(keys=(hab.pre,))
+        if mailboxes and migration is None:
+            # An unread first message has no local cursor yet. Start at zero
+            # for every witness already configured when the route changes.
+            migration = MailboxMigration(until=time.time() + 86400, witnesses=list(hab.kever.wits))
+            self.db.mailboxMigrations.pin(keys=(hab.pre,), val=migration)
+        result = {}
+        for eid in endpoints:
+            topics = []
+            if eid in hab.kever.wits:
+                topics = [topic for topic in self.topics if topic != '/credential']
+                if migration is None or (eid in migration.witnesses and time.time() < migration.until):
+                    if '/credential' in self.topics:
+                        topics.append('/credential')
+            if eid in mailboxes and '/credential' in self.topics and '/credential' not in topics:
+                topics.append('/credential')
+            if topics:
+                result[eid] = topics
+        return result
+
+    def add_poller(self, hab, mailbox, *, topics=None):
         """
         Start polling mailbox for hab unless a poller for that pair already runs.
 
@@ -176,9 +206,18 @@ class MailboxDirector(doing.DoDoer):
         if any(poller.pre == hab.pre and poller.mailbox == mailbox for poller in self.pollers):
             return
 
-        poller = Poller(hab=hab, topics=self.topics, mailbox=mailbox)
+        poller = Poller(hab=hab, topics=self.topics if topics is None else topics, mailbox=mailbox, db=self.db)
         self.pollers.append(poller)
         self.extend([poller])
+
+    def retry_receiving(self, pre):
+        """Resume paused reads without discarding retained frames or cursors."""
+        for keys, _ in self.db.connections.getTopItemIter(keys=(pre,)):
+            self.db.connections.pin(keys, ConnectionRecord())
+        for poller in self.pollers:
+            if poller.pre == pre:
+                poller.state = ConnectionRecord()
+                poller.error, poller.retry_at = '', 0.0
 
     def processPollIter(self):
         """
@@ -326,10 +365,10 @@ class Poller(doing.DoDoer):
     Polls remote SSE endpoint for event that are KERI messages to be processed
 
     Queued messages are (message, topic, index) tuples. The stored topic position
-    advances only through commit, after the director has parsed the message.
+    advances only through commit, after the director has retained the raw message.
     """
 
-    def __init__(self, hab, mailbox, topics, msgs=None, retry=1000, **kwa):
+    def __init__(self, hab, mailbox, topics, msgs=None, retry=1000, db=None, **kwa):
         """
         Initializes an instance of the Poller class.
 
@@ -346,14 +385,39 @@ class Poller(doing.DoDoer):
         self.mailbox = mailbox
         self.topics = topics
         self.retry = retry
-        self.error = ''
+        self.db = db
+        self.state = (db.connections.get((hab.pre, mailbox)) if db else None) or ConnectionRecord()
+        self.error = self.state.error
         self.connected = False
         self.msgs = msgs if msgs is not None else decking.Deck()
         self.times = dict()
+        self.introduced = None
+        self.retry_at = self.state.retry_at
 
         doers = [doing.doify(self.eventDo)]
 
         super(Poller, self).__init__(doers=doers, **kwa)
+
+    def recur(self, tyme, deeds=None):
+        """Contain HTTP child failures so one offline mailbox cannot stop the vault."""
+        try:
+            return super().recur(tyme=tyme, deeds=deeds)
+        except (OSError, HTTPException) as exc:
+            self._failed(str(exc))
+            logger.warning('Mailbox %s disconnected: %s', self.mailbox, exc)
+            return True  # HIO closes this poller and its remaining child sockets.
+
+    def _save_connection(self):
+        if self.db is not None:
+            self.db.connections.pin((self.pre, self.mailbox), self.state)
+
+    def _failed(self, error, *, permanent=False):
+        self.error, self.connected = error, False
+        self.state.error = error
+        self.state.paused = permanent or self.state.attempts > len(RETRY_DELAYS)
+        self.retry_at = time.time() + RETRY_DELAYS[min(max(self.state.attempts, 1), len(RETRY_DELAYS)) - 1]
+        self.state.retry_at = self.retry_at
+        self._save_connection()
 
     def eventDo(self, tymth=None, tock=0.0, **kwa):
         """
@@ -382,16 +446,49 @@ class Poller(doing.DoDoer):
             witrec = basing.TopicsRecord(topics=dict())
 
         while self.retry > 0:
+            if self.state.paused:
+                return
+            if self.state.attempts > len(RETRY_DELAYS):
+                self._failed('Connection attempts exhausted. Retry to resume.')
+                return
+            while time.time() < self.state.retry_at:
+                yield min(1.0, self.state.retry_at - time.time())
+            self.state.attempts += 1
+            self._save_connection()
             try:
                 client, clientDoer = agenting.httpClient(self.hab, self.mailbox)
             except kering.MissingEntryError as e:
-                self.error = str(e)
-                self.connected = False
-                yield max(self.retry / 1000, 5.0)
-                continue
+                self._failed(str(e), permanent=True)
+                return
 
             self.extend([clientDoer])
             self.error = ''
+
+            # A mailbox need not witness this identifier. Introduce its KEL
+            # before the first read and after rotation so the new keys can
+            # authenticate the query. Witness control polling is unchanged.
+            end = self.hab.db.ends.get(keys=(self.pre, kering.Roles.mailbox, self.mailbox))
+            establishment = self.hab.kever.lastEst
+            if end is not None and end.allowed and self.introduced != establishment:
+                stream = bytearray()
+                for message in self.hab.db.cloneDelegation(self.hab.kever, gvrsn=kering.Vrsn_2_0):
+                    stream.extend(message)
+                stream.extend(self.hab.replay(gvrsn=kering.Vrsn_2_0))
+                client.request(method='PUT', path='/', body=bytes(stream), headers={
+                    'Content-Type': 'application/cesr', 'Content-Length': str(len(stream)),
+                    httping.CESR_DESTINATION_HEADER: self.mailbox,
+                })
+                deadline = self.tyme + NETWORK_TIMEOUT
+                while not client.responses and self.tyme < deadline:
+                    yield self.tock
+                response = client.respond() if client.responses else None
+                if response is None or not 200 <= response.status < 300:
+                    self._failed('Mailbox could not verify this identifier. Retry after its receipts are available.',
+                                 permanent=response is not None and 400 <= response.status < 500
+                                 and response.status not in (408, 429))
+                    self.remove([clientDoer])
+                    return
+                self.introduced = establishment
 
             topics = dict()
             q = dict(pre=self.pre, topics=topics)
@@ -425,17 +522,40 @@ class Poller(doing.DoDoer):
 
             httping.createCESRRequest(msg, client, dest=self.mailbox)
 
+            deadline = self.tyme + NETWORK_TIMEOUT
             while client.requests:
+                if self.tyme >= deadline:
+                    self._failed('Mailbox request timed out')
+                    self.remove([clientDoer])
+                    return
                 yield self.tock
 
             created = helping.nowUTC()
+            received_headers = False
             while True:
 
                 now = helping.nowUTC()
-                if now - created > datetime.timedelta(seconds=30):
+                if (now - created > datetime.timedelta(seconds=30)
+                        or self.hab.kever.lastEst != establishment):
                     self.remove([clientDoer])
                     self.connected = False
+                    if not received_headers and self.hab.kever.lastEst == establishment:
+                        self._failed('Mailbox connection timed out')
+                        return
                     break
+
+                status = client.respondent.status
+                if status is not None and status >= 400:
+                    self._failed(f'Mailbox read failed ({status})',
+                                 permanent=400 <= status < 500 and status not in (408, 429))
+                    self.remove([clientDoer])
+                    return
+                if (client.respondent.evented and status is not None
+                        and 200 <= status < 300 and not received_headers):
+                    received_headers = True
+                    self.connected, self.error = True, ''
+                    self.state = ConnectionRecord()
+                    self._save_connection()
 
                 while client.events:
                     self.connected = True
@@ -467,6 +587,18 @@ class Poller(doing.DoDoer):
                     self.msgs.append((msg.encode("utf-8"), tpc, idx))
                     yield self.tock
 
+                if client.respondent.evented:
+                    self.retry = max(1000, client.respondent.retry)
+                if client.respondent.ended:
+                    self.remove([clientDoer])
+                    self.connected = False
+                    if not received_headers:
+                        status = client.respondent.status
+                        self._failed(f'Mailbox read failed ({status})',
+                                     permanent=status is not None and 400 <= status < 500
+                                     and status not in (408, 429))
+                        return
+                    break
                 yield 0.25
             yield self.retry / 1000
 

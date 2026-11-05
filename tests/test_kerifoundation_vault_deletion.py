@@ -9,9 +9,11 @@ from locksmith.plugins.kerifoundation.db.basing import (
 )
 from locksmith.plugins.kerifoundation.onboarding.service import (
     KFVaultDeletionService,
+    KFBootError,
     ONBOARDING_AUTH_NAMESPACE,
 )
 from locksmith.plugins.kerifoundation.plugin import KeriFoundationPlugin
+from locksmith.core.signals import DoerSignalBridge
 
 
 class FakeHab(SimpleNamespace):
@@ -45,6 +47,7 @@ class FakeHby:
 class FakeVault:
     def __init__(self, hby):
         self.hby = hby
+        self.signals = DoerSignalBridge()
 
 
 class FakeApp:
@@ -223,3 +226,21 @@ def test_kf_plugin_temporary_vault_removes_only_its_own_state(qapp, tmp_path, mo
         assert plugin._db.get_account().account_aid == 'persistent-account'
     finally:
         plugin.on_vault_closed(app.vault, clear=True)
+
+
+def test_kf_vault_deletion_preserves_pending_owner_without_session_id(tmp_path):
+    app = FakeApp(FakeHby())
+    db = KFBaser(name="kf_delete_unknown_session", headDirPath=str(tmp_path), reopen=True)
+    boot_client = FakeBootClient()
+    record, _ = db.ensure_account()
+    record.account_aid = "AID_ACCOUNT"
+    record.onboarding_auth_alias = "kf-auth"
+    db.pin_account(record)
+    try:
+        service = KFVaultDeletionService(app=app, db=db, boot_client=boot_client)
+        with pytest.raises(KFBootError, match="Resume"):
+            service.delete_vault_account()
+        assert db.get_account().onboarding_auth_alias == "kf-auth"
+        assert boot_client.calls == []
+    finally:
+        db.close(clear=True)

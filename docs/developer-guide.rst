@@ -4,6 +4,15 @@ Developer Guide
 Setup
 -----
 
+Install libsodium with your system package manager. On macOS with Homebrew:
+
+.. code-block:: bash
+
+   brew install libsodium
+   export DYLD_LIBRARY_PATH="$(brew --prefix libsodium)/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+
+Set DYLD_LIBRARY_PATH in each terminal you use to run Locksmith or its tests.
+
 Install Python ``3.14`` and
 `uv 0.9.18 <https://docs.astral.sh/uv/getting-started/installation/>`_, then run
 this command from the repository root:
@@ -13,8 +22,12 @@ this command from the repository root:
    uv sync --locked
 
 This creates ``.venv`` with Locksmith and its development tools. The checked-in
-``uv.lock`` fixes the Keripy commit and package versions used by development and
+``uv.lock`` fixes the keripy commit and package versions used by development and
 CI. ``--locked`` fails if the lockfile needs an update.
+
+The keripy dependency names an explicit upstream Git commit in ``pyproject.toml``
+and ``uv.lock``. A fresh checkout can use the same ``uv sync --locked`` command;
+it does not require an editable sibling checkout or changes to installed source.
 
 Checks
 ------

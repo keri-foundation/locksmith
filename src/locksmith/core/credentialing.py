@@ -12,7 +12,7 @@ from hio.base import doing
 from keri import help, kering
 from keri.acdc import Registrar, acdcmap, regeventing
 from keri.app.habbing import GroupHab
-from keri.core import (Aggor, Blinder, BlindState, BoundState, Noncer, Number, SerderACDC,
+from keri.core import (Aggor, Compactor, Blinder, BlindState, BoundState, Noncer, Number, SerderACDC,
                        SerderKERI, SealSource, messagize, parsing, scheming)
 from keri.help import helping
 from keri.peer import exchanging
@@ -147,7 +147,8 @@ def authentication(vault, nest):
     except KeyError:
         pass
     handler = vault.exc.routes['/ipex/grant']
-    if not handler._verifyIssuerAuthNode(acdc, nest):
+    authenticated, _ = handler._authenticateIssuer(acdc, nest)
+    if not authenticated:
         raise kering.ValidationError('Credential issuer authentication failed')
     anchored = bool(nest.sscs or any(pre.qb64 == acdc.israid for pre, _, _ in nest.ssts))
     attributes = acdc.sad.get('a')
@@ -155,12 +156,13 @@ def authentication(vault, nest):
     return {'et': 'authenticated', 'dt': stamp, 'auth': 'anchor' if anchored else 'signature'}
 
 
-def credential(vault, said, received=False):
-    """Build a wallet view from local issuance or retained grant evidence."""
+def credential(vault, said, received=False, *, grant_said=None):
+    """Read inventory evidence or the exact disclosure in a retained Grant."""
     artifacts = {}
     pending = False
     created_at, accepted_at, sender = '', '', ''
-    if not received and (record := vault.db.issued.get(keys=(said,))):
+    exact_grant = grant_said is not None
+    if grant_said is None and not received and (record := vault.db.issued.get(keys=(said,))):
         created_at = record.created_at
         acdc = SerderACDC(raw=record.raw.encode())
         recipient = acdc.iseaid
@@ -183,18 +185,36 @@ def credential(vault, said, received=False):
         # Locally created anchors remain pending until their witness quorum arrives.
         for _, diger in nest.sscs:
             pending |= len(vault.hby.db.wigs.get(keys=(acdc.israid, diger.qb64))) < record.witness_threshold
-    elif record := vault.db.accepted.get(keys=(said,)):
-        accepted_at = record.accepted_at
-        sender = vault.hby.db.exns.get(keys=(record.grant,)).pre
-        recipient = vault.hby.db.exns.get(keys=(record.grant,)).sad['ri']
-        nests = exchanging.loadParsedNestedSubstreams(vault.hby, record.grant)
-        nest = next(nest for nest in nests if nest.serder.said == said)
+    else:
+        record = vault.db.accepted.get(keys=(said,))
+        if grant_said is None:
+            if record is None:
+                raise kering.ValidationError(f'Credential {said} is not in this wallet')
+            grant_said = record.grant
+        grant = vault.hby.db.exns.get(keys=(grant_said,))
+        if (grant is None or grant.route != '/ipex/grant' or grant.pvrsn.major != 2
+                or grant.sad['a'].get('o') != [said]):
+            raise kering.ValidationError('Grant does not disclose the requested origin credential')
+        exchanging.verify(vault.hby, grant)
+        sender, recipient = grant.pre, grant.sad['ri']
+        if exact_grant:
+            created_at = grant.stamp
+        if record is not None and record.grant == grant_said:
+            accepted_at = record.accepted_at
+        else:
+            receipt = vault.db.receipts.get((recipient, grant_said))
+            admit = vault.hby.db.exns.get((receipt.admit,)) if receipt and receipt.status == 'accepted' else None
+            if (admit is not None and admit.route == '/ipex/admit'
+                    and admit.pre == recipient and admit.sad['p'] == grant_said):
+                accepted_at = admit.stamp
+        nests = exchanging.loadParsedNestedSubstreams(vault.hby, grant_said)
+        nest = next((nest for nest in nests if nest.serder.said == said), None)
+        if nest is None:
+            raise kering.ValidationError('Grant origin evidence is missing')
         acdc = nest.serder
         proof = exchanging.serializeParsedSubstream(nest)
         artifacts = {other.serder.said: exchanging.serializeParsedSubstream(other)
                      for other in nests if other.serder.said != said}
-    else:
-        raise kering.ValidationError(f'Credential {said} is not in this wallet')
     try:
         if pending:
             raise kering.MissingChainError('Credential registry update is still pending')
@@ -231,8 +251,9 @@ class LoadSchemaDoer(doing.DoDoer):
     Timeout = 15.0
 
     def __init__(self, app, oobi=None, file_content=None,
-                 enable_issuance=False, issuer_aid=None, signal_bridge=None):
+                 enable_issuance=False, issuer_aid=None, signal_bridge=None, request_said=None):
         self.vault = app.vault
+        self.request_said = request_said
         self.oobi, self.file_content = oobi, file_content
         self.enable_issuance, self.issuer_aid = enable_issuance, issuer_aid
         self.signals = signal_bridge if signal_bridge is not None else self.vault.signals
@@ -261,6 +282,16 @@ class LoadSchemaDoer(doing.DoDoer):
                     raise ValueError(reply.errorString())
                 raw = bytes(reply.readAll())
             schemer = scheming.Schemer(raw=raw)
+            if self.request_said:
+                from locksmith.core import ipexing
+                request = self.vault.hby.db.exns.get((self.request_said,))
+                if (request is None or request.route != '/ipex/apply'
+                        or not {'Offer', 'Grant'}.intersection(ipexing.responses(self.vault, request))):
+                    raise ValueError('This request is no longer available for issuance')
+                if schemer.said != ipexing.request_schema(request):
+                    raise ValueError('This schema does not match the credential request')
+                if not self.enable_issuance or self.issuer_aid != request.sad['ri']:
+                    raise ValueError('Use the identifier that received this request for issuance')
             if self.enable_issuance:
                 hab = self.vault.hby.habByPre(self.issuer_aid)
                 if hab is None or isinstance(hab, GroupHab):
@@ -270,11 +301,11 @@ class LoadSchemaDoer(doing.DoDoer):
                 self.vault.db.issuers.pin(keys=(schemer.said,), val=hab.pre)
             self.signals.emit_doer_event('LoadSchemaDoer', 'schema_loaded', {
                 'title': schemer.sed.get('title', 'Untitled'), 'said': schemer.said,
-                'enable_issuance': self.enable_issuance, 'success': True})
+                'enable_issuance': self.enable_issuance, 'success': True, 'request': self.request_said})
         except Exception as ex:
             logger.exception('Schema loading failed')
             self.signals.emit_doer_event('LoadSchemaDoer', 'schema_load_failed',
-                                        {'error': str(ex), 'success': False})
+                                        {'error': str(ex), 'success': False, 'request': self.request_said})
         finally:
             if reply is not None and not reply.isFinished():
                 reply.abort()
@@ -313,11 +344,32 @@ class CredentialUpdateDoer(doing.DoDoer):
             raise kering.MissingChainError('Witness receipts are still pending for the credential update')
 
 
+    def publish(self, registries):
+        """Wait for accepted publication and a fresh independent status check."""
+        worker = self.vault.registry_evidence
+        if worker is None:
+            return
+        deadline = self.tyme + 60.0
+        while True:
+            if getattr(self.vault, 'closed', False):
+                raise ValueError('The vault is closed')
+            checked = [worker.ensure(registry.regk, registry.hab) and worker.published(registry.regk)
+                       for registry in registries]
+            if all(checked):
+                return
+            if self.tyme >= deadline:
+                errors = [worker.errors[registry.regk] for registry in registries
+                          if registry.regk in worker.errors]
+                detail = ': ' + '; '.join(dict.fromkeys(errors)) if errors else ''
+                raise TimeoutError('Registry publication or status check is still pending' + detail)
+            yield self.tock
+
+
 class IssueCredentialDoer(CredentialUpdateDoer):
     """Issue a native credential with the selected issuer authentication factor."""
 
     def __init__(self, app, schema_said, recipient_pre, attributes, edges=None, rules=None,
-                 codes=None, signal_bridge=None, authentication='registry', nonce=None):
+                 codes=None, signal_bridge=None, authentication='registry', nonce=None, request_said=None):
         self.vault = app.vault
         self.schema_said, self.recipient_pre = schema_said, recipient_pre
         self.issuance_id = uuid.uuid4().hex
@@ -326,6 +378,7 @@ class IssueCredentialDoer(CredentialUpdateDoer):
         if authentication not in ('registry', 'anchor', 'signature'):
             raise ValueError('Select registry, anchor, or signature authentication')
         self.authentication, self.nonce = authentication, nonce
+        self.request_said = request_said
         self.signals = signal_bridge if signal_bridge is not None else self.vault.signals
         super().__init__(doers=[doing.doify(self.issue_credential_do)])
 
@@ -341,6 +394,42 @@ class IssueCredentialDoer(CredentialUpdateDoer):
             schemer = self.vault.hby.db.schema.get(keys=(self.schema_said,))
             if schemer is None:
                 raise kering.ValidationError(f'Load credential schema {self.schema_said} before issuing it')
+            request = None
+            requested_registry = None
+            if self.request_said:
+                from locksmith.core import ipexing
+                request = self.vault.hby.db.exns.get((self.request_said,))
+                deadline = self.tyme + 60.0
+                waiting = False
+                while True:
+                    if getattr(self.vault, 'closed', False):
+                        raise ValueError('The vault is closed')
+                    if 'Offer' not in ipexing.responses(self.vault, request):
+                        raise ValueError('This request has changed. Review it before issuing.')
+                    try:
+                        requested_registry = ipexing.request_registry(self.vault, request, hab)
+                        break
+                    except kering.MissingChainError:
+                        if not waiting:
+                            self.signals.emit_doer_event('IssueCredentialDoer', 'progress', {
+                                'issuance_id': self.issuance_id, 'message': 'Checking presentation registry…'})
+                            waiting = True
+                        if self.tyme >= deadline:
+                            detail = self.vault.registry_evidence.errors.get(request.sad['a'].get('preg'))
+                            raise TimeoutError('Presentation registry verification is still pending'
+                                               + (': ' + detail if detail else ''))
+                        yield self.tock
+                if waiting:
+                    self.signals.emit_doer_event('IssueCredentialDoer', 'progress', {
+                        'issuance_id': self.issuance_id, 'message': 'Issuing…'})
+                if (request.pre != self.recipient_pre or ipexing.request_schema(request) != self.schema_said
+                        or 'Offer' not in ipexing.responses(self.vault, request)):
+                    raise ValueError('This request has changed. Review it before issuing.')
+                if requested_registry and self.authentication != 'registry':
+                    raise ValueError('The requested presentation registry requires registry issuance')
+                if requested_registry and (isinstance(self.attributes, list)
+                                           or not ipexing.requests_presentation_registry(schemer.sed)):
+                    raise ValueError('This schema does not declare an issuee presentation registry')
             properties = schemer.sed.get('properties', {})
             definitions = attribute_schemas(schemer.sed, aggregate=isinstance(self.attributes, list))
             if isinstance(self.attributes, list) or 'a' not in properties:
@@ -357,6 +446,10 @@ class IssueCredentialDoer(CredentialUpdateDoer):
                                                  kind=kering.Kinds.json).ael}
             else:
                 values = {'d': '', **self.attributes}
+                if requested_registry:
+                    if values.get('rd') not in (None, '', requested_registry):
+                        raise ValueError('The attributes conflict with the requested presentation registry')
+                    values['rd'] = requested_registry
                 if 'dt' in definitions[0].get('properties', {}):
                     values.setdefault('dt', definitions[0]['properties']['dt'].get('const', helping.nowIso8601()))
                 if (self.recipient_pre is not None and
@@ -378,9 +471,16 @@ class IssueCredentialDoer(CredentialUpdateDoer):
                 registrar = Registrar(rgy=self.vault.rgy)
                 registry = registrar.makeRegistry(name=uuid.uuid4().hex, prefix=hab.pre)
             edges = complete_block(properties.get('e', {}), {'d': '', **self.edges}) if self.edges else None
+            if edges is not None:
+                # Sign the canonical expanded edge form used by native IPEX.
+                compactor = Compactor(mad=edges, makify=True, kind=kering.Kinds.json)
+                compactor.compact(paths=['e/'], root='e')
+                edges = compactor.partials[('e/',)].mad
             rules = complete_block(properties.get('r', {}), self.rules) if self.rules is not None else None
             acdc = acdcmap(israid=hab.pre, uuid=nonce, regid=registry.regk if registry else None, schema=self.schema_said,
                            **attributes, edge=edges, rule=rules)
+            if requested_registry:
+                ipexing.check_requested_registry(request, acdc)
             schemer = validate_schema(self.vault, acdc)
             previous = self.vault.db.issued.get((acdc.said,))
             created_at = previous.created_at if previous else helping.nowIso8601()

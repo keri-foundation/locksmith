@@ -93,8 +93,13 @@ def test_revocation_dialog_requires_click_and_ignores_another_vault(ipex_vaults,
     hab = app.hby.makeHab(name='issuer')
     schema = _load_schema(app, hab)
     said = _issue(app, schema, hab)
+    acdc = SerderACDC(raw=app.vault.db.issued.get((said,)).raw.encode())
+    head = app.vault.rgy.store.head(acdc.regid).qb64
     dialog = RevokeCredentialDialog(app, said, 'Example credential')
+    for _ in range(12):
+        app.qtask.run()
     assert credentialing.credential(app.vault, said)['status']['et'] == 'issued'
+    assert app.vault.rgy.store.head(acdc.regid).qb64 == head
     dialog.revoke_button.click()
     for _ in range(12):
         app.qtask.run()

@@ -299,7 +299,7 @@ class IdentifierViewSectionsMixin:
 
         self.oobi_role_dropdown = FloatingLabelComboBox("Role")
         self.oobi_role_dropdown.addItems(["Witness", "Controller", "Mailbox"])
-        self.oobi_role_dropdown.setCurrentText("Witness")
+        self.oobi_role_dropdown.setCurrentText("Mailbox")
         self.oobi_role_dropdown.currentTextChanged.connect(self._on_oobi_role_changed)
         role_row.addWidget(self.oobi_role_dropdown)
         role_row.addStretch()
@@ -312,7 +312,7 @@ class IdentifierViewSectionsMixin:
         layout.addWidget(self.oobi_display_container)
 
         # Generate initial OOBI
-        self._generate_oobi("witness")
+        self._generate_oobi("mailbox")
 
     def _build_refresh_keystate_section(self, layout: QVBoxLayout) -> None:
         """Build the refresh key state section for group multisig."""

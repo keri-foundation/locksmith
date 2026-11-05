@@ -9,13 +9,14 @@ import json
 import re
 from urllib import parse
 
-from PySide6.QtCore import QDir, QFile, QIODevice
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QButtonGroup, QFileDialog, QCheckBox
 
 from locksmith import resources_rc  # noqa: F401 - register bundled schemas and icons
 from locksmith.core.credentialing import LoadSchemaDoer
+from locksmith.core import ipexing
 from locksmith.core.habbing import list_eligible_local_identifiers
+from locksmith.ui.vault.credentials.schema.catalog import builtin_schemas, request_schemas
 from locksmith.ui.toolkit.widgets import (
     LocksmithDialog,
     FloatingLabelLineEdit,
@@ -32,7 +33,7 @@ SCHEMA_OOBI_RE = re.compile(r'\A/oobi/(?P<said>[^/]+)/?\Z', re.IGNORECASE)
 
 class AddSchemaDialog(LocksmithDialog):
     """Dialog for loading a credential schema."""
-    def __init__(self, app, parent=None):
+    def __init__(self, app, parent=None, *, request_said=None):
         """
         Initialize the AddSchemaDialog.
 
@@ -41,6 +42,9 @@ class AddSchemaDialog(LocksmithDialog):
             parent: Parent widget
         """
         self.app = app
+        self.vault = app.vault
+        self.request_said = request_said
+        self._request_schema = None
 
         # Create content widget
         content_widget = QWidget()
@@ -204,6 +208,28 @@ class AddSchemaDialog(LocksmithDialog):
         self._populate_issuer_dropdown()
         self._populate_builtin_dropdown()
 
+        if request_said:
+            request = self.vault.hby.db.exns.get((request_said,))
+            requested = ipexing.request_schema(request)
+            self._request_schema = request_schemas(self.vault).get(requested)
+            self.enable_issuance_checkbox.setChecked(True)
+            self.enable_issuance_checkbox.setEnabled(False)
+            self.issuer_dropdown.setCurrentIndex(self.issuer_dropdown.combo_box.findData(request.sad['ri']))
+            self.issuer_dropdown.setEnabled(False)
+            title_label.setText('Set up credential issuance')
+            self.load_button.setText('Continue to credential')
+            if self._request_schema:
+                self.oobi_radio.hide()
+                self.file_radio.hide()
+                self.builtin_radio.hide()
+                self.oobi_field.hide()
+                self.said_field.setText(requested)
+                self.builtin_version.setText(self._request_schema.sed.get('title', requested))
+                self.builtin_version.show()
+            else:
+                self.said_field.setPlaceholderText(requested)
+                self.said_field.setToolTip('Required schema: ' + requested)
+
         # Connect to vault signal bridge for doer events
         if self.app and hasattr(self.app, 'vault') and self.app.vault and hasattr(self.app.vault, 'signals'):
             self.app.vault.signals.doer_event.connect(self._on_doer_event)
@@ -218,7 +244,7 @@ class AddSchemaDialog(LocksmithDialog):
         if not self._doer_event_connected:
             return
         try:
-            self.app.vault.signals.doer_event.disconnect(self._on_doer_event)
+            self.vault.signals.doer_event.disconnect(self._on_doer_event)
         except RuntimeError:
             pass
         self._doer_event_connected = False
@@ -236,7 +262,7 @@ class AddSchemaDialog(LocksmithDialog):
     def _set_primary_button_idle(self):
         self.cancel_button.setEnabled(True)
         self.load_button.setEnabled(True)
-        self.load_button.setText("Load Schema")
+        self.load_button.setText('Continue to credential' if self.request_said else 'Load Schema')
 
 
     def _on_connection_type_changed(self, checked):
@@ -260,19 +286,11 @@ class AddSchemaDialog(LocksmithDialog):
     def _populate_builtin_dropdown(self):
         """Read the bundled schema names and bytes from Qt resources."""
         self.builtin_dropdown.addItem("Select a schema...")
-        directory = QDir(":/assets/schemas/sedi")
         try:
-            for filename in directory.entryList(["*.json"], QDir.Filter.Files):
-                source = QFile(directory.filePath(filename))
-                if not source.open(QIODevice.OpenModeFlag.ReadOnly):
-                    raise OSError(source.errorString())
-                try:
-                    raw = bytes(source.readAll())
-                finally:
-                    source.close()
-                schema = json.loads(raw)
+            for schemer in builtin_schemas().values():
+                schema = schemer.sed
                 self.builtin_dropdown.addItem(schema['title'], userData={
-                    'raw': raw, 'said': schema['$id'], 'version': schema['version'],
+                    'raw': schemer.raw, 'said': schemer.said, 'version': schema['version'],
                 })
         except (OSError, ValueError, KeyError) as error:
             self.show_error(f"Failed to read built-in schemas: {error}")
@@ -385,6 +403,16 @@ class AddSchemaDialog(LocksmithDialog):
         """Handle Load Schema button click."""
         # Clear any previous errors
         self.clear_error()
+        if self.app.vault is not self.vault or getattr(self.vault, 'closed', False):
+            self.show_error('This vault is closed.')
+            return
+        if self._request_schema:
+            self.load_button.setEnabled(False)
+            self.load_button.setText('Preparing credential…')
+            self._create_load_schema_doer(
+                file_content=self._request_schema.raw, enable_issuance=True,
+                issuer_aid=self.issuer_dropdown.currentData())
+            return
 
         if self.file_radio.isChecked() and self.file_path_field.text().strip():
             if not self._on_file_selected(self.file_path_field.text().strip()):
@@ -515,6 +543,7 @@ class AddSchemaDialog(LocksmithDialog):
                 app=self.app, oobi=oobi,
                 file_content=file_content, enable_issuance=enable_issuance,
                 issuer_aid=issuer_aid, signal_bridge=self.app.vault.signals,
+                request_said=self.request_said,
             )
             self.app.vault.extend([doer])
         except Exception as error:
@@ -532,7 +561,7 @@ class AddSchemaDialog(LocksmithDialog):
             data: Event data dictionary
         """
         # Only handle LoadSchemaDoer events
-        if doer_name != "LoadSchemaDoer":
+        if doer_name != "LoadSchemaDoer" or (self.request_said and data.get('request') != self.request_said):
             return
 
         logger.info(f"AddSchemaDialog received: {doer_name} - {event_type}")
@@ -546,7 +575,10 @@ class AddSchemaDialog(LocksmithDialog):
     def _on_success(self, data):
         """Close after the schema and issuer selection have been saved."""
         logger.info("Loaded schema %s", data.get('said', ''))
-        self.close()
+        if self.request_said:
+            self.accept()
+        else:
+            self.close()
 
     def _on_failure(self, error_msg):
         """
@@ -558,4 +590,6 @@ class AddSchemaDialog(LocksmithDialog):
         logger.error(f"Failed to load schema: {error_msg}")
 
         self._set_primary_button_idle()
+        if self.request_said and not self.isVisible():
+            self.open()
         self.show_error(error_msg)

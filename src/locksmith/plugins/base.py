@@ -86,6 +86,14 @@ class PluginBase(ABC):
         """
         return []
 
+    async def ensure_messaging(self, vault: Any, pre: str, *, retry: bool = False) -> bool:
+        """Set up receiving for a local identifier, if this provider owns it."""
+        return False
+
+    def messaging_status(self, vault: Any, pre: str) -> tuple[str, str] | None:
+        """Return setup status and error for an identifier managed here."""
+        return None
+
     def get_witness_batches(self, vault: Any, hab_pre: str) -> Any | None:
         """Optional: return batch data for witness authentication grouping.
 

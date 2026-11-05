@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib.parse import urljoin
 from uuid import uuid4
+from types import SimpleNamespace
 
 import pyotp
 import requests
@@ -20,12 +21,15 @@ from keri.core import exchange, parsing
 from keri.core.serdering import SerderKERI
 from keri.db import dbing
 from keri.help import helping
+from keri.peer import exchanging
 from keri.kering import Kinds, Version, Vrsn_2_0
 from hio.base import doing
 
 from locksmith.core.receipting import LocksmithReceiptor
+from locksmith.core.tasking import await_owned_result
 from locksmith.core.remoting import (
     introduce_watcher_observed_aid,
+    watcher_introduction_doers,
     message_version,
     purge_oobi_resolution_state,
     resolve_oobi,
@@ -70,6 +74,7 @@ class BootstrapConfig:
     region_id: str
     region_name: str
     account_options: list[BootstrapOption] = field(default_factory=list)
+    mailbox_enabled: bool = False
 
     def option(self, code: str) -> BootstrapOption | None:
         for option in self.account_options:
@@ -172,11 +177,15 @@ class KFBootClient:
     def boot_server_aid(self) -> str:
         return self._boot_server_aid
 
+    @property
+    def account_url(self) -> str:
+        return self._surfaces.account_url
+
     def set_boot_server_aid(self, aid: str) -> None:
         self._boot_server_aid = aid or ""
 
     def clone(self) -> "KFBootClient":
-        """Return an isolated client snapshot safe to hand to a worker thread."""
+        """Return independent client caches; wallet operations still belong to the vault loop."""
         client = KFBootClient(self._app, surfaces=self._surfaces)
         client._boot_server_aid = self._boot_server_aid
         client._surface_keystate = dict(self._surface_keystate)
@@ -220,6 +229,7 @@ class KFBootClient:
             region_id=str(region.get("id", "") or ""),
             region_name=str(region.get("name", "") or ""),
             account_options=options,
+            mailbox_enabled=bootstrap.get("mailbox_enabled") is True,
         )
 
     def send_ephemeral_inception(self, hab: Any) -> None:
@@ -426,6 +436,277 @@ class KFBootClient:
             expected_sender=dest or self._boot_server_aid,
         )
 
+    async def send_ephemeral_inception_async(self, hab: Any, *, vault=None) -> None:
+        vault = vault or self._app.vault
+        if getattr(vault, "closed", False):
+            raise KFBootError("The vault is closed")
+        msg = hab.msgOwnInception()
+        await self._post_cesr_async(vault=vault,
+            url=self._surfaces.onboarding_url,
+            ims=msg,
+            destination=self._destination(surface="onboarding"),
+            require_reply=False,
+        )
+        self._surface_keystate[("onboarding", hab.pre)] = (
+            hab.kever.sn,
+            hab.kever.serder.said,
+        )
+
+    async def start_onboarding_async(
+        self,
+        hab: Any,
+        *,
+        alias: str,
+        account_aid: str,
+        witness_profile_code: str,
+        region_id: str,
+        watcher_required: bool,
+        vault=None,
+    ) -> OnboardingStartReply:
+        payload = {
+            "account_alias": alias,
+            "account_aid": account_aid,
+            "chosen_profile_code": witness_profile_code,
+            "region_id": region_id,
+            "watcher_required": watcher_required,
+        }
+        reply = await self.send_exn_async(vault=vault,
+            surface="onboarding",
+            hab=hab,
+            route="/onboarding/session/start",
+            payload=payload,
+        )
+        return self._normalize_start_reply(reply.payload, fallback_region_id=region_id)
+
+    async def session_status_async(
+        self,
+        hab: Any,
+        *,
+        session_id: str,
+        destination: str = "",
+        fallback_region_id: str = "",
+        vault=None,
+    ) -> OnboardingStartReply:
+        reply = await self.send_exn_async(vault=vault,
+            surface="onboarding",
+            hab=hab,
+            route="/onboarding/session/status",
+            payload={"session_id": session_id},
+            destination=destination,
+        )
+        return self._normalize_start_reply(reply.payload, fallback_region_id=fallback_region_id)
+
+    async def create_account_async(
+        self,
+        hab: Any,
+        *,
+        session_id: str,
+        account_aid: str,
+        alias: str,
+        witness_profile_code: str,
+        witnesses: list[HostedWitnessAllocation],
+        watcher: HostedWatcherAllocation | None,
+        region_id: str,
+        vault=None,
+    ) -> CesrReply:
+        payload = {
+            "session_id": session_id,
+            "account_aid": account_aid,
+            "account_alias": alias,
+            "chosen_profile_code": witness_profile_code,
+            "region_id": region_id,
+            "witness_eids": [witness.eid for witness in witnesses],
+            "watcher_eid": watcher.eid if watcher is not None else "",
+        }
+        return await self.send_exn_async(vault=vault,
+            surface="onboarding",
+            hab=hab,
+            route="/onboarding/account/create",
+            payload=payload,
+        )
+
+    async def complete_onboarding_async(
+        self,
+        hab: Any,
+        *,
+        session_id: str,
+        account_aid: str,
+        vault=None,
+    ) -> CesrReply:
+        payload = {
+            "session_id": session_id,
+            "account_aid": account_aid,
+        }
+        return await self.send_exn_async(vault=vault,
+            surface="onboarding",
+            hab=hab,
+            route="/onboarding/complete",
+            payload=payload,
+        )
+
+    async def cancel_onboarding_async(
+        self,
+        hab: Any,
+        *,
+        session_id: str,
+        account_aid: str = "",
+        reason: str = "",
+        vault=None,
+    ) -> CesrReply:
+        payload = {"session_id": session_id}
+        if account_aid:
+            payload["account_aid"] = account_aid
+        if reason:
+            payload["reason"] = reason
+        return await self.send_exn_async(vault=vault,
+            surface="onboarding",
+            hab=hab,
+            route="/onboarding/cancel",
+            payload=payload,
+        )
+
+    async def list_account_watchers_async(
+        self,
+        hab: Any,
+        *,
+        account_aid: str,
+        destination: str = "",
+        vault=None,
+    ) -> list[AccountWatcherRow]:
+        reply = await self.send_exn_async(vault=vault,
+            surface="account",
+            hab=hab,
+            route="/account/watchers",
+            payload={"account_aid": account_aid},
+            destination=destination,
+        )
+        return self._normalize_watcher_rows(reply.payload)
+
+    async def list_account_witnesses_async(
+        self,
+        hab: Any,
+        *,
+        account_aid: str,
+        destination: str = "",
+        vault=None,
+    ) -> list[AccountWitnessRow]:
+        reply = await self.send_exn_async(vault=vault,
+            surface="account",
+            hab=hab,
+            route="/account/witnesses",
+            payload={"account_aid": account_aid},
+            destination=destination,
+        )
+        return self._normalize_witness_rows(reply.payload)
+
+    async def delete_account_async(
+        self,
+        hab: Any,
+        *,
+        account_aid: str,
+        destination: str = "",
+        vault=None,
+    ) -> CesrReply:
+        return await self.send_exn_async(vault=vault,
+            surface="account",
+            hab=hab,
+            route="/account/delete",
+            payload={"account_aid": account_aid},
+            destination=destination,
+        )
+
+    async def send_exn_async(
+        self,
+        *,
+        surface: str,
+        hab: Any,
+        route: str,
+        payload: dict[str, Any],
+        destination: str = "",
+        vault=None,
+    ) -> CesrReply:
+        vault = vault or self._app.vault
+        if getattr(vault, "closed", False):
+            raise KFBootError("The vault is closed")
+        dest = destination or self._destination(surface=surface)
+        if surface == "account":
+            await self._ensure_surface_keystate_async(vault=vault, surface=surface, hab=hab, destination=dest)
+        serder = exchange(
+            route=route,
+            attributes=payload,
+            sender=hab.pre,
+            receiver=dest or "",
+            version=Vrsn_2_0,
+            pvrsn=Vrsn_2_0,
+            gvrsn=Vrsn_2_0,
+            kind=Kinds.json,
+        )
+        ims = hab.endorse(serder=serder, last=False, framed=True)
+        attachment = bytearray(ims)
+        del attachment[:serder.size]
+        return await self._post_cesr_async(vault=vault,
+            url=self._surface_url(surface),
+            body=serder.raw,
+            attachment=attachment,
+            destination=dest,
+            require_reply=True,
+            expected_kinds=("rpy", "exn"),
+            expected_route=route,
+            expected_sender=dest or self._boot_server_aid,
+        )
+
+    async def _ensure_surface_keystate_async(self, *, surface: str, hab: Any, destination: str = "", vault=None) -> None:
+        current_sn = hab.kever.sn
+        current = (current_sn, hab.kever.serder.said)
+        cache_key = (surface, hab.pre)
+        synced = self._surface_keystate.get(cache_key)
+        start_sn = 0
+        if synced is not None:
+            synced_sn, synced_said = synced
+            if (
+                synced_sn <= current_sn
+                and hab.db.kels.getLast(keys=hab.pre, on=synced_sn) == synced_said
+            ):
+                if synced == current:
+                    return
+                start_sn = synced_sn + 1
+
+        for msg in self._iter_surface_keystate_messages(
+            hab=hab,
+            start_sn=start_sn,
+            end_sn=current_sn,
+        ):
+            await self._post_cesr_async(vault=vault,
+                url=self._surface_url(surface),
+                ims=msg,
+                destination=destination,
+                require_reply=False,
+            )
+
+        self._surface_keystate[cache_key] = current
+
+    async def _post_cesr_async(self, *, vault=None, require_reply, expected_kinds=(),
+                               expected_route="", expected_sender="", **request):
+        vault = vault or self._app.vault
+        if getattr(vault, "closed", False):
+            raise KFBootError("The vault is closed")
+        # Only immutable transport bytes/headers leave the vault loop.
+        for key in ("ims", "body", "attachment"):
+            if request.get(key) is not None:
+                request[key] = bytes(request[key])
+        response = await await_owned_result(asyncio.to_thread(self.request_cesr, **request))
+        if getattr(vault, "closed", False) or not vault.hby.db.opened:
+            raise KFBootError("The vault is closed")
+        if not require_reply:
+            return None
+        reply = parse_cesr_http_reply(
+            SimpleNamespace(vault=vault), response, expected_kinds=expected_kinds,
+            expected_route=expected_route, expected_sender=expected_sender,
+        )
+        if reply.sender:
+            self._boot_server_aid = reply.sender
+        return reply
+
     def _post_cesr(
         self,
         *,
@@ -439,6 +720,25 @@ class KFBootClient:
         expected_route: str = "",
         expected_sender: str = "",
     ) -> CesrReply | None:
+        response = self.request_cesr(
+            url=url, ims=ims, body=body, attachment=attachment, destination=destination,
+        )
+        if not require_reply:
+            return None
+
+        reply = parse_cesr_http_reply(
+            self._app,
+            response,
+            expected_kinds=expected_kinds,
+            expected_route=expected_route,
+            expected_sender=expected_sender,
+        )
+        if reply.sender:
+            self._boot_server_aid = reply.sender
+        return reply
+
+    def request_cesr(self, *, url, ims=None, body=None, attachment=None, destination=""):
+        """Send prepared bytes without accessing wallet state. Safe for a worker thread."""
         if ims is not None:
             body, attachment = split_cesr_message(ims)
 
@@ -461,19 +761,7 @@ class KFBootClient:
                 status_code=response.status_code,
             )
 
-        if not require_reply:
-            return None
-
-        reply = parse_cesr_http_reply(
-            self._app,
-            response,
-            expected_kinds=expected_kinds,
-            expected_route=expected_route,
-            expected_sender=expected_sender,
-        )
-        if reply.sender:
-            self._boot_server_aid = reply.sender
-        return reply
+        return response
 
     @staticmethod
     def _format_http_error(response) -> str:
@@ -693,10 +981,10 @@ class KFOnboardingService:
         boot_client: KFBootClient,
         witness_registrar: HostedWitnessRegistrar | None = None,
     ):
-        self._app = app
+        self._app = SimpleNamespace(vault=app.vault, qtask=getattr(app, "qtask", None))
         self._db = db
         self._boot_client = boot_client
-        self._witness_registrar = witness_registrar or HostedWitnessRegistrar(app=app, db=db)
+        self._witness_registrar = witness_registrar or HostedWitnessRegistrar(app=self._app, db=db)
 
     async def onboard_async(
         self,
@@ -708,18 +996,27 @@ class KFOnboardingService:
     ) -> OnboardingOutcome:
         """Async UI orchestration for onboarding.
 
-        Hosted-service HTTP remains in the existing synchronous clients and
-        is isolated with ``asyncio.to_thread``. KERI protocol waits use the
-        app's existing async/doer-backed helpers.
+        Prepare/sign and parse on the captured vault loop. Only HTTP bytes use
+        workers; KERI delivery and receipt waits use that vault's HIO scheduler.
         """
         record = self._ensure_account_record()
         had_saved_session = bool(record.onboarding_session_id and record.onboarding_auth_alias)
+        had_onboarding_owner = bool(record.onboarding_auth_alias)
         self._emit(progress, stage="bootstrap", detail="Fetching bootstrap config")
-        bootstrap = await asyncio.to_thread(self._boot_client.fetch_bootstrap_config)
+        bootstrap = await await_owned_result(asyncio.to_thread(self._boot_client.fetch_bootstrap_config))
+        if getattr(self._app.vault, "closed", False):
+            raise asyncio.CancelledError
 
         option = bootstrap.option(witness_profile_code)
         if option is None:
             raise KFBootError(f"Unsupported witness profile '{witness_profile_code}' from bootstrap config")
+        if (record.onboarding_auth_alias and (
+                (alias, witness_profile_code, account_aid or record.account_aid) != (
+                    record.account_alias, record.witness_profile_code, record.account_aid)
+                or (not record.onboarding_session_id
+                    and (bootstrap.region_id, bootstrap.watcher_required) != (
+                        record.region_id, record.watcher_required)))):
+            raise KFBootError("Resume pending onboarding with its saved settings before changing setup.")
 
         self._emit(
             progress,
@@ -779,10 +1076,7 @@ class KFOnboardingService:
                 self._emit(progress, stage="ephemeral_aid", detail="Created hidden onboarding AID")
             if start is None:
                 self._emit(progress, stage="ephemeral_aid", detail="Sending onboarding inception to the boot surface")
-                await self._await_blocking_result(
-                    self._boot_client.send_ephemeral_inception,
-                    ehab,
-                )
+                await await_owned_result(self._boot_client.send_ephemeral_inception_async(ehab, vault=self._app.vault))
 
                 self._emit(progress, stage="session_start", detail="Starting authenticated onboarding session")
 
@@ -790,16 +1084,9 @@ class KFOnboardingService:
                     nonlocal start
                     start = value
 
-                start = await self._await_blocking_result(
-                    self._boot_client.start_onboarding,
-                    ehab,
-                    alias=alias,
-                    account_aid=account_hab.pre,
-                    witness_profile_code=witness_profile_code,
-                    region_id=bootstrap.region_id,
-                    watcher_required=bootstrap.watcher_required,
-                    on_cancel_result=remember_start,
-                )
+                record.onboarding_auth_alias = ehab.name
+                self._db.pin_account(record)
+                start = await await_owned_result(self._boot_client.start_onboarding_async(ehab, alias=alias, account_aid=account_hab.pre, witness_profile_code=witness_profile_code, region_id=bootstrap.region_id, watcher_required=bootstrap.watcher_required, vault=self._app.vault), on_cancel_result=remember_start)
 
             self._emit(
                 progress,
@@ -907,8 +1194,7 @@ class KFOnboardingService:
                     stage="watcher_binding",
                     detail="Introducing the permanent account AID to the hosted watcher",
                 )
-                await self._await_blocking_result(
-                    self._introduce_account_to_watcher,
+                await self._introduce_account_to_watcher_async(
                     account_hab=account_hab,
                     watcher=start.watcher,
                     witnesses=start.witnesses,
@@ -916,17 +1202,7 @@ class KFOnboardingService:
 
             if start.state != "completed":
                 self._emit(progress, stage="account_create", detail="Sending /onboarding/account/create")
-                await self._await_blocking_result(
-                    self._boot_client.create_account,
-                    ehab,
-                    session_id=start.session_id,
-                    account_aid=account_hab.pre,
-                    alias=alias,
-                    witness_profile_code=witness_profile_code,
-                    witnesses=start.witnesses,
-                    watcher=start.watcher,
-                    region_id=start.region_id or bootstrap.region_id,
-                )
+                await await_owned_result(self._boot_client.create_account_async(ehab, session_id=start.session_id, account_aid=account_hab.pre, alias=alias, witness_profile_code=witness_profile_code, witnesses=start.witnesses, watcher=start.watcher, region_id=start.region_id or bootstrap.region_id, vault=self._app.vault))
 
             self._emit(progress, stage="complete", detail="Sending /onboarding/complete")
 
@@ -934,15 +1210,11 @@ class KFOnboardingService:
                 nonlocal remote_completed
                 remote_completed = True
 
-            await self._await_blocking_result(
-                self._boot_client.complete_onboarding,
-                ehab,
-                session_id=start.session_id,
-                account_aid=account_hab.pre,
-                on_cancel_result=mark_remote_completed,
-            )
+            await await_owned_result(self._boot_client.complete_onboarding_async(ehab, session_id=start.session_id, account_aid=account_hab.pre, vault=self._app.vault), on_cancel_result=mark_remote_completed)
             remote_completed = True
         except asyncio.CancelledError:
+            if getattr(self._app.vault, "closed", False):
+                raise
             if remote_completed and account_hab is not None and start is not None and witness_registration is not None:
                 self._complete_onboarding_record(
                     record=record,
@@ -975,7 +1247,13 @@ class KFOnboardingService:
             raise
         except OnboardingSessionPending:
             raise
-        except Exception:
+        except Exception as exc:
+            if getattr(self._app.vault, "closed", False):
+                raise
+            # Boot rejects first-session admission before allocating anything.
+            if (start is None and not had_onboarding_owner
+                    and isinstance(exc, KFBootError) and exc.status_code == 429):
+                self._clear_onboarding_session(record, delete_auth_hab=True)
             await self._preserve_or_abandon_onboarding_run(
                 record=record,
                 alias=alias,
@@ -1034,13 +1312,7 @@ class KFOnboardingService:
 
         try:
             self._emit(progress, stage="session_start", detail="Resuming the saved onboarding session")
-            start = await asyncio.to_thread(
-                self._boot_client.session_status,
-                ehab,
-                session_id=record.onboarding_session_id,
-                destination=record.boot_server_aid,
-                fallback_region_id=bootstrap.region_id,
-            )
+            start = await await_owned_result(self._boot_client.session_status_async(ehab, session_id=record.onboarding_session_id, destination=record.boot_server_aid, fallback_region_id=bootstrap.region_id, vault=self._app.vault))
         except Exception as exc:
             if isinstance(exc, KFBootError) and exc.status_code in _CLOSED_SESSION_STATUS_CODES:
                 raise
@@ -1072,18 +1344,9 @@ class KFOnboardingService:
         this coroutine is cancelled, the late result is handed to
         on_cancel_result before cancellation is re-raised.
         """
-        task = asyncio.create_task(asyncio.to_thread(func, *args, **kwa))
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError as cancel:
-            try:
-                result = await task
-            except Exception:
-                logger.warning("Background onboarding operation failed after cancellation", exc_info=True)
-                raise asyncio.CancelledError from cancel
-            if on_cancel_result is not None:
-                on_cancel_result(result)
-            raise
+        return await await_owned_result(
+            asyncio.to_thread(func, *args, **kwa), on_cancel_result=on_cancel_result,
+        )
 
     async def _preserve_or_abandon_onboarding_run(
         self,
@@ -1100,6 +1363,9 @@ class KFOnboardingService:
         had_saved_session: bool,
         created_new_account: bool,
     ) -> None:
+        # A lost start reply can leave an allocated session whose ID is unknown.
+        if start is None and record.onboarding_auth_alias and not record.onboarding_session_id:
+            return
         preserve_stored_session = (
             had_saved_session
             and account_hab is not None
@@ -1130,6 +1396,8 @@ class KFOnboardingService:
             account_hab=account_hab,
             witness_registration=witness_registration,
         )
+        if getattr(self._app.vault, "closed", False):
+            return
         self._clear_onboarding_session(record, delete_auth_hab=True)
         if created_new_account and account_hab is not None:
             self._delete_local_account_hab(account_hab)
@@ -1434,8 +1702,7 @@ class KFOnboardingService:
             try:
                 if rotate:
                     hab.rotate(toad=toad, cuts=[], adds=list(allocated_witness_eids))
-                await self._await_blocking_result(
-                    self._receipt_single_witness_rotation,
+                await self._receipt_single_witness_rotation_async(
                     hab=hab,
                     witness_eid=witness_eid,
                     witness_url=witness_url,
@@ -1445,14 +1712,88 @@ class KFOnboardingService:
                 raise KFBootError(f"Failed rotating the local account AID onto hosted witnesses: {exc}") from exc
             return
 
-        await self._await_blocking_result(
-            self._rotate_account_to_allocated_witnesses_blocking,
-            hab=hab,
-            registration=registration,
-            allocated_witness_eids=allocated_witness_eids,
-            toad=toad,
-            rotate=rotate,
-        )
+        auths = self._build_witness_auths(registration)
+        receiptor = LocksmithReceiptor(hby=self._app.vault.hby)
+
+        def rotate_and_receipt(tymth, tock=0.0, **opts):
+            yield tock
+            if rotate:
+                hab.rotate(toad=toad, cuts=[], adds=list(allocated_witness_eids))
+            yield from receiptor.receipt(hab.pre, sn=hab.kever.sn, auths=auths)
+
+        await self._run_vault_doer(rotate_and_receipt, children=[receiptor], timeout=30)
+        dgkey = dbing.dgKey(hab.pre, hab.kever.serder.said)
+        if len(hab.db.wigs.get(keys=dgkey) or []) < toad:
+            raise KFBootError("Insufficient witness receipts after rotation")
+
+    async def _run_vault_doer(self, work, *, children=(), timeout=30):
+        vault = self._app.vault
+        if getattr(vault, "closed", False):
+            raise asyncio.CancelledError
+        errors = []
+        finished = False
+
+        def complete(tymth, tock=0.0, **opts):
+            yield from work(tymth=tymth, tock=tock, **opts)
+            return True
+
+        def run(tymth, tock=0.0, **opts):
+            nonlocal finished
+            operation = doing.doify(complete)
+            group = doing.DoDoer(doers=[*children, operation], tymth=tymth)
+            try:
+                group.enter()
+                while not operation.done:
+                    yield tock
+                    group.recur(tyme=tymth())
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                while group.deeds:
+                    try:
+                        group.exit()
+                    except Exception as exc:
+                        errors.append(exc)
+                finished = True
+
+        runner = doing.doify(run)
+        doers = [runner]
+        vault.extend(doers)
+        try:
+            deadline = asyncio.get_running_loop().time() + timeout
+            while not finished:
+                if getattr(vault, "closed", False):
+                    raise asyncio.CancelledError
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise KFBootError("Provider protocol operation timed out")
+                await asyncio.sleep(0.05)
+            if getattr(vault, "closed", False):
+                raise asyncio.CancelledError
+            if errors:
+                raise errors[0]
+        finally:
+            vault.remove(doers)
+
+    async def _receipt_single_witness_rotation_async(self, *, hab, witness_eid, witness_url, auth):
+        msg = bytes(hab.msgOwnEvent(sn=hab.kever.sn))
+        serder = SerderKERI(raw=msg)
+        headers = {"Content-Type": CESR_CONTENT_TYPE,
+                   CESR_ATTACHMENT_HEADER: msg[serder.size:].decode("utf-8"),
+                   CESR_DESTINATION_HEADER: witness_eid}
+        if auth:
+            headers["Authorization"] = auth
+        response = await await_owned_result(asyncio.to_thread(
+            requests.post, urljoin(witness_url.rstrip("/") + "/", "receipts"),
+            headers=headers, data=bytes(serder.raw), timeout=15,
+        ))
+        if getattr(self._app.vault, "closed", False):
+            raise asyncio.CancelledError
+        if response.status_code != 200:
+            raise KFBootError(f"Witness {witness_eid} rejected the rotation event with status {response.status_code}")
+        hab.psr.parseOne(ims=bytearray(response.content), version=message_version(response.content))
+        dgkey = dbing.dgKey(hab.pre, hab.kever.serder.said)
+        if len(hab.db.wigs.get(keys=dgkey) or []) < hab.kever.toader.num:
+            raise KFBootError("Insufficient witness receipts after rotation")
 
     def _receipt_single_witness_rotation(
         self,
@@ -1585,12 +1926,7 @@ class KFOnboardingService:
             self._emit(progress, stage="session_provisioning", detail=detail)
 
             try:
-                current = await self._await_blocking_result(
-                    self._boot_client.session_status,
-                    ehab,
-                    session_id=start.session_id,
-                    fallback_region_id=fallback_region_id,
-                )
+                current = await await_owned_result(self._boot_client.session_status_async(ehab, session_id=start.session_id, fallback_region_id=fallback_region_id, vault=self._app.vault))
             except Exception as exc:
                 if isinstance(exc, KFBootError) and exc.status_code in _CLOSED_SESSION_STATUS_CODES:
                     raise
@@ -1645,8 +1981,7 @@ class KFOnboardingService:
     ) -> None:
         if start is not None and ehab is not None:
             try:
-                await self._await_blocking_result(
-                    self._cancel_onboarding_session,
+                await self._cancel_onboarding_session_async(
                     ehab=ehab,
                     start=start,
                     account_hab=account_hab,
@@ -1656,11 +1991,25 @@ class KFOnboardingService:
                     "KF onboarding session cleanup was interrupted for %s",
                     start.session_id,
                 )
+        if getattr(self._app.vault, "closed", False):
+            return
         self._clear_abandoned_onboarding_state(
             start=start,
             account_hab=account_hab,
             witness_registration=witness_registration,
         )
+
+    async def _cancel_onboarding_session_async(self, *, ehab, start, account_hab):
+        if start is None or ehab is None:
+            return
+        try:
+            await self._boot_client.cancel_onboarding_async(
+                ehab, session_id=start.session_id,
+                account_aid=getattr(account_hab, "pre", "") if account_hab else "",
+                reason="client_abandoned", vault=self._app.vault,
+            )
+        except Exception:
+            logger.warning("Failed abandoning KF onboarding session %s", start.session_id, exc_info=True)
 
     def _cancel_onboarding_session(
         self,
@@ -1798,6 +2147,21 @@ class KFOnboardingService:
         if not resolved:
             raise KFBootError(f"Failed to resolve hosted watcher OOBI for {watcher.eid}")
 
+    async def _introduce_account_to_watcher_async(self, *, account_hab, watcher, witnesses):
+        if getattr(self._app.vault, "closed", False):
+            raise asyncio.CancelledError
+        doers = watcher_introduction_doers(
+            self._app, hab=account_hab, watcher_eid=watcher.eid, observed_aid=account_hab.pre,
+            observed_oobis=self._account_witness_oobis(account_aid=account_hab.pre, witnesses=witnesses),
+        )
+        if not doers:
+            return
+        def deliver(tymth, tock=0.0, **opts):
+            while not all(doer.done for doer in doers):
+                yield tock
+
+        await self._run_vault_doer(deliver, children=doers, timeout=10)
+
     def _introduce_account_to_watcher(
         self,
         *,
@@ -1896,6 +2260,8 @@ class KFVaultDeletionService:
         record = self._db.get_account()
         if record is None:
             return
+        if record.onboarding_auth_alias and not record.onboarding_session_id:
+            raise KFBootError("Resume pending KF onboarding before deleting this vault.")
 
         if record.boot_server_aid:
             self._boot_client.set_boot_server_aid(record.boot_server_aid)
@@ -1971,6 +2337,8 @@ def parse_cesr_http_reply(
     expected_kinds: tuple[str, ...] = (),
     expected_route: str = "",
     expected_sender: str = "",
+    expected_request: str = "",
+    expected_recipient: str = "",
 ) -> CesrReply:
     """Parse a CESR-over-HTTP reply and return the last KERI message payload."""
     ims = bytearray(response.content or b"")
@@ -2019,6 +2387,18 @@ def parse_cesr_http_reply(
     payload = last.ked.get("a", {})
     if not isinstance(payload, dict):
         payload = {}
+    if expected_request:
+        accepted = app.vault.hby.db.exns.get(keys=(last.said,))
+        if ilk != "exn" or accepted is None or accepted.raw != last.raw:
+            raise KFBootError("Boot reply exchange was not authenticated")
+        try:
+            exchanging.verify(app.vault.hby, last)
+        except Exception as exc:
+            raise KFBootError("Boot reply signature verification failed") from exc
+        if payload.get("request_said") != expected_request:
+            raise KFBootError("Boot reply does not match the mailbox request")
+        if last.ked.get("ri") != expected_recipient:
+            raise KFBootError("Boot reply does not match the requesting account")
     return CesrReply(
         ilk=ilk,
         route=route,

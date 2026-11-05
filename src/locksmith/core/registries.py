@@ -1,16 +1,21 @@
 """Publish registry evidence and verify observer replies against the wallet KEL."""
 import json
+import uuid
 from time import monotonic
 
 from hio.base import doing
 from PySide6.QtCore import QUrl
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from keri import kering
-from keri.acdc import regeventing
+from keri.acdc import Registrar, messaging, regeventing
 from keri.app import querying
+from keri.app.habbing import GroupHab
 from keri.app.httping import CESR_CONTENT_TYPE
-from keri.core import Diger, Number, Saider, SerderACDC, eventing
+from keri.core import Diger, Number, Saider, SerderACDC, SerderKERI, eventing
 from keri.help import helping
+
+from locksmith.core.credentialing import CredentialUpdateDoer
+from locksmith.core.receipting import LocksmithReceiptor
 
 
 def _events(stream):
@@ -356,3 +361,95 @@ class RegistryEvidenceDoer(doing.DoDoer):
         finally:
             self.remove(list(self._active.values()))
             self._active.clear()
+
+
+class CreateRegistryDoer(CredentialUpdateDoer):
+    """Register one retained inception after its anchor reaches witness quorum."""
+
+    def __init__(self, vault, hab, name, codes=None, **kwa):
+        self.vault, self.hab, self.name = vault, hab, name
+        self.operation = uuid.uuid4().hex
+        self.estate = hab.kever.lastEst.d
+        self.codes = list(codes or [])
+        self.registry, self.error = None, ''
+        self.stage = 'creating'
+        super().__init__(doers=[doing.doify(self.createDo)], **kwa)
+
+    def recur(self, tyme, deeds=None):
+        try:
+            return super().recur(tyme, deeds)
+        except Exception as ex:
+            self.error = str(ex)
+            self.vault.signals.emit_doer_event('CreateRegistry', 'failed',
+                                               {'error': self.error, 'operation': self.operation})
+            return True
+
+    def createDo(self, tymth=None, tock=0.0, **kwa):
+        self.wind(tymth)
+        yield self.tock
+        receiptor = None
+        try:
+            if (getattr(self.vault, 'closed', False) or
+                    self.vault.hby.habByPre(self.hab.pre) is not self.hab):
+                raise ValueError('The vault is closed or this identifier does not belong to it')
+            if self.hab.kever.lastEst.d != self.estate:
+                raise ValueError('Identifier key state changed. Review witness authentication again.')
+            if isinstance(self.hab, GroupHab) or not self.name.strip():
+                raise ValueError('Choose an individual local controller and a registry name')
+            rip = self.vault.db.registry_creations.get((self.name,))
+            registry = self.vault.rgy.registryByName(self.name)
+            if registry is not None and (rip is None or registry.regk != rip.said):
+                raise ValueError('Choose an unused registry name')
+            if rip is None:
+                if not self.hab.db.fullyWitnessed(self.hab.kever.serder):
+                    raise ValueError('Finish witness authentication for this identifier before creating another registry')
+                rip = messaging.regcept(israid=self.hab.pre)
+                self.vault.db.registry_creations.put((self.name,), rip)
+            if rip.israid != self.hab.pre:
+                raise ValueError('Resume this registry with its original controller')
+            auths = {}
+            for entry in self.codes:
+                wit, code = entry.split(':', 1)
+                auths[wit] = f'{code}#{helping.nowIso8601()}'
+            self.codes.clear()
+            try:
+                sn, _ = regeventing.vetAnchor(rip, db=self.hab.db, issuer=self.hab.pre)
+                anchor = SerderKERI(raw=self.hab.msgOwnEvent(sn=sn))
+            except kering.MissingAnchorError:
+                if not self.hab.db.fullyWitnessed(self.hab.kever.serder):
+                    raise ValueError('Finish witness authentication for this identifier before creating another registry')
+                seal = dict(i=rip.said, s=rip.sad['n'], d=rip.said)
+                raw = self.hab.rotate(data=[seal]) if self.hab.kever.estOnly else self.hab.interact(data=[seal])
+                anchor = SerderKERI(raw=raw)
+            estate = self.hab.kever.lastEst.d
+            threshold = self.hab.kvy.fetchEstEvent(self.hab.pre, anchor.sn).bner.num
+            witnesses = [wit.qb64 for wit in self.hab.kvy.fetchWitnessState(self.hab.pre, anchor.sn)]
+            if threshold != self.hab.kever.toader.num or witnesses != self.hab.kever.wits:
+                raise ValueError('The registry anchor needs its original witness configuration')
+            if not self.hab.db.fullyWitnessed(anchor):
+                self.stage = 'witnessing'
+                receiptor = LocksmithReceiptor(hby=self.vault.hby)
+                self.extend([receiptor])
+                yield from self.receipt(self.hab, anchor, receiptor, auths)
+            if (getattr(self.vault, 'closed', False) or self.hab.kever.lastEst.d != estate):
+                raise ValueError('Identifier key state changed. Review witness authentication again.')
+            if not self.hab.db.fullyWitnessed(anchor):
+                raise kering.MissingWitnessSignatureError('Registry anchor still needs witness authentication')
+            # No managed registry or alias exists until its sealing event has quorum.
+            self.registry = self.vault.rgy.registryByName(self.name)
+            if self.registry is None:
+                self.registry = Registrar(rgy=self.vault.rgy).makeRegistry(
+                    name=self.name, prefix=self.hab.pre, uuid=rip.sad['u'], stamp=rip.sad['dt'])
+            if self.registry.regk != rip.said or not self.registry.anchorMsg(rip.said):
+                raise kering.ValidationError('Registry anchor is still pending')
+            self.stage = 'publishing'
+            yield from self.publish([self.registry])
+            self.vault.db.registry_creations.rem((self.name,))
+            self.vault.signals.emit_doer_event('CreateRegistry', 'created', {'registry': self.registry.regk, 'operation': self.operation})
+        except (OSError, kering.KeriError, ValueError) as ex:
+            self.error = str(ex)
+            if self.vault.db.opened:
+                self.vault.signals.emit_doer_event('CreateRegistry', 'failed', {'error': self.error, 'operation': self.operation})
+        finally:
+            if receiptor is not None:
+                self.remove([receiptor])

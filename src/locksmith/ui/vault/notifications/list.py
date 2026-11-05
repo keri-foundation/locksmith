@@ -141,7 +141,7 @@ class NotificationsListPage(QWidget):
                 route = note.pad.get('a', {}).get('r', '')
                 if '/multisig' in route:
                     notification_row = self._format_multisig_notification(note, rid, timestamp_display)
-                elif route.startswith('/exn/ipex'):
+                elif route.startswith(('/exn/ipex/', '/xip/ipex/')):
                     notification_row = self._format_ipex_notification(note, rid, timestamp_display)
                 elif route.startswith('/challenge/response'):
                     notification_row = self._format_challenge_response_notification(note, rid, timestamp_display)
@@ -336,7 +336,7 @@ class NotificationsListPage(QWidget):
 
     def _format_ipex_message(self, exn, route: str, actual_message: str = "") -> tuple[str, str]:
         """Format native exchange results and expose grants for explicit acceptance."""
-        if exn.pvrsn.major != 2 or not exn.sad.get('x'):
+        if exn.pvrsn.major != 2 or (exn.ilk != 'xip' and not exn.sad.get('x')):
             return "Unsupported IPEX", "This exchange does not use ACDC V2 IPEX"
         verb = route.rsplit('/', 1)[-1].upper()
         message = "Protocol verified"

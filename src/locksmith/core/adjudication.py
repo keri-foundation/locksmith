@@ -100,7 +100,11 @@ class KeyStateQuerier(doing.DoDoer):
             keys = (self.oid, wid)
 
             if (saider := self.hby.db.knas.get(keys)) is None:
-                return super(KeyStateQuerier, self).recur(tyme, deeds)
+                try:
+                    return super(KeyStateQuerier, self).recur(tyme, deeds)
+                except Exception:
+                    logger.exception('Watcher query failed for %s', self.oid)
+                    return True
             else:
                 logger.info(f"Watcher {wid} reports {saider.qb64} as the current state of {self.oid}")
                 if keys in self.saiders and self.saiders[keys].qb64 != saider.qb64:

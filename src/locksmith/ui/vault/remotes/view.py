@@ -367,7 +367,7 @@ class ViewRemoteIdentifierDialog(LocksmithDialog):
         layout.addWidget(divider)
 
         # Create collapsible section
-        self.mailbox_section = CollapsibleSection(title="Mailboxes", parent=self)
+        self.mailbox_section = CollapsibleSection(title="Connection details", parent=self)
         mailbox_content_widget = QWidget()
         mailbox_layout = QVBoxLayout(mailbox_content_widget)
         mailbox_layout.setContentsMargins(20, 10, 20, 10)
@@ -387,7 +387,12 @@ class ViewRemoteIdentifierDialog(LocksmithDialog):
             label.setStyleSheet(f"color: {colors.TEXT_SUBTLE}; font-size: 13px;")
             mailbox_layout.addWidget(label)
 
-        # Associated Identifier dropdown
+        refresh = LocksmithInvertedButton('Refresh contact')
+        refresh.clicked.connect(self._on_refresh_keystate)
+        mailbox_layout.addWidget(refresh)
+        update = LocksmithInvertedButton('Import updated introduction')
+        update.clicked.connect(self._import_introduction)
+        mailbox_layout.addWidget(update)
         self.mailbox_section.set_content_layout(mailbox_layout)
         layout.addWidget(self.mailbox_section)
 
@@ -516,6 +521,13 @@ class ViewRemoteIdentifierDialog(LocksmithDialog):
         item_layout.addWidget(delete_button, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         return item_widget
+
+    def _import_introduction(self):
+        from locksmith.ui.vault.remotes.add import AddRemoteIdentifierDialog
+        dialog = AddRemoteIdentifierDialog(self.app, self, expected_pre=self.remote_identifier_prefix)
+        dialog.alias_field.setText(self.remote_id.get('alias', ''))
+        dialog.file_radio.setChecked(True)
+        dialog.open()
 
     def _populate_identifier_dropdown(self, dropdown):
         """

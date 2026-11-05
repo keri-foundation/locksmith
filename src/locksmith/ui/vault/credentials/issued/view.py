@@ -12,6 +12,8 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QHBoxLayout
 )
+from keri import Vrsn_2_0
+from keri.core import Parser
 from locksmith.ui import colors
 from locksmith.core import credentialing
 from locksmith.ui.vault.credentials.presentation import attribute_view, credential_details, credential_name, identifier_name, date_label, status_label
@@ -32,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 class ViewIssuedCredentialDialog(LocksmithDialog):
     """Dialog for viewing issued credential details."""
-    def __init__(self, icon_path, app, credential_said, parent=None, received=False):
+    def __init__(self, icon_path, app, credential_said, parent=None, received=False, *, grant_said=None):
         """
         Initialize the ViewIssuedCredentialDialog.
 
@@ -45,10 +47,12 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
         self.app = app
         self.credential_said = credential_said
         self.received = received
+        self.grant_said = grant_said
 
         # Get the credential details from the app
         try:
-            self.credential = credentialing.credential(self.app.vault, self.credential_said, received=received)
+            self.credential = credentialing.credential(self.app.vault, self.credential_said,
+                                                       received=received, grant_said=grant_said)
 
             # Get schema info
             self.schema_title = credential_name(self.credential.get("schema"))
@@ -77,6 +81,8 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
         layout = QVBoxLayout(content_widget)
         layout.setContentsMargins(0, 10, 0, 0)
         layout.setSpacing(15)
+        if self.grant_said:
+            layout.addWidget(QLabel('Shared in this exchange'))
 
         # Create button row
         button_row = QHBoxLayout()
@@ -103,11 +109,19 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
 
         self._build_issuer_section(layout)
         self._build_recipient_section(layout)
-        if self.received:
-            layout.addWidget(attribute_view('Received by', identifier_name(self.app.vault, self.credential['recipient'])))
+        if self.grant_said:
+            layout.addWidget(attribute_view('Sent by', identifier_name(self.app.vault, self.credential['sender'])))
+        if self.received or self.grant_said:
+            layout.addWidget(attribute_view('Received by' if self.received else 'Shared with',
+                                           identifier_name(self.app.vault, self.credential['recipient'])))
         self._build_status_section(layout)
         self._build_issued_date_section(layout)
         layout.addWidget(credential_details(self.app.vault, self.credential['sad'], identity=False))
+        if self.grant_said:
+            for stream in self.credential['artifacts'].values():
+                nodes = Parser().parse(ims=bytearray(stream), processive=False, version=Vrsn_2_0)
+                for node in nodes:
+                    layout.addWidget(credential_details(self.app.vault, node.serder.sad))
         verification = CollapsibleSection(title='Verification details')
         details = QVBoxLayout()
         auth = self.credential['status'].get('auth')
@@ -222,7 +236,7 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
 
     def _build_issued_date_section(self, layout):
         """Build the issued date section."""
-        date_title = "Accepted" if self.received else "Created"
+        date_title = "Accepted" if self.received else "Disclosed" if self.grant_said else "Created"
         label = QLabel(date_title)
         label.setStyleSheet("font-weight: bold; font-size: 14px;")
         layout.addWidget(label)
