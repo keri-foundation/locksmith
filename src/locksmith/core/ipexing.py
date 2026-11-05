@@ -143,16 +143,17 @@ def prepare(vault, hab, serder, attachment):
 
 
 def _presentation_requirements(sender, recipient, origin, nodes):
-    """Match native recipient exemptions for direct issuance."""
+    """Resolve declarations for the sender and origin principal of a wallet Grant."""
     nodes = list(nodes)
     root = next(node for node in nodes if node.said == origin)
+    grantors = {sender, root.iseaid or root.israid}
     issuance = (sender, recipient) == (root.israid, root.iseaid)
     for acdc in nodes:
         declarations = ipexing.IpexHandler._presentationRegistries(acdc)
         if declarations is None:
             raise ValueError('The presentation registry declaration is hidden or malformed')
         for controller, regk in declarations:
-            if not (issuance and controller == recipient):
+            if controller in grantors and not (issuance and controller == recipient):
                 yield controller, regk
 
 

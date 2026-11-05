@@ -13,7 +13,7 @@ from test_keri_v2_compat import _deliver_ipex, ipex_vaults as ipex_vaults
 
 
 @pytest.mark.parametrize('anchored', [False, True])
-@pytest.mark.parametrize('linked', [False, True])
+@pytest.mark.parametrize('linked', [False, True, 'other-issuee'])
 def test_holder_prepares_one_grant_before_queueing_delivery(ipex_vaults, anchored, linked):
     issuer_app, holder_app, verifier_app = [ipex_vaults(name) for name in
                                           ('present-issuer', 'present-holder', 'present-verifier')]
@@ -33,6 +33,17 @@ def test_holder_prepares_one_grant_before_queueing_delivery(ipex_vaults, anchore
     assert registry.anchorMsg(rip.said)
     said = _issue(issuer_app, schema, holder, attributes={'LEI': 'credential-value', 'rd': registry.regk})
     if linked:
+        if linked == 'other-issuee':
+            # A linked authority's issuee does not co-grant this presentation.
+            # Its declared registry must not require a proof from another wallet.
+            authority = issuer_app.hby.makeHab(name='authority')
+            authority_registry = Registrar(rgy=issuer_app.rgy).makeRegistry(
+                name='authority-presentations', prefix=authority.pre)
+            rip = issuer_app.rgy.store.event(authority_registry.regk)
+            authority.interact(data=[dict(i=authority_registry.regk, s=rip.sad['n'], d=rip.said)])
+            assert authority_registry.anchorMsg(rip.said)
+            said = _issue(issuer_app, schema, authority,
+                          attributes={'LEI': 'authority-value', 'rd': authority_registry.regk})
         said = _issue(issuer_app, schema, holder,
                       attributes={'LEI': 'linked-value', 'rd': registry.regk},
                       edges={'source': {'n': said, 's': schema.said, 'o': 'NI2I'}})
@@ -478,7 +489,7 @@ def test_queued_registry_creation_rejects_changed_controller_state(ipex_vaults):
     assert app.rgy.registryByName('disclosures') is None
 
 
-def test_grant_authentication_refreshes_when_another_controller_adds_witnesses(ipex_vaults):
+def test_grant_authentication_refreshes_when_principal_adds_witnesses(ipex_vaults):
     from locksmith.ui.vault.credentials.issued.grant import GrantCredentialDialog
 
     app = ipex_vaults('grant-auth')
@@ -506,9 +517,10 @@ def test_grant_authentication_refreshes_when_another_controller_adds_witnesses(i
     assert len(dialog._auth_panels) == 1
     for field in dialog._auth_panels[0].passcode_fields.values():
         field.setText('123456')
-    second.rotate(adds=[second_wit.pre], toad=1)
+    first.rotate(adds=[second_wit.pre], toad=2)
     dialog._send_grant(issuer, grant, atc)
-    assert {panel.hab.pre for panel in dialog._auth_panels} == {first.pre, second.pre}
+    assert {panel.hab.pre for panel in dialog._auth_panels} == {first.pre}
+    assert set(dialog._auth_panels[0].passcode_fields) == {first_wit.pre, second_wit.pre}
     assert dialog._pending_said is None
     assert app.vault.db.outbox.get((grant.said,)) is None
     dialog.close()
