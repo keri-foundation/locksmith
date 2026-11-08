@@ -10,6 +10,8 @@ from hio.base import doing
 from keri import kering
 from keri.app import habbing, organizing
 from keri.core import eventing
+from keri.db import basing
+from keri.help import helping
 
 from locksmith.core import remoting
 
@@ -636,3 +638,66 @@ def test_identifier_export_repairs_delivery_routes(tmp_path, monkeypatch, transf
         import_contact()
         assert target.db.ends.get(keys=keys).allowed is True
         ipexing._require_route(sender, hab.pre, reply=False)
+
+
+def test_oobiery_failed_state_is_not_reported_as_a_missing_prefix():
+    """An Oobiery failure state must be classified as a resolution failure.
+
+    Oobiery records ``OobiRecord.state == 'failed'`` whenever a fetch or parse
+    step fails to produce a usable OOBI stream. Reporting that as
+    "Prefix not found in KERI DB" describes a different problem and points the
+    reader at the wrong cause.
+    """
+    oobi = "https://example.test/oobi/AID_FAIL/controller"
+
+    class _SignalSink:
+        def __init__(self):
+            self.events = []
+
+        def emit_doer_event(self, doer_name=None, event_type=None, data=None, **kwa):
+            self.events.append((event_type, dict(data or {})))
+
+    roobi = _FakeStore()
+    roobi.put(
+        keys=(oobi,),
+        val=basing.OobiRecord(date=helping.nowIso8601(), state="failed"),
+    )
+    db = SimpleNamespace(roobi=roobi, oobis=_FakeStore())
+    hby = SimpleNamespace(db=db, kevers={})
+    app = SimpleNamespace(vault=SimpleNamespace(hby=hby, org=_FakeOrg()), qtask=None)
+
+    signal_bridge = _SignalSink()
+    doer = remoting.ResolveOobiDoer(
+        app=app,
+        pre="AID_FAIL",
+        oobi=oobi,
+        alias="failed-witness",
+        signal_bridge=signal_bridge,
+        timeout_seconds=5.0,
+    )
+    doing.Doist(tock=0.03125, real=True).do(doers=[doer], limit=5.5)
+
+    assert doer.resolved is False
+    assert signal_bridge.events, "a failure signal must be emitted"
+
+    event_type, data = signal_bridge.events[-1]
+    assert event_type == "oobi_resolution_failed"
+    assert data["success"] is False
+    assert data["error"] != "Prefix not found in KERI DB", (
+        "Oobiery recorded state='failed'; reporting a missing prefix "
+        "misattributes the cause"
+    )
+
+
+def test_resolve_oobi_blocking_reports_oobiery_failure(monkeypatch):
+    oobi = "https://example.test/oobi/AID_FAIL/controller"
+    roobi = _FakeStore()
+    roobi.put(keys=(oobi,), val=basing.OobiRecord(date=helping.nowIso8601(), state="failed"))
+    db = SimpleNamespace(roobi=roobi, oobis=_FakeStore())
+    app = SimpleNamespace(vault=SimpleNamespace(hby=SimpleNamespace(db=db, kevers={})), qtask=object())
+    errors = []
+    monkeypatch.setattr(remoting.logger, "error", lambda message, *args: errors.append(message % args))
+
+    assert remoting.resolve_oobi_blocking(app, "AID_FAIL", oobi=oobi) is False
+    assert len(errors) == 1
+    assert "Oobiery recorded state='failed'" in errors[0]
