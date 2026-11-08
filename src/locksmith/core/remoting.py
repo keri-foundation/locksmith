@@ -26,6 +26,11 @@ from mnemonic import Mnemonic
 
 logger = help.ogler.getLogger(__name__)
 
+# Oobiery records this literal in ``OobiRecord.state`` when a fetch or parse step
+# fails. ``keri.app.oobiing`` builds it from a module-local namedtuple, so compare
+# against the value rather than importing that container.
+OOBI_STATE_FAILED = "failed"
+
 
 def message_version(ims: bytes | bytearray) -> kering.Versionage:
     """Return the KERI wire version for a complete raw message."""
@@ -442,6 +447,18 @@ def resolve_oobi_blocking(
         time.sleep(sleep_interval)
 
     if pre not in app.vault.hby.kevers:
+        # Distinguish a genuine resolution failure from a missing prefix; Oobiery
+        # records the former in OobiRecord.state. See ResolveOobiDoer.resolve_do.
+        roobi = app.vault.hby.db.roobi.get(keys=(oobi,))
+        if getattr(roobi, 'state', None) == OOBI_STATE_FAILED:
+            logger.error(
+                "OOBI resolution failed for alias %s and OOBI %s, Oobiery recorded state=%r.",
+                alias,
+                oobi,
+                roobi.state,
+            )
+            return False
+
         logger.error(
             "OOBI resolution failed for alias %s and OOBI %s, %s not found in KERI DB.",
             alias,
@@ -569,10 +586,23 @@ class ResolveOobiDoer(doing.DoDoer):
 
             # Verify the prefix is now in kevers
             if self.pre not in self.app.vault.hby.kevers:
-                logger.error(
-                    f'OOBI Resolution failed for alias {self.alias} and OOBI {self.oobi}, '
-                    f'{self.pre} not found in KERI DB after resolution.'
-                )
+                # Oobiery records why it could not resolve the OOBI. Reading that
+                # state keeps a genuine resolution failure from being reported as a
+                # missing prefix, which describes a different problem and points the
+                # reader at the wrong cause.
+                roobi = self.app.vault.hby.db.roobi.get(keys=(self.oobi,))
+                if getattr(roobi, 'state', None) == OOBI_STATE_FAILED:
+                    logger.error(
+                        f'OOBI resolution failed for alias {self.alias} and OOBI {self.oobi}, '
+                        f'Oobiery recorded state={roobi.state!r}.'
+                    )
+                    error = 'OOBI resolution failed'
+                else:
+                    logger.error(
+                        f'OOBI Resolution failed for alias {self.alias} and OOBI {self.oobi}, '
+                        f'{self.pre} not found in KERI DB after resolution.'
+                    )
+                    error = 'Prefix not found in KERI DB'
 
                 # Signal failure to UI
                 if self.signal_bridge:
@@ -583,7 +613,7 @@ class ResolveOobiDoer(doing.DoDoer):
                             'alias': self.alias,
                             'pre': self.pre,
                             'oobi': self.oobi,
-                            'error': 'Prefix not found in KERI DB',
+                            'error': error,
                             'success': False
                         }
                     )
