@@ -355,6 +355,15 @@ class Poller(doing.DoDoer):
 
         super(Poller, self).__init__(doers=doers, **kwa)
 
+    def serviceClient(self, tymth, tock=0.0, *, clientDoer, temp=None):
+        """Keep connection failures inside the poller's retry loop."""
+        try:
+            yield from clientDoer.do(tymth=tymth, tock=tock, temp=temp)
+        except OSError as e:
+            self.error = str(e)
+            self.connected = False
+        return True
+
     def eventDo(self, tymth=None, tock=0.0, **kwa):
         """
         Handles event-driven processing and communication with a witness through HTTP, retrying operations
@@ -384,13 +393,12 @@ class Poller(doing.DoDoer):
         while self.retry > 0:
             try:
                 client, clientDoer = agenting.httpClient(self.hab, self.mailbox)
-            except kering.MissingEntryError as e:
+            except (kering.MissingEntryError, OSError) as e:
                 self.error = str(e)
                 self.connected = False
                 yield max(self.retry / 1000, 5.0)
                 continue
 
-            self.extend([clientDoer])
             self.error = ''
 
             topics = dict()
@@ -424,19 +432,14 @@ class Poller(doing.DoDoer):
                 )
 
             httping.createCESRRequest(msg, client, dest=self.mailbox)
+            service = doing.doify(self.serviceClient, clientDoer=clientDoer)
+            self.extend([service])
 
-            while client.requests:
+            while client.requests and not service.done:
                 yield self.tock
 
             created = helping.nowUTC()
-            while True:
-
-                now = helping.nowUTC()
-                if now - created > datetime.timedelta(seconds=30):
-                    self.remove([clientDoer])
-                    self.connected = False
-                    break
-
+            while not service.done and helping.nowUTC() - created <= datetime.timedelta(seconds=30):
                 while client.events:
                     self.connected = True
                     evt = client.events.popleft()
@@ -468,6 +471,8 @@ class Poller(doing.DoDoer):
                     yield self.tock
 
                 yield 0.25
+            self.remove([service])
+            self.connected = False
             yield self.retry / 1000
 
     def commit(self, topic, idx):

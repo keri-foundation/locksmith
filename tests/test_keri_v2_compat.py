@@ -1452,6 +1452,38 @@ def test_vault_listens_through_receiving_endpoints_and_replays_unparsed_mail(ipe
             mdoist.exit()
 
 
+@pytest.mark.real_routes
+def test_mailbox_poller_retries_after_socket_errors(ipex_vaults, monkeypatch):
+    import errno
+
+    from hio.core.http import clienting
+
+    app = ipex_vaults('poller-retry')
+    hab = app.hby.makeHab(name='listener')
+    app.hby.psr.parse(ims=bytearray(hab.makeLocScheme(url='http://127.0.0.1:1')))
+    app.hby.psr.parse(ims=bytearray(hab.makeEndRole(eid=hab.pre, role=kering.Roles.mailbox)))
+    errors = (OSError(errno.EINVAL, 'Connect failed'),
+              BrokenPipeError(errno.EPIPE, 'Send failed'))
+    clients = []
+
+    def fail_first_connections(client):
+        if not clients or clients[-1] is not client:
+            clients.append(client)
+            if len(clients) <= len(errors):
+                raise errors[len(clients) - 1]
+
+    monkeypatch.setattr(clienting.Client, 'service', fail_first_connections)
+    for _ in range(100):
+        app.qtask.run()
+        if len(clients) == 3:
+            break
+
+    assert len(clients) == 3
+    assert all(not client.connector.opened for client in clients[:2])
+    poller, = app.vault.mbx.pollers
+    assert poller.error == ''
+
+
 def test_mailbox_retains_unparsed_frames_across_reopen(ipex_vaults):
     from keri.acdc import ipexing as native
     sender, receiver = ipex_vaults('raw-sender'), ipex_vaults('raw-receiver')
