@@ -719,7 +719,8 @@ def test_request_registry_and_apply_survive_retry_and_reopen(ipex_vaults, monkey
     offered = ipexing.respond(target.vault, apply.said, 'Offer', credential_said=issued)
     offer = target.hby.db.exns.get((offered,))
     assert offer.sad['a']['preg'] == registry
-    assert b'Requested credential' not in exchanging.serializeMessage(target.hby, offered)
+    nested, = exchanging.loadParsedNestedSubstreams(target.hby, offered)
+    assert b'Requested credential' in nested.serder.raw
     _deliver_ipex(source.vault, exchanging.serializeMessage(target.hby, offered))
     agreed = ipexing.respond(source.vault, offered, 'Agree')
     assert source.vault.exc.complete(agreed)

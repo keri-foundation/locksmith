@@ -1,6 +1,7 @@
 """Start a credential exchange from its schema or inventory."""
 from PySide6.QtCore import Qt, Signal, QSignalBlocker
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
+from keri.core import SerderACDC
 
 from locksmith.core import credentialing, ipexing, sedi
 from locksmith.ui.vault.shared.messaging import prepare_messaging
@@ -8,7 +9,9 @@ from locksmith.core.habbing import list_eligible_local_identifiers
 from locksmith.ui.toolkit.widgets import LocksmithButton, LocksmithDialog, LocksmithInvertedButton
 from locksmith.ui.toolkit.widgets.fields import FloatingLabelComboBox
 from locksmith.ui.vault.credentials.disclosure import DisclosureFields, DisclosureSelection, RegistryCheckWait
-from locksmith.ui.vault.credentials.presentation import attribute_label, credential_name, identifier_name
+from locksmith.ui.vault.credentials.presentation import (
+    attribute_label, credential_details, credential_name, identifier_name,
+)
 from locksmith.ui.vault.remotes.add import AddRemoteIdentifierDialog
 from locksmith.ui.vault.shared.witness_auth_mixin import WitnessAuthenticationPanel
 
@@ -138,6 +141,8 @@ class StartExchangeDialog(LocksmithDialog):
         self._offer_error = ''
         self._requests = {}
         self._offers = {}
+        self._issuance_offers = {}
+        self._issuer_delivery = False
         self._request_doer = None
         self._repair_dialog = None
         self._request_submitted = False
@@ -156,10 +161,9 @@ class StartExchangeDialog(LocksmithDialog):
             explanation.setWordWrap(True)
             layout.addWidget(explanation)
         if action == 'Offer':
-            explanation = QLabel('Choose what you are willing to share. Optional fields start unselected. '
-                                 'The offer names your choices; values are shared after agreement.')
-            explanation.setWordWrap(True)
-            layout.addWidget(explanation)
+            self.offer_explanation = QLabel()
+            self.offer_explanation.setWordWrap(True)
+            layout.addWidget(self.offer_explanation)
         self.sender = FloatingLabelComboBox('Your identifier')
         for identifier in list_eligible_local_identifiers(app):
             self.sender.addItem(self._name(identifier['prefix']), identifier['prefix'])
@@ -233,7 +237,7 @@ class StartExchangeDialog(LocksmithDialog):
         cancel.clicked.connect(self.close)
         self.send_button.clicked.connect(self._send)
         self.sender.currentIndexChanged.connect(self._update_recipients)
-        self.recipient.currentIndexChanged.connect(self._check_route)
+        self.recipient.currentIndexChanged.connect(self._select_sender)
         self.selection.currentIndexChanged.connect(self._select_sender)
         self.vault.signals.doer_event.connect(self._request_event)
         self.finished.connect(self._finished)
@@ -263,7 +267,10 @@ class StartExchangeDialog(LocksmithDialog):
             for pre in sorted(peers, key=lambda pre: (self._name(pre).casefold(), pre)):
                 self.recipient.addItem(self._name(pre), pre)
             self.recipient.setCurrentIndex(max(0, self.recipient.combo_box.findData(selected)))
-        self._check_route()
+        if self.action == 'Offer':
+            self._select_sender()
+        else:
+            self._check_route()
 
     def _select_sender(self, *_):
         if self._closed or self.app.vault is not self.vault or getattr(self.vault, 'closed', False):
@@ -295,16 +302,44 @@ class StartExchangeDialog(LocksmithDialog):
         if self.action == 'Offer':
             for offer in self._offers.values():
                 offer.hide()
+            for offer in self._issuance_offers.values():
+                offer.hide()
             self._offer_error = ''
+            self._issuer_delivery = False
+            self.offer_explanation.setText(
+                'Choose what you are willing to share. Optional fields start unselected. '
+                'The presentation offer names your choices; values are shared after agreement.')
             try:
                 said = self.selection.currentData()
                 if said:
-                    if said not in self._offers:
-                        offer = DisclosureSelection(self.vault, said)
-                        offer.changed.connect(self._check_route)
-                        self._offers[said] = offer
-                        self.preview.layout().addWidget(offer)
-                    self._offers[said].show()
+                    view = credentialing.credential(self.vault, said, received=self.received)
+                    self._issuer_delivery = ipexing.issuer_delivery(
+                        self.sender.currentData(), self.recipient.currentData(), SerderACDC(sad=view['sad']))
+                    if self._issuer_delivery:
+                        self.offer_explanation.setText(
+                            'The complete credential and its supporting authority chain are included in this offer '
+                            'so the recipient can review every value before agreeing.')
+                        if said not in self._issuance_offers:
+                            offer = QWidget()
+                            offer_layout = QVBoxLayout(offer)
+                            offer_layout.setContentsMargins(0, 0, 0, 0)
+                            _, _, plan, nodes = ipexing._credential_evidence(self.vault, said)
+                            for _, prefix, _ in plan[0]:
+                                offer_layout.addWidget(credential_details(
+                                    self.vault, ipexing.disclosure_node(nodes, said, prefix)))
+                            self._issuance_offers[said] = offer
+                            self.preview.layout().addWidget(offer)
+                        self._issuance_offers[said].show()
+                    else:
+                        self.offer_explanation.setText(
+                            'Choose what you are willing to share. Optional fields start unselected. '
+                            'The presentation offer names your choices; values are shared after agreement.')
+                        if said not in self._offers:
+                            offer = DisclosureSelection(self.vault, said)
+                            offer.changed.connect(self._check_route)
+                            self._offers[said] = offer
+                            self.preview.layout().addWidget(offer)
+                        self._offers[said].show()
             except Exception as error:
                 self._offer_error = str(error)
         self._check_route()
@@ -489,8 +524,9 @@ class StartExchangeDialog(LocksmithDialog):
                     self.vault.extend([self._request_doer])
                     return
             else:
-                plan, message, _ = self._offers[self.selection.currentData()].prepare()
-                selection.update(disclosure_plan=plan, message=message)
+                if not self._issuer_delivery:
+                    plan, message, _ = self._offers[self.selection.currentData()].prepare()
+                    selection.update(disclosure_plan=plan, message=message)
             said = ipexing.start(self.vault, hab, self.recipient.currentData(), self.action, **selection)
             self.accept()
             self.submitted.emit(said)

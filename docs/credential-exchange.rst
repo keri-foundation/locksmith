@@ -43,7 +43,7 @@ Issue and send
 
 1. Load the schema in the issuer wallet, enable issuance, and select the local
    issuer AID. The recipient wallet loads matching built-in schemas when it
-   verifies a Grant. Import any other required schemas in the recipient wallet.
+   verifies an Offer or Grant. Import any other required schemas in the recipient wallet.
 2. Open Issued Credentials and choose Issue Credential. Select the credential type,
    recipient, attributes, linked credentials and terms. Use the authentication
    supported by that schema and the relying application: registry, issuer KEL
@@ -57,14 +57,17 @@ Issue and send
    Choose **Approve recovery** to collect their receipts with the witness code,
    or choose **Back** to leave them pending. To continue after a
    vault restart, open **Issued Credentials → Resume issuance** on the pending
-   credential. Review the saved values and authenticate again. If the original
-   request expired, this finishes issuance in your wallet. Start a new exchange
-   to send the credential.
-4. Choose Grant, or use the credential's Grant action later. Verify the recipient
-   and expand Review data and terms to share. Send only the intended disclosure.
-5. In the recipient wallet, open Activity, review the received exchange and choose
-   Add credential when appropriate. The wallet retains the accepted credential
-   and sends an acknowledgment.
+   credential. You can also reopen its original request. Review the saved values
+   and authenticate again. If the original request expired, this finishes issuance
+   in your wallet. Start a new exchange to send the credential.
+4. For the negotiated issuance flow, choose Offer. Locksmith includes the complete
+   bare credential and its supporting authority chain so the recipient can review
+   every value and term before agreeing. Issuer-authentication proofs remain in the
+   later Grant. Direct Grant is still available when no Offer review is required.
+5. In the recipient wallet, open Activity and review the Offer. Choose Agree to
+   request its authenticated evidence. After the Grant arrives, review it and choose
+   Add credential when appropriate. The wallet retains the accepted credential and
+   sends an acknowledgment.
 
 Check Accepted in both activity histories and compare the full credential SAID.
 Submitted confirms submission, not recipient acceptance. Closing and reopening
@@ -153,17 +156,21 @@ Locksmith carries the registry SAID in the signed Apply body as ``a.preg``.
 This is a Locksmith application field, not a standard IPEX field. The issuer
 verifies the registry's anchor and requester control before it uses that SAID
 in the credential's ``a.rd`` field. Both wallets need registry-service
-configuration and the required identifier evidence. Offer confirms ``a.preg``
-without disclosing credential values. Acceptance rejects a credential that
-does not use the requested registry. Schemas without this supported attribute
-declaration keep the existing request flow. The pinned Keripy version reads presentation
-registry declarations from the expanded ``a`` block only.
+configuration and the required identifier evidence. An issuance Offer confirms
+``a.preg`` and discloses the complete bare credential for review. Acceptance
+rejects a credential that does not use the requested registry. Schemas without
+this supported attribute declaration keep the existing request flow. The pinned
+Keripy version reads presentation-registry declarations from the expanded ``a``
+block only.
 
-Locksmith sends Offers by reference. The reference can identify the same
-credential across exchanges. An incoming IPEX Offer can include values or
-terms. Review them before choosing Agree. Grant carries the selected values
-and authentication evidence. Later disclosures do not fill hidden fields
-in earlier exchanges. Review the retained Grant to inspect exactly what that
+Issuance and presentation Offers intentionally differ. An Offer sent by the
+credential issuer to its issuee contains the complete bare origin credential and
+supporting authority-chain credentials. It does not contain their registry, KEL,
+or signature proofs; Grant carries that authenticated evidence after the issuee
+agrees. A holder-to-verifier presentation Offer remains value-free: it identifies
+the credential and the selected field paths, and the Grant carries only the agreed
+values and proofs. Later disclosures do not fill hidden fields in earlier
+presentation exchanges. Review the retained Grant to inspect exactly what that
 exchange shared, including supporting credentials.
 
 Compose held credentials

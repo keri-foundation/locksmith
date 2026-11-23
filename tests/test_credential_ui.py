@@ -471,6 +471,18 @@ def test_issue_form_issues_aggregate_blocks_with_selected_subject(wallet, qapp):
     assert acdc.sad['r']['l'] == ''
     assert view['status']['et'] == 'issued'
 
+    def assert_claims(view):
+        for name, value in claims.items():
+            labels = [label for label in view.findChildren(QLabel)
+                      if label.text().lower().startswith(name) and label.isVisibleTo(view)]
+            assert len(labels) == 1, f'Expected one visible {name} field'
+            texts = {label.text() for label in labels[0].parentWidget().findChildren(QLabel)
+                     if label.isVisibleTo(view)}
+            assert texts == {labels[0].text(), 'Yes' if value else 'No'}, f'Wrong value displayed for {name}'
+        texts = {label.text() for label in view.findChildren(QLabel)}
+        assert acdc.sad['A'][0] not in texts
+        assert all(block['d'] not in texts and block['u'] not in texts for block in acdc.sad['A'][1:])
+
     request = ipexing.start(app.vault, recipient, issuer.pre, 'Apply', schema=schemer.said)
     assert 'preg' not in app.hby.db.exns.get((request,)).sad['a']
     parent = QWidget()
@@ -483,24 +495,13 @@ def test_issue_form_issues_aggregate_blocks_with_selected_subject(wallet, qapp):
     offer = activity._response_dialog
     _wait_for(lambda: offer.credential.isEnabled() and offer.credential.findData(acdc.said) >= 0)
     offer.credential.setCurrentIndex(offer.credential.findData(acdc.said))
-    fields = offer._disclosure_selection.field_widgets
-    age = fields['/']
-    core = fields['/e/coreIdentity/_/']
-    assert age.select_all.text() == 'Select all' and age.select_all.isVisibleTo(offer)
-    assert core.select_all is None
+    assert offer._disclosure_selection is None
+    assert offer.disclosure_choices.isHidden()
+    assert 'complete credential' in offer.explanation.text().lower()
+    offer.credential_details.toggle_button.click()
+    qapp.processEvents()
+    assert_claims(offer)
     offer.close()
-
-    def assert_claims(view):
-        for name, value in claims.items():
-            labels = [label for label in view.findChildren(QLabel)
-                      if label.text().lower().startswith(name) and label.isVisibleTo(view)]
-            assert len(labels) == 1, f'Expected one visible {name} field'
-            texts = {label.text() for label in labels[0].parentWidget().findChildren(QLabel)
-                     if label.isVisibleTo(view)}
-            assert texts == {labels[0].text(), 'Yes' if value else 'No'}, f'Wrong value displayed for {name}'
-        texts = {label.text() for label in view.findChildren(QLabel)}
-        assert acdc.sad['A'][0] not in texts
-        assert all(block['d'] not in texts and block['u'] not in texts for block in acdc.sad['A'][1:])
 
     details = ViewIssuedCredentialDialog('', app, acdc.said)
     details.show()
@@ -1182,7 +1183,7 @@ def test_grant_review_shows_verified_authority_and_rechecks_a_saved_grant(wallet
     assert 'Delegation verification incomplete' in {w.text() for w in saved.findChildren(QLabel)}
 
 
-def test_disclosure_review_shows_linked_data_and_reference_offer(wallet):
+def test_disclosure_review_shows_linked_data_and_complete_issuance_offer(wallet):
     from test_credentialing import _load_schema, _issue
     from locksmith.core import credentialing
 
@@ -1215,6 +1216,8 @@ def test_disclosure_review_shows_linked_data_and_reference_offer(wallet):
     labels = {label.text() for label in start.preview.findChildren(QLabel)}
     assert expected <= labels
     assert origin not in labels
+    assert start._issuer_delivery
+    assert 'complete credential' in start.offer_explanation.text().lower()
 
     request = ipexing.start(app.vault, holder, issuer.pre, 'Apply', schema=schemer.said)
     page = CredentialActivityPage(parent)
@@ -1230,6 +1233,9 @@ def test_disclosure_review_shows_linked_data_and_reference_offer(wallet):
     labels = {label.text() for label in dialog.findChildren(QLabel)}
     assert expected <= labels
     assert origin not in labels
+    assert dialog._disclosure_selection is None
+    assert dialog.disclosure_choices.isHidden()
+    assert 'complete credential' in dialog.explanation.text().lower()
     selections = dict(dialog._selections)
     assert credentialing.delete_credential(app.vault, source)
     dialog._preview()
@@ -1883,13 +1889,17 @@ def test_activity_drives_native_negotiation_and_keeps_direction(wallet, tmp_path
     page._response_dialog.send_button.click()
     offer = app.hby.db.exns.get((app.hby.db.erpy.get((request.said,)).qb64,))
     assert offer.route == '/ipex/offer'
-    assert not exchanging.loadParsedNestedSubstreams(app.hby, offer.said)
+    offer_nodes = exchanging.loadParsedNestedSubstreams(app.hby, offer.said)
+    assert [node.serder.said for node in offer_nodes] == [selected_said]
     assert offer.sad['a']['o'] == [selected_said]
-    assert b'Requested credential' not in exchanging.serializeMessage(app.hby, offer.said)
+    assert b'Requested credential' in offer_nodes[0].serder.raw
     _wait_for(lambda: not page.tables[0]._static_data[0]['_attention'])
     received, = page.tables[1]._static_data
     assert received['Status'] == 'Offer' and received['_actions'] == ['Agree', 'Spurn']
     page._on_row_action(received, 'View')
+    assert page._response_dialog.send_button.text() == 'Agree to credential'
+    assert any(label.text() == 'Requested credential'
+               for label in page._response_dialog.offer_review.findChildren(QLabel))
     page._response_dialog.send_button.click()
     _wait_for(lambda: page.tables[0]._static_data[0]['Status'] == 'Agree')
     issued, = page.tables[0]._static_data

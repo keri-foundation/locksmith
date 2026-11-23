@@ -238,7 +238,7 @@ def test_untargeted_disclosure_preserves_absent_issuee(ipex_vaults):
 
 
 @pytest.mark.parametrize('profile', ['organizational-unit', 'issuing-agent'])
-def test_bundled_sedi_reference_offer_withholds_credentials(ipex_vaults, profile):
+def test_bundled_sedi_issuance_offer_discloses_credential_chain(ipex_vaults, profile):
     from pathlib import Path
 
     source, target = ipex_vaults('sedi-unit-issuer'), ipex_vaults('sedi-unit-holder')
@@ -265,17 +265,15 @@ def test_bundled_sedi_reference_offer_withholds_credentials(ipex_vaults, profile
     offered = ipexing.start(source.vault, issuer, holder.pre, 'Offer', credential_said=said)
     stream = exchanging.serializeMessage(source.hby, offered)
     offer = source.hby.db.exns.get((offered,))
-    assert not exchanging.loadParsedNestedSubstreams(source.hby, offered)
+    nested = exchanging.loadParsedNestedSubstreams(source.hby, offered)
+    assert {node.serder.said: node.serder.sad for node in nested} == originals
     assert offer.sad['a']['o'] == [said]
     assert len(offer.sad['q']['dp'][0]) == len(originals)
-    assert offer.sad['q']['dp'][0][0] == [schemas[profile].said, '/', []]
-    private = {'Private department', 'Private role', 'Private name'}
-    for original in originals.values():
-        private.update((original['u'], original['rd'], original['a']['u'], original['r']['l']))
-    assert not [value for value in private if value and value.encode() in offer.raw]
+    assert offer.sad['q']['dp'][0][0] == [schemas[profile].said, '/', ['']]
     _deliver_ipex(target.vault, stream)
     assert target.vault.exc.complete(offered)
-    assert not list(target.hby.db.schema.getTopItemIter())
+    assert {key for (key,), _ in target.hby.db.schema.getTopItemIter()} == {
+        original['s'] for original in originals.values()}
     assert not credentialing.credentials(target.vault)
     agree = ipexing.respond(target.vault, offered, 'Agree')
     _deliver_ipex(source.vault, exchanging.serializeMessage(target.hby, agree))
@@ -302,7 +300,7 @@ def test_bundled_sedi_reference_offer_withholds_credentials(ipex_vaults, profile
 
 
 @pytest.mark.parametrize('form', ['blinded', 'nested-blinded', 'compact', 'public-reference'])
-def test_reference_offer_withholds_all_rule_forms(ipex_vaults, form):
+def test_issuance_offer_discloses_all_rule_forms(ipex_vaults, form):
     from keri.core import Diger
 
     reference = Diger(ser=b'rule-reference').qb64
@@ -319,9 +317,11 @@ def test_reference_offer_withholds_all_rule_forms(ipex_vaults, form):
     offered = ipexing.start(app.vault, issuer, holder.pre, 'Offer', credential_said=said)
     offer = app.hby.db.exns.get((offered,))
     assert offer.sad['a']['o'] == [said]
-    assert not exchanging.loadParsedNestedSubstreams(app.hby, offered)
-    assert b'Sensitive terms' not in offer.raw
-    assert reference.encode() not in offer.raw
+    nested, = exchanging.loadParsedNestedSubstreams(app.hby, offered)
+    if form in ('blinded', 'nested-blinded'):
+        assert b'Sensitive terms' in nested.serder.raw
+    else:
+        assert reference.encode() in nested.serder.raw
 
 
 @pytest.mark.parametrize('revoked_node', ['origin', 'linked'])

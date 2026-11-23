@@ -45,15 +45,21 @@ class IpexHandler(ipexing.IpexHandler):
                     self.hby.db.kevers[issuer]
                 except KeyError:
                     pass
+            schema = credential.sad.get('s')
+            if (serder.route in ('/ipex/offer', '/ipex/grant')
+                    and serder.sad.get('ri') in self.hby.prefixes and isinstance(schema, str)
+                    and self.hby.db.schema.get((schema,)) is None
+                    and (schemer := credentialing.builtin_schemas().get(schema)) is not None):
+                self.hby.db.schema.put((schema,), schemer)
         try:
             return super().verify(serder, attachments=attachments, nests=nests,
                                   sscs=sscs, evidence=evidence)
         except kering.MissingSchemaError as ex:
-            if serder.route == '/ipex/grant' and serder.sad.get('ri') in self.hby.prefixes:
+            if serder.route in ('/ipex/offer', '/ipex/grant') and serder.sad.get('ri') in self.hby.prefixes:
                 said = ex.args[0]
                 if (schemer := credentialing.builtin_schemas().get(said)) is not None:
                     self.hby.db.schema.put((said,), schemer)
-            # Keripy retains the Grant and retries all checks through its normal escrow.
+            # Keripy retains the exchange and retries all checks through its normal escrow.
             raise
 
     def handle(self, serder, attachments=None, nests=None, sscs=None):
@@ -280,6 +286,11 @@ def _disclosure_plan(origin, nodes):
     return [plan]
 
 
+def issuer_delivery(sender, recipient, credential):
+    """Return whether an exchange delivers a credential from its issuer to its issuee."""
+    return (sender, recipient) == (credential.israid, credential.iseaid)
+
+
 def _credential_evidence(vault, credential_said, hab=None):
     """Load the retained origin and its linked credentials."""
     view = credentialing.credential(vault, credential_said)
@@ -317,6 +328,18 @@ def _credential_evidence(vault, credential_said, hab=None):
             raise kering.ValidationError('Source credential does not have a verified issued state')
         nodes[parsed[0].serder.said] = parsed[0].serder.sad
     return view, list(artifacts.values()), _disclosure_plan(credential_said, nodes), nodes
+
+
+def _offer_disclosure(sender, recipient, credential_said, plan, nodes):
+    """Expand an issuance Offer without carrying the Grant's proof attachments."""
+    origin = SerderACDC(sad=nodes[credential_said])
+    if not issuer_delivery(sender, recipient, origin):
+        return origin, None, plan
+    bodies = [SerderACDC(sad=disclosure_node(nodes, credential_said, prefix))
+              for _, prefix, _ in plan[0]]
+    return bodies[0], bodies[1:], [[
+        [schema, prefix, ['']] for schema, prefix, _ in plan[0]
+    ]]
 
 
 def grant(vault, hab, credential_said, recipient, message=''):
@@ -542,10 +565,12 @@ def start(vault, hab, recipient, action, message='', *, schema=None, credential_
                                  modifiers={'dp': disclosure_plan if disclosure_plan is not None else [[[schema, '/', []]]]}, ax=ax,
                                  kind=kering.Kinds.json)
     elif action == 'Offer':
-        view, _, plan, _ = _credential_evidence(vault, credential_said, hab)
-        if disclosure_plan is not None:
+        _, _, plan, nodes = _credential_evidence(vault, credential_said, hab)
+        origin, artifacts, plan = _offer_disclosure(
+            hab.pre, recipient, credential_said, plan, nodes)
+        if artifacts is None and disclosure_plan is not None:
             plan = disclosure_plan
-        exn, atc = ipexing.offer(hab, message, SerderACDC(sad=view['sad']), recp=recipient,
+        exn, atc = ipexing.offer(hab, message, origin, artifacts=artifacts, recp=recipient,
                                  modifiers={'dp': plan}, ax=ax,
                                  kind=kering.Kinds.json)
     else:
@@ -663,9 +688,11 @@ def respond(vault, said, action, message='', credential_said=None, disclosure_pl
         if schema:
             plan[0][0][2] = requested[0][0][2]
         if action == 'Offer':
-            if disclosure_plan is not None:
+            origin, offer_artifacts, plan = _offer_disclosure(
+                hab.pre, prior.pre, credential_said, plan, nodes)
+            if offer_artifacts is None and disclosure_plan is not None:
                 plan = disclosure_plan
-            exn, atc = ipexing.offer(hab, message, SerderACDC(sad=view['sad']), apply=prior,
+            exn, atc = ipexing.offer(hab, message, origin, artifacts=offer_artifacts, apply=prior,
                                     modifiers={'dp': plan}, ax=prior.sad['a'].get('ax'),
                                     attrs={'preg': issuance_request.sad['a']['preg']}
                                     if issuance_request and 'preg' in issuance_request.sad['a'] else None,

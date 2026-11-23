@@ -133,6 +133,38 @@ def _issue(app, schema, recipient, attributes=None, edges=None, authentication='
     return events[-1][2]['credential_said']
 
 
+def test_issuance_offer_discloses_complete_bare_credential_graph(ipex_vaults):
+    from keri.acdc import ipexing as native
+    from keri.peer import exchanging
+
+    app = ipex_vaults('complete-issuance-offer')
+    issuer, holder = app.hby.makeHab(name='issuer'), app.hby.makeHab(name='holder')
+    schema = _load_schema(app, issuer)
+    source = _issue(app, schema, holder, attributes={'LEI': 'SOURCE-VALUE'},
+                    authentication='anchor', rules={'d': '', 'l': 'Authority terms'})
+    origin = _issue(app, schema, holder, attributes={'LEI': 'ORIGIN-VALUE'},
+                    authentication='anchor', edges={
+                        'authority': {'n': source, 's': schema.said, 'o': 'NI2I'},
+                    })
+    request = ipexing.start(app.vault, holder, issuer.pre, 'Apply', schema=schema.said)
+    offered = ipexing.respond(app.vault, request, 'Offer', credential_said=origin,
+                              disclosure_plan=[[[schema.said, '/', []]]])
+    offer = app.hby.db.exns.get((offered,))
+    assert offer.sad['q']['dp'] == [[
+        [schema.said, '/', ['']],
+        [schema.said, '/e/authority/_/', ['']],
+    ]]
+    nested = exchanging.loadParsedNestedSubstreams(app.hby, offered)
+    assert [node.serder.said for node in nested] == [origin, source]
+    assert [node.serder.sad['a']['LEI'] for node in nested] == ['ORIGIN-VALUE', 'SOURCE-VALUE']
+    assert nested[1].serder.sad['r']['l'] == 'Authority terms'
+    assert all(not any(getattr(node, field) for field in native.NodeAttachmentFields) for node in nested)
+    agreed = ipexing.respond(app.vault, offered, 'Agree')
+    granted = ipexing.respond(app.vault, agreed, 'Grant', credential_said=origin)
+    assert app.vault.exc.complete(granted)
+    assert [node.serder.said for node in exchanging.loadParsedNestedSubstreams(app.hby, granted)] == [origin, source]
+
+
 def test_native_issuance_keeps_independent_credentials_valid_after_reopen(ipex_vaults):
     app = ipex_vaults('native-issuer')
     issuer = app.hby.makeHab(name='issuer')
@@ -356,10 +388,13 @@ def test_registry_free_exchange_uses_mailbox_and_retains_presentation_evidence(
     accepted_at = receiver.vault.db.accepted.get((said,)).accepted_at
     assert created_at and accepted_at
     assert offer.sad['a']['ax'] == agree.sad['a']['ax'] == grant.sad['a']['ax'] == [True]
-    assert not exchanging.loadParsedNestedSubstreams(receiver.hby, offer.said)
+    offer_nodes = exchanging.loadParsedNestedSubstreams(receiver.hby, offer.said)
+    assert [node.serder.said for node in offer_nodes] == [said]
+    assert all(not any(getattr(node, field) for field in native.NodeAttachmentFields) for node in offer_nodes)
     assert offer.sad['a']['o'] == [said]
-    assert rules['l'].encode() not in exchanging.serializeMessage(receiver.hby, offer.said)
-    assert b'254900OPPU84GM83MG36' not in exchanging.serializeMessage(receiver.hby, offer.said)
+    assert offer.sad['q']['dp'] == [[[schema.said, '/', ['']]]]
+    assert offer_nodes[0].serder.sad['r']['l'] == rules['l']
+    assert offer_nodes[0].serder.sad['a']['LEI'] == '254900OPPU84GM83MG36'
     sender.close_vault()
     receiver.close_vault()
     sender, receiver = ipex_vaults('free-sender'), ipex_vaults('free-receiver')

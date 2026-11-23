@@ -789,7 +789,7 @@ class ExchangeResponseDialog(LocksmithDialog):
 
     Labels = {'Offer': 'Send offer', 'Grant': 'Send credential',
               'Agree': 'Request these fields', 'Spurn': 'Decline'}
-    Help = {'Offer': 'Sends a credential reference and the credential types to disclose. Values and terms are sent in the next step.',
+    Help = {'Offer': 'Lets the recipient review the proposed credential delivery or presentation.',
             'Grant': 'Sends the credential values now. The recipient can review them before adding the credential.',
             'Agree': 'You can review the values when the sender shares them.',
             'Spurn': 'This ends the exchange.'}
@@ -1161,6 +1161,11 @@ class ExchangeResponseDialog(LocksmithDialog):
         if supporting:
             details_layout.addWidget(attribute_view('Supporting information', supporting))
         previews = exchanging.loadParsedNestedSubstreams(self.vault.hby, offer.said)
+        issuance = bool(previews and ipexing.issuer_delivery(offer.pre, offer.sad['ri'], previews[0].serder))
+        if issuance:
+            self.send_button.setText('Agree to credential')
+            self.explanation.setText('Review the complete credential and its supporting authority chain. '
+                                     'Agreeing requests the authenticated evidence; it does not add the credential yet.')
         if previews:
             details_layout.addWidget(QLabel('Credential preview'))
         for index, nest in enumerate(previews):
@@ -1206,13 +1211,22 @@ class ExchangeResponseDialog(LocksmithDialog):
             return
         try:
             if self.action == 'Offer':
-                self.explanation.setText('Choose what you are willing to share. Optional fields start unchecked. '
-                                         'The offer names your choices; their values are sent after agreement.')
-                choices = self._selections.setdefault(sad['d'], {})
                 request = self.row['messages'][-1]
                 credential = SerderACDC(sad=sad)
-                issuer_delivery = (self.vault.db.issued.get((credential.said,)) is not None
-                                   and (request.sad['ri'], request.pre) == (credential.israid, credential.iseaid))
+                issuer_delivery = ipexing.issuer_delivery(request.sad['ri'], request.pre, credential)
+                if issuer_delivery:
+                    self.disclosure_choices.hide()
+                    self.explanation.setText('The complete credential and its supporting authority chain are included '
+                                             'in this offer so the recipient can review every value before agreeing.')
+                    _, _, plan, nodes = ipexing._credential_evidence(self.vault, sad['d'])
+                    self.credential_details.toggle_button.setText('  Review complete credential offer')
+                    for _, prefix, _ in plan[0]:
+                        layout.addWidget(credential_details(
+                            self.vault, ipexing.disclosure_node(nodes, sad['d'], prefix)))
+                    return
+                self.explanation.setText('Choose what you are willing to share. Optional fields start unchecked. '
+                                         'The presentation offer names your choices; their values are sent after agreement.')
+                choices = self._selections.setdefault(sad['d'], {})
                 self._disclosure_selection = DisclosureSelection(self.vault, sad['d'], choices,
                     requested=request.sad['q'].get('dp', []), issuer_delivery=issuer_delivery)
                 choice_layout.addWidget(self._disclosure_selection)
@@ -1263,7 +1277,7 @@ class ExchangeResponseDialog(LocksmithDialog):
                 return
             self.send_button.setEnabled(False)
             plan, message = None, ''
-            if self.action == 'Offer':
+            if self.action == 'Offer' and self._disclosure_selection is not None:
                 plan, message, _ = self._disclosure_selection.prepare()
             said = ipexing.respond(self.vault, self.row['messages'][-1].said, self.action,
                                    credential_said=self.credential.currentData(), disclosure_plan=plan, message=message, codes=codes)
