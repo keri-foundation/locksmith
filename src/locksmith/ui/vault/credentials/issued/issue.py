@@ -7,12 +7,14 @@ Dialog for issuing credentials
 
 import json
 from datetime import date, datetime, timezone
+from urllib.parse import quote
 
 from PySide6.QtCore import Qt, QDateTime, Signal
 from PySide6.QtGui import QIcon, QIntValidator, QDoubleValidator
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QButtonGroup, QDateTimeEdit, QCheckBox
 from keri import help, kering
-from keri.core import coring, scheming
+from keri.acdc import evaluating
+from keri.core import SerderACDC, coring, scheming
 
 from locksmith.ui import colors
 from locksmith.core import credentialing, ipexing
@@ -27,20 +29,23 @@ from locksmith.ui.toolkit.widgets import (
 from locksmith.ui.toolkit.widgets.buttons import LocksmithRadioButton
 from locksmith.ui.toolkit.widgets.fields import FloatingLabelComboBox, FloatingLabelLineEdit
 from locksmith.ui.vault.credentials.issued.grant import GrantCredentialDialog
-from locksmith.ui.vault.credentials.presentation import attribute_label, attribute_view, credential_name, identifier_name
+from locksmith.ui.vault.credentials.presentation import attribute_label, attribute_view, credential_details, credential_name, identifier_name
 from locksmith.ui.vault.shared.witness_auth_mixin import (
     WitnessAuthenticationPanel,
     witness_auth_dialog_height
 )
 
 logger = help.ogler.getLogger(__name__)
+SEDI_CORE_SCHEMA = 'EN0JtdzBmFuTUzyJG9CXZhtdu-bW0V6L95bsVBzi-cY-'
+# Keripy recognizes NOT but does not evaluate it, so an edge that carries it never verifies.
+LEAF_OPERATORS = tuple(op for op in evaluating.UnaryEdgeOps if op != 'NOT')
 
 
 class IssueCredentialDialog(LocksmithDialog):
     """Dialog for issuing a credential."""
     credential_created = Signal(str)
 
-    def __init__(self, app, parent=None, *, request_said=None):
+    def __init__(self, app, parent=None, *, request_said=None, nonce=None, resume=None):
         """
         Initialize the IssueCredentialDialog.
 
@@ -50,16 +55,19 @@ class IssueCredentialDialog(LocksmithDialog):
         """
         self.app = app
         self.vault = app.vault
+        self.schema_checker = scheming.JSONSchema(resolver=scheming.CacheResolver(self.vault.hby.db))
+        self.resume = resume
+        self._saved_issuer = None
         self.request_said = request_said
+        self.nonce = nonce
         self._issuance_id = None
         self._schema_supported = False
 
         # Initialize storage for dynamic fields
         self._dynamic_field_widgets = {}
-        self._dynamic_fields_start_index = None
         self._const_fields_values = {}
-        self._edge_dropdowns = {}  # Store edge credential dropdowns
         self._auth_panel = None
+        self._review = None
         self._workflow_mode = "issue"
 
         # Create content widget
@@ -75,12 +83,7 @@ class IssueCredentialDialog(LocksmithDialog):
 
         layout.addSpacing(20)
 
-        # Schema Selection
-        schema_label = QLabel("Select Schema")
-        schema_label.setStyleSheet("font-weight: bold; font-size: 14px;")
-        layout.addWidget(schema_label)
-
-        self.schema_dropdown = FloatingLabelComboBox("Schema *")
+        self.schema_dropdown = FloatingLabelComboBox("Credential type *")
         self.schema_dropdown.setFixedWidth(340)
         self._populate_schema_dropdown()
         layout.addWidget(self.schema_dropdown)
@@ -168,6 +171,12 @@ class IssueCredentialDialog(LocksmithDialog):
             show_overlay=False
         )
 
+        self._review_text = QLabel()
+        self._review_text.setTextFormat(Qt.TextFormat.PlainText)
+        self._review_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._review_text.setWordWrap(True)
+        self.content_layout.addWidget(self._review_text)
+        self._review_text.hide()
         self.setFixedSize(500, 720)
 
         # Create button group for recipient type radios (must be after super().__init__)
@@ -191,19 +200,42 @@ class IssueCredentialDialog(LocksmithDialog):
             self._doer_event_connected = False
 
         self.finished.connect(self._on_dialog_finished)
-        if request_said:
+        pending = None
+        if request_said and resume is None:
+            saved = next(self.vault.db.pending_issuances.getTopItemIter((request_said,)), None)
+            if saved:
+                (_, self.resume), pending = saved
+        elif resume:
+            pending = self.vault.db.pending_issuances.get((request_said or 'direct', resume))
+            if pending is None:
+                self.issue_button.setEnabled(False)
+                self.show_error('This issuance is no longer pending. Check Issued Credentials.')
+                return
+        if pending:
+            acdc = SerderACDC(raw=pending.raw.encode())
+            self._saved_issuer = acdc.israid
+            schema, recipient = acdc.schema, pending.recipient
+        elif request_said:
             request = self.vault.hby.db.exns.get((request_said,))
-            schema = ipexing.request_schema(request)
+            schema, recipient = ipexing.request_schema(request), request.pre
+        if pending or request_said:
             self.schema_dropdown.setCurrentIndex(self.schema_dropdown.combo_box.findData(schema))
             self.schema_dropdown.setEnabled(False)
-            self.local_radio.setChecked(request.pre in self.vault.hby.prefixes)
-            self.remote_radio.setChecked(request.pre not in self.vault.hby.prefixes)
-            if self.recipient_dropdown.combo_box.findData(request.pre) < 0:
-                self.recipient_dropdown.addItem(identifier_name(self.vault, request.pre), request.pre)
-            self.recipient_dropdown.setCurrentIndex(self.recipient_dropdown.combo_box.findData(request.pre))
+            self.local_radio.setChecked(recipient in self.vault.hby.prefixes)
+            self.remote_radio.setChecked(recipient not in self.vault.hby.prefixes)
+            if self.recipient_dropdown.combo_box.findData(recipient) < 0:
+                self.recipient_dropdown.addItem(identifier_name(self.vault, recipient), recipient)
+            self.recipient_dropdown.setCurrentIndex(self.recipient_dropdown.combo_box.findData(recipient))
             self.recipient_dropdown.setEnabled(False)
             self.local_radio.setEnabled(False)
             self.remote_radio.setEnabled(False)
+        if pending:
+            self._clear_dynamic_fields()
+            self.control_layout.addWidget(credential_details(self.vault, acdc.sad))
+            mode = 'registry' if pending.inception else 'anchor'
+            self.authentication_dropdown.setCurrentIndex(self.authentication_dropdown.combo_box.findData(mode))
+            self.authentication_dropdown.setEnabled(False)
+            self.issue_button.setText('Resume issuance')
 
     def _disconnect_doer_event_signal(self):
         if not getattr(self, '_doer_event_connected', False):
@@ -228,11 +260,13 @@ class IssueCredentialDialog(LocksmithDialog):
             self._grant_dialog.open()
         elif self._workflow_mode == "auth":
             self._submit_auth_step()
+        elif self._workflow_mode == 'review':
+            self._continue_after_review()
         else:
             self._on_issue()
 
     def _on_cancel_clicked(self):
-        if self._workflow_mode == "auth":
+        if self._workflow_mode in ('auth', 'review'):
             self._show_issue_step()
         else:
             self.close()
@@ -266,6 +300,36 @@ class IssueCredentialDialog(LocksmithDialog):
         self._re_enable_scrollbars()
         self.center_on_parent()
 
+    def _review_receipts(self, review):
+        self._show_issue_step()
+        self._review = review
+        if not review.events:
+            self._continue_after_review()
+            return
+        self._workflow_mode = 'review'
+        self._issue_content_widget.hide()
+        rows = [f'Event {sn}\n{effect}' for _, sn, effect in review.events]
+        self._review_text.setText('These events need witness receipts before issuance.\n\n' + '\n\n'.join(rows))
+        self._review_text.show()
+        self.setFixedSize(650, 490)
+        self.issue_button.setText('Approve recovery')
+        self.cancel_button.setText('Back')
+        self.center_on_parent()
+
+    def _continue_after_review(self):
+        self._review_text.hide()
+        hab = self.vault.hby.habByPre(self._review.issuer)
+        if hab is None or hab.kever.serder.said != self._review.tip:
+            self._show_issue_step()
+            self._on_issue()
+        elif hab.kever.wits:
+            self._show_auth_step(hab)
+        else:
+            self._issue_content_widget.show()
+            self._workflow_mode = 'issue'
+            self.cancel_button.setText('Cancel')
+            self._complete_issuance(approval=self._review)
+
     def _auth_step_height(self) -> int:
         if self._auth_panel is None:
             return 440
@@ -280,6 +344,8 @@ class IssueCredentialDialog(LocksmithDialog):
         if self._dialog_resize_animation is not None:
             self._dialog_resize_animation.stop()
         self._base_height = None
+        self._review_text.hide()
+        self._review = None
 
         if self._auth_panel is not None:
             self.content_layout.removeWidget(self._auth_panel)
@@ -288,22 +354,24 @@ class IssueCredentialDialog(LocksmithDialog):
             self._auth_panel = None
 
         self._issue_content_widget.show()
+        self._issue_content_widget.setEnabled(True)
         self._workflow_mode = "issue"
         self.cancel_button.setText("Cancel")
         self.cancel_button.setEnabled(True)
-        self.issue_button.setText("Issue Credential")
+        self.issue_button.setText("Resume issuance" if self.resume else "Issue Credential")
         self.issue_button.setEnabled(True)
         self.setFixedSize(500, 720)
         self._re_enable_scrollbars()
         self.center_on_parent()
 
     def _set_primary_button_idle(self):
+        self._issue_content_widget.setEnabled(True)
         self.cancel_button.setEnabled(True)
         self.issue_button.setEnabled(True)
         if self._workflow_mode == "auth":
             self.issue_button.setText("Authenticate")
         else:
-            self.issue_button.setText("Issue Credential")
+            self.issue_button.setText("Resume issuance" if self.resume else "Issue Credential")
 
     def _submit_auth_step(self):
         if not self._current_vault():
@@ -318,10 +386,7 @@ class IssueCredentialDialog(LocksmithDialog):
             self.show_error(error_message)
             return
 
-        self.issue_button.setEnabled(False)
-        self.issue_button.setText("Issuing...")
-        self.cancel_button.setEnabled(False)
-        self._complete_issuance(codes=codes)
+        self._complete_issuance(codes=codes, approval=self._review)
 
     def _current_vault(self):
         if self.app.vault is self.vault and not getattr(self.vault, 'closed', False):
@@ -339,7 +404,7 @@ class IssueCredentialDialog(LocksmithDialog):
     def _populate_schema_dropdown(self):
         """Populate the schema dropdown with loaded schemas from the vault."""
         self.schema_dropdown.clear()
-        self.schema_dropdown.addItem("Select a schema...")
+        self.schema_dropdown.addItem("Choose a credential type")
 
         try:
             # Get all schemas from the database
@@ -349,11 +414,8 @@ class IssueCredentialDialog(LocksmithDialog):
                     continue
 
                 sed = schemer.sed
-                schema_title = sed.get('title', 'Untitled')
                 schema_version = sed.get('version', '')
-
-                # Format: "Title v1.0.0 (SAID...)"
-                display_text = f"{schema_title}"
+                display_text = credential_name(sed)
                 if schema_version:
                     display_text += f" v{schema_version}"
 
@@ -443,12 +505,20 @@ class IssueCredentialDialog(LocksmithDialog):
             return []
 
     @staticmethod
-    def _field_definition(name, prop, required):
-        detail = credentialing.schema_detail(prop) or credentialing.schema_detail(prop, 'array') or prop
-        definition = dict(name=name, description=attribute_label(name, detail),
+    def _field_definition(name, prop, required, *, reference=None):
+        detail, pointer = credentialing.schema_detail_path(prop, 'object')
+        if detail is None:
+            detail, pointer = credentialing.schema_detail_path(prop, 'array')
+        detail = detail or prop
+        label_schema = prop if prop.get('title') or prop.get('description') else detail
+        definition = dict(name=name, description=attribute_label(name, label_schema),
                           type=detail.get('type', 'string'), format=detail.get('format'),
                           required=required, const=detail.get('const'),
                           minLength=detail.get('minLength', 0), schema=detail)
+        if reference is not None:
+            definition['reference'] = {**reference, '$ref': reference['$ref'] + pointer}
+            if dialect := detail.get('$schema', prop.get('$schema')):
+                definition['reference']['$schema'] = dialect
         # Older schemas describe timestamps without a JSON Schema format.
         description = detail.get('description', '')
         if definition['type'] == 'string' and not definition['format']:
@@ -493,6 +563,9 @@ class IssueCredentialDialog(LocksmithDialog):
         field_format = field_def.get('input_format', field_def.get('format'))
         label = field_def['description']
 
+        if field_def.get('operator_kind'):
+            return EdgeOperatorField(field_def, checker=self.schema_checker)
+
         needs_input = self._requires_input(field_def)
         if needs_input:
             label = f"{label} *"
@@ -511,7 +584,8 @@ class IssueCredentialDialog(LocksmithDialog):
                 container.include = QCheckBox('Include ' + field_def['description'])
                 layout.addWidget(container.include)
             container.generated = {}
-            for name, prop in definition.get('properties', {}).items():
+            properties = definition.get('properties', {})
+            for name, prop in properties.items():
                 if name == 'i' and field_def.get('section') == 'A':
                     container.generated[name] = self.recipient_dropdown.currentData()
                     self.recipient_dropdown.currentIndexChanged.connect(
@@ -522,8 +596,17 @@ class IssueCredentialDialog(LocksmithDialog):
                 if name in ('d', 'u'):
                     container.generated[name] = prop.get('const', '' if name == 'd' else coring.Noncer().qb64)
                     continue
-                child = self._field_definition(name, prop, name in definition.get('required', []))
+                reference = field_def.get('reference')
+                if reference is not None:
+                    token = quote(name.replace('~', '~0').replace('/', '~1'), safe='')
+                    reference = {**reference, '$ref': f"{reference['$ref']}/properties/{token}"}
+                child = self._field_definition(name, prop, name in definition.get('required', []), reference=reference)
                 child['section'] = field_def.get('section')
+                if field_def.get('edge'):
+                    if name == 'o':
+                        child['operator_kind'] = 'leaf' if 'n' in properties else 'group'
+                    elif name not in evaluating.EdgeGroupLabels and child['type'] == 'object':
+                        child['edge'] = True
                 if child['section'] == 'e' and name == 'n':
                     widget = FloatingLabelComboBox(child['description'])
                     widget.addItem('Choose a credential', '')
@@ -538,6 +621,14 @@ class IssueCredentialDialog(LocksmithDialog):
                               else self._create_field_widget(child))
                 container.fields[name] = (widget, child)
                 layout.addWidget(widget)
+                if 'const' not in prop and (hint := child.get('hint')):
+                    help_label = QLabel(hint)
+                    help_label.setWordWrap(True)
+                    help_label.setFixedWidth(400)
+                    help_label.setStyleSheet(f'font-size: 12px; color: {colors.TEXT_SECONDARY};')
+                    layout.addWidget(help_label)
+                    widget.setToolTip(hint)
+                    widget.line_edit.setAccessibleDescription(hint)
                 if container.include is not None and 'const' not in prop:
                     widget.setEnabled(False)
                     container.include.toggled.connect(widget.setEnabled)
@@ -675,23 +766,8 @@ class IssueCredentialDialog(LocksmithDialog):
         Args:
             schema_said: SAID of the schema to generate fields for
         """
-        # Clear previous dynamic fields
         self._clear_dynamic_fields()
-
-        # Reset stored widgets
-        self._dynamic_field_widgets = {}
-        self._edge_dropdowns = {}
-
-        # Parse schema to get field definitions
         field_defs = self._parse_schema_fields(schema_said)
-
-        # Parse edge requirements
-        edge_reqs = []
-        self._edge_widget = self._rules_widget = None
-
-
-        # Start adding fields to the control layout
-        # First add some space
         self.control_layout.addSpacing(20)
 
         # Add credential attributes section if there are any fields
@@ -709,6 +785,16 @@ class IssueCredentialDialog(LocksmithDialog):
 
             # Generate and add widgets
             for field_def in field_defs:
+                if schema_said == SEDI_CORE_SCHEMA and field_def['name'] == 'primary':
+                    self._const_fields_values['primary'] = True
+                    self.control_layout.addWidget(attribute_view(
+                        'Primary credential', 'Yes. This form issues one credential to one recipient.'))
+                    continue
+                if field_def['name'] == 'rd' and self.request_said:
+                    request = self.vault.hby.db.exns.get((self.request_said,))
+                    if request and request.sad['a'].get('preg'):
+                        self._const_fields_values['rd'] = request.sad['a']['preg']
+                        continue
                 if field_def.get('const', None) is not None:
                     self._const_fields_values[field_def['name']] = field_def['const']
                     continue
@@ -750,9 +836,16 @@ class IssueCredentialDialog(LocksmithDialog):
             prop = schema.get('properties', {}).get(name)
             if prop is None or credentialing.schema_detail(prop) is None:
                 continue
-            definition = self._field_definition(name, prop, name in schema.get('required', []))
+            reference = None
+            if name == 'e':
+                reference = {'$ref': f'{schema_said}#/properties/e'}
+                if '$schema' in schema:
+                    reference['$schema'] = schema['$schema']
+            definition = self._field_definition(name, prop, name in schema.get('required', []), reference=reference)
             definition['description'] = label
             definition['section'] = name
+            if name == 'e':
+                definition['edge'] = True
             widget = self._create_field_widget(definition)
             self.control_layout.addWidget(widget)
             if name == 'e':
@@ -760,39 +853,20 @@ class IssueCredentialDialog(LocksmithDialog):
             else:
                 self._rules_widget = (widget, definition)
 
-        logger.info(f"Generated {len(self._dynamic_field_widgets)} dynamic fields and {len(self._edge_dropdowns)} edge dropdowns for schema {schema_said}")
+        logger.info("Generated %d dynamic fields for schema %s", len(self._dynamic_field_widgets), schema_said)
 
     def _clear_dynamic_fields(self):
         """Clear all dynamically generated field widgets."""
 
-        # Remove all widgets from dynamic fields section
-        # Count backwards to avoid index shifting
-        items_to_remove = []
-        for i in range(self.control_layout.count()):
-            item = self.control_layout.itemAt(i)
-            if item and item.widget():
-                # Stop at the stretch item (no widget)
-                items_to_remove.append(item.widget())
-
-        # Remove collected widgets
-        for widget in items_to_remove:
-            self.control_layout.removeWidget(widget)
-            widget.setParent(None)
-            widget.deleteLater()
-
-        for i in reversed(range(self.control_layout.count())):
-            item = self.control_layout.itemAt(i)
-            if item.spacerItem():
-                self.control_layout.takeAt(i)
-
-        # Reset storage
-        self._dynamic_field_widgets = {}
-        self._const_fields_values = {}
-        self._edge_dropdowns = {}
+        while self.control_layout.count():
+            widget = self.control_layout.takeAt(0).widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._dynamic_field_widgets.clear()
+        self._const_fields_values.clear()
         self._edge_widget = self._rules_widget = None
         self.control_layout.setSpacing(0)
-
-        logger.debug("Cleared dynamic fields and edge dropdowns")
 
     def _on_schema_changed(self, index: int):
         """
@@ -855,6 +929,9 @@ class IssueCredentialDialog(LocksmithDialog):
         """
         field_type = field_def['type']
         field_format = field_def.get('input_format', field_def.get('format'))
+
+        if isinstance(widget, EdgeOperatorField):
+            return widget.value()
 
         if isinstance(widget, FloatingLabelComboBox):
             return widget.currentData()
@@ -980,27 +1057,21 @@ class IssueCredentialDialog(LocksmithDialog):
             return
 
         # Validate fields
-        if not self._validate_fields():
+        if not self.resume and not self._validate_fields():
             return
 
-        # Get selected values
-        schema_index = self.schema_dropdown.currentIndex()
-        schema_said = self.schema_dropdown.itemData(schema_index)
-
+        schema_said = self.schema_dropdown.currentData()
         issuer_pre = self.vault.db.issuers.get(keys=(schema_said,))
+        if self.resume and issuer_pre != self._saved_issuer:
+            self.show_error('Select the original issuer for this schema before resuming.')
+            return
         hab = self.vault.hby.habByPre(issuer_pre) if issuer_pre else None
         if hab is None:
             self.show_error("Select a local issuer for this schema first")
             return
 
-        if hab.kever.wits and self.authentication_dropdown.currentData() != 'signature':
-            self._show_auth_step(hab)
-            return
-
-        self.issue_button.setEnabled(False)
-        self.issue_button.setText("Issuing...")
-        self.cancel_button.setEnabled(False)
-        self._complete_issuance(codes=None)
+        preview = bool(hab.kever.wits) and self.authentication_dropdown.currentData() != 'signature'
+        self._complete_issuance(review_only=preview)
 
     def _validate_fields(self):
         """
@@ -1025,7 +1096,7 @@ class IssueCredentialDialog(LocksmithDialog):
 
         # Validate schema selection
         if self.schema_dropdown.currentIndex() <= 0:
-            failed_fields.append("Schema")
+            failed_fields.append("Credential type")
             self.schema_dropdown.setProperty("error", True)
             self.schema_dropdown.style().unpolish(self.schema_dropdown)
             self.schema_dropdown.style().polish(self.schema_dropdown)
@@ -1081,7 +1152,8 @@ class IssueCredentialDialog(LocksmithDialog):
             try:
                 value = self._get_field_value(widget, definition)
                 if value is not None:
-                    scheming.JSONSchema().verify_json(schema=definition['schema'], raw=json.dumps(value).encode())
+                    self.schema_checker.verify_json(schema=definition.get('reference', definition['schema']),
+                                                    raw=json.dumps(value).encode())
             except (ValueError, TypeError, kering.ValidationError) as error:
                 self.show_error(f"{definition['description']}: {error}")
                 return False
@@ -1110,6 +1182,12 @@ class IssueCredentialDialog(LocksmithDialog):
             return
         logger.debug(f"IssueCredentialDialog received doer_event: {doer_name} - {event_type}")
 
+        if event_type == 'receipt_review':
+            self._issuance_id = None
+            self._review_receipts(data['review'])
+        elif event_type == 'progress':
+            self.issue_button.setText(data['message'])
+
         # Handle credential issuance success
         if event_type == "credential_issued":
             self._issuance_id = None
@@ -1119,13 +1197,9 @@ class IssueCredentialDialog(LocksmithDialog):
                 self.credential_created.emit(self._issued_said)
                 self.accept()
                 return
+            self._show_issue_step()
+            self._issue_content_widget.setEnabled(False)
             self._workflow_mode = 'issued'
-            self.schema_dropdown.setEnabled(False)
-            self.authentication_dropdown.setEnabled(False)
-            self.local_radio.setEnabled(False)
-            self.remote_radio.setEnabled(False)
-            self.recipient_dropdown.setEnabled(False)
-            self.control_layout.parentWidget().setEnabled(False)
             self.issue_button.setText('Grant…')
             self.issue_button.setEnabled(True)
             self.cancel_button.setText('Close')
@@ -1141,54 +1215,165 @@ class IssueCredentialDialog(LocksmithDialog):
             self._set_primary_button_idle()
             self.show_error(f"Failed to issue credential: {error_msg}")
 
-    def _complete_issuance(self, codes=None):
+    def _complete_issuance(self, codes=None, *, review_only=False, approval=None):
         if not self._current_vault():
             return
-        if self.request_said:
+        if self.request_said and not self.resume:
             request = self.vault.hby.db.exns.get((self.request_said,))
             if ('Offer' not in ipexing.responses(self.vault, request)
                     or self.vault.db.issuers.get((ipexing.request_schema(request),)) != request.sad['ri']):
                 self._set_primary_button_idle()
-                self.show_error(ipexing.expiry_error(self.vault, request)
+                self.show_error(ipexing.exchange_error(self.vault, request)
                                 or 'This request has changed. Return to Activity to review it.')
                 return
-        # Get selected values
-        schema_index = self.schema_dropdown.currentIndex()
-        schema_said = self.schema_dropdown.itemData(schema_index)
-
-        recipient_index = self.recipient_dropdown.currentIndex()
-        recipient_pre = self.recipient_dropdown.itemData(recipient_index)
-
-        # Extract dynamic field values
-        attributes = self._extract_credential_attributes()
-
-        # Extract edge credential SAIDs
-        edges = self._extract_edge_credentials()
-
-        # Parse rules from schema
-        rules = self._parse_rules_from_schema(schema_said) or None
-
-        logger.info(f"Issuing credential with schema {schema_said} to recipient {recipient_pre}")
-
+        schema_said = self.schema_dropdown.currentData()
         try:
-            # Create and start IssueCredentialDoer
             doer = IssueCredentialDoer(
                 app=self.app,
                 schema_said=schema_said,
-                recipient_pre=recipient_pre,
-                attributes=attributes,
-                edges=edges,
-                rules=rules,
+                recipient_pre=self.recipient_dropdown.currentData(),
+                attributes={} if self.resume else self._extract_credential_attributes(),
+                edges=self._extract_edge_credentials(),
+                rules=self._parse_rules_from_schema(schema_said) or None,
                 codes=codes,
                 authentication=self.authentication_dropdown.currentData(),
-                signal_bridge=self.vault.signals if hasattr(self.vault, 'signals') else None
+                nonce=self.nonce,
+                request_said=self.request_said, resume=self.resume,
+                review_only=review_only, approval=approval,
             )
+            self._issue_content_widget.setEnabled(False)
+            self.issue_button.setEnabled(False)
+            self.cancel_button.setEnabled(False)
+            self.issue_button.setText("Checking witness receipts…" if review_only else "Issuing...")
             self._issuance_id = doer.issuance_id
             self.vault.extend([doer])
-
-            logger.info(f"IssueCredentialDoer started for schema {schema_said}")
 
         except Exception as e:
             logger.exception(f"Error creating IssueCredentialDoer: {e}")
             self._set_primary_button_idle()
             self.show_error(f"Failed to start credential issuance: {str(e)}")
+
+
+class EdgeOperatorField(QWidget):
+    """Select a scalar operator or an ordered sequence without implicit defaults."""
+
+    def __init__(self, field, parent=None, *, checker=None):
+        super().__init__(parent)
+        self.field = field
+        self.schema = field['schema']
+        self.operator_schema = field.get('reference', self.schema)
+        self.checker = checker or scheming.JSONSchema()
+        self.operators = LEAF_OPERATORS if field['operator_kind'] == 'leaf' else ipexing.IpexHandler.MAryReducers
+        self.rows = []
+        self.layout_ = QVBoxLayout(self)
+        self.layout_.setContentsMargins(0, 0, 0, 0)
+        label = field['description'] + (' *' if field['required'] else '')
+        heading = QLabel(label)
+        heading.setWordWrap(True)
+        self.layout_.addWidget(heading)
+        self.sequence = field['type'] == 'array' and 'enum' not in self.schema
+        if self.sequence:
+            hint = QLabel('Operators apply in the order shown.')
+            self.layout_.addWidget(hint)
+            self.add_button = LocksmithInvertedButton('Add operator')
+            self.add_button.clicked.connect(self.add_row)
+            self.layout_.addWidget(self.add_button)
+            self.add_row()
+        else:
+            self.selector = FloatingLabelComboBox('Operator')
+            self.selector.addItem('Choose an operator' if field['required'] else 'Use default (omit operator)', None)
+            for value in self.schema.get('enum', self.operators):
+                if self._supported(value) and self._accepts(self.operator_schema, value):
+                    self.selector.addItem(' → '.join(value) if isinstance(value, list) else value, value)
+            self.layout_.addWidget(self.selector)
+
+    def _accepts(self, schema, value):
+        try:
+            self.checker.verify_json(schema=schema, raw=json.dumps(value).encode())
+        except kering.ValidationError:
+            return False
+        return True
+
+    def _supported(self, value):
+        if isinstance(value, list):
+            return self.field['operator_kind'] == 'leaf' and all(op in self.operators for op in value)
+        return value in self.operators
+
+    def add_row(self):
+        row = QWidget(self)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        selector = FloatingLabelComboBox('Operator')
+        remove = LocksmithInvertedButton('Remove')
+        remove.clicked.connect(lambda: self.remove_row(row))
+        layout.addWidget(selector, 1)
+        layout.addWidget(remove)
+        self.rows.append((row, selector))
+        self.layout_.insertWidget(self.layout_.indexOf(self.add_button), row)
+        self._refresh_choices()
+
+    def remove_row(self, row):
+        self.rows = [(widget, selector) for widget, selector in self.rows if widget is not row]
+        self.layout_.removeWidget(row)
+        row.deleteLater()
+        self._refresh_choices()
+
+    def _refresh_choices(self):
+        # Tuple schemas can constrain each position differently, including after removal.
+        for index, (_, selector) in enumerate(self.rows):
+            row_schema = self._row_schema(index)
+            selected = selector.currentData()
+            selector.combo_box.clear()
+            selector.addItem('Choose an operator', None)
+            for operator in self.operators if self.field['operator_kind'] == 'leaf' else ():
+                if self._accepts(row_schema, [operator]):
+                    selector.addItem(operator, operator)
+            selector.setCurrentIndex(max(0, selector.combo_box.findData(selected)))
+        self.add_button.setEnabled(len(self.rows) < self.schema.get('maxItems', float('inf')))
+
+    def _row_schema(self, index):
+        """Apply the array's item constraints to one row using its declared dialect."""
+        row = {}
+        if '$schema' in self.operator_schema:
+            row['$schema'] = self.operator_schema['$schema']
+
+        def constraint(keyword, position=None):
+            path = '/' + keyword
+            schema = self.schema[keyword]
+            if position is not None:
+                path += f'/{position}'
+                schema = schema[position]
+            if reference := self.field.get('reference'):
+                return {'$ref': reference['$ref'] + path}
+            return schema
+
+        items = self.schema.get('items')
+        if isinstance(items, list):
+            if index < len(items):
+                row['items'] = constraint('items', index)
+            elif 'additionalItems' in self.schema:
+                row['items'] = constraint('additionalItems')
+        elif items is not None:
+            row['items'] = constraint('items')
+        prefixes = self.schema.get('prefixItems')
+        if isinstance(prefixes, list) and index < len(prefixes):
+            row['prefixItems'] = [constraint('prefixItems', index)]
+        return row
+
+    def value(self):
+        if self.sequence:
+            selected = [selector.currentData() for _, selector in self.rows]
+            value = [op for op in selected if op is not None] or None
+            if value and len(value) != len(selected):
+                raise ValueError('Choose an operator for each row or remove the empty row.')
+            if not selected and self.field['required'] and self._supported([]) and self._accepts(self.operator_schema, []):
+                return []  # Removing every row explicitly selects an allowed empty sequence.
+        else:
+            value = self.selector.currentData()
+        if value is None:
+            if self.field['required']:
+                raise ValueError(f"{self.field['description']} is required")
+            return None
+        if not self._accepts(self.operator_schema, value):
+            raise ValueError(f"{self.field['description']} does not satisfy the schema")
+        return value

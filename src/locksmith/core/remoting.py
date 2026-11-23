@@ -7,24 +7,106 @@ Functions and services for resolving OOBIs and managing remote identifiers
 import asyncio
 import datetime
 import time
-from typing import TYPE_CHECKING
-
-from keri.app.forwarding import StreamPoster
-
-if TYPE_CHECKING:
-    pass
+from urllib.parse import urlparse
 
 from hio.base import doing
+from hio.core.http import clienting
+from hio.core.http.httping import HTTPException
 from keri import help, kering
-from keri.app import organizing, forwarding
+from keri.app import organizing, forwarding, httping, oobiing
 from keri.app.habbing import GroupHab
 from keri.core import eventing, exchange, parsing, serdering
 from keri.core.serdering import SerderKERI
 from keri.db import basing, fetchTsgs
 from keri.help import helping
 from mnemonic import Mnemonic
+from locksmith.core.messaging import RETRY_DELAYS, unpublished_mailboxes
+from locksmith.db.basing import ConnectionRecord
 
 logger = help.ogler.getLogger(__name__)
+
+
+class OobiClientDoer(clienting.ClientDoer):
+    """Report connection failures to the resolver without stopping the vault."""
+
+    def recur(self, tyme):
+        try:
+            return super().recur(tyme)
+        except (OSError, HTTPException):
+            self.client.responses.append(dict(status=503))
+            return True
+
+
+class OobiClienter(httping.Clienter):
+    """Keep each OOBI socket failure inside its own HTTP doer."""
+
+    def request(self, method, url, body=None, headers=None):
+        target = urlparse(url)
+        try:
+            client = clienting.Client(scheme=target.scheme, hostname=target.hostname,
+                                      port=target.port, portOptional=True)
+        except OSError:
+            return None  # The owning ResolveOobiDoer counts and times out this attempt.
+        client.request(method=method, path=f'{target.path or "/"}?{target.query}',
+                       body=body, headers=headers)
+        doer = OobiClientDoer(client=client)
+        self.extend([doer])
+        self.clients.append((client, doer, helping.nowUTC()))
+        return client
+
+
+class Oobiery(oobiing.Oobiery):
+    """Leave temporary HTTP failures pending for the wallet's retry budget."""
+
+    def __init__(self, hby, db, **kwa):
+        self.db = db
+        super().__init__(hby=hby, clienter=OobiClienter(), **kwa)
+
+    def dependent_urls(self, roots):
+        urls = set(roots)
+        pending = list(urls)
+        while pending:
+            record = self.hby.db.moobi.get((pending.pop(),))
+            if record is not None:
+                for url in record.urls or []:
+                    if url not in urls:
+                        urls.add(url)
+                        pending.append(url)
+        return urls
+
+    def cancel(self, url):
+        for target in self.dependent_urls([url]):
+            for store in (self.hby.db.oobis, self.hby.db.coobi, self.hby.db.eoobi, self.hby.db.moobi):
+                store.rem((target,))
+            client = self.clients.pop(target, None)
+            if client is not None:
+                self.clienter.remove(client)
+
+    def processRetries(self):
+        # Managed contacts have one persisted retry budget, including multi-OOBI children.
+        managed = self.dependent_urls(self.db.connections.sep.join(keys[1:]) for keys, _ in
+                                      self.db.connections.getTopItemIter(keys=('oobi',)))
+        for (url,), record in self.hby.db.eoobi.getTopItemIter():
+            if url in managed:
+                continue
+            now = helping.nowUTC()
+            if (now - helping.fromIso8601(record.date)).total_seconds() > self.RetryDelay:
+                record.date = helping.toIso8601(now)
+                self.hby.db.eoobi.rem((url,))
+                self.hby.db.oobis.pin((url,), record)
+
+    def processClients(self):
+        for (url,), record in self.hby.db.coobi.getTopItemIter():
+            client = self.clients.get(url)
+            if client is None or not client.responses:
+                continue
+            status = client.responses[0]['status']
+            if status in (408, 429) or status >= 500:
+                client.responses.popleft()
+                self.clienter.remove(client)
+                self.hby.db.coobi.rem((url,))
+                self.hby.db.eoobi.pin((url,), record)
+        super().processClients()
 
 
 def message_version(ims: bytes | bytearray) -> kering.Versionage:
@@ -35,7 +117,7 @@ def message_version(ims: bytes | bytearray) -> kering.Versionage:
     return kering.Vrsn_2_0
 
 
-def identifier_introduction(hab) -> bytes:
+def identifier_introduction(hab, *, vault=None) -> bytes:
     """Export public key history and retained, signed delivery information."""
     version = kering.Vrsn_2_0
     stream = bytearray()
@@ -43,8 +125,9 @@ def identifier_introduction(hab) -> bytes:
     # the first event. Never include private keys or unrelated contacts.
     for message in hab.db.clonePreIter(pre=hab.pre, gvrsn=version):
         stream.extend(message)
+    unpublished = unpublished_mailboxes(vault, hab.pre)
     roles = [(role, eid) for (_, role, eid), end in hab.db.ends.getTopItemIter(keys=(hab.pre,))
-             if end.allowed or end.enabled]
+             if (end.allowed or end.enabled) and not (role == kering.Roles.mailbox and eid in unpublished)]
     endpoints = dict.fromkeys([*hab.kever.wits, *(eid for _, eid in roles)])
     for eid in endpoints:
         if eid != hab.pre and eid in hab.kevers:
@@ -52,8 +135,10 @@ def identifier_introduction(hab) -> bytes:
         stream.extend(hab.loadLocScheme(eid=eid, gvrsn=version))
     # loadEndRole omits revoked roles. Export each latest accepted reply,
     # including cuts, with its retained signatures so imports remove old routes.
-    for _, said in hab.db.eans.getTopItemIter(keys=(hab.pre,)):
+    for (_, role, eid), said in hab.db.eans.getTopItemIter(keys=(hab.pre,)):
         serder = hab.db.rpys.get(keys=(said.qb64,))
+        if role == kering.Roles.mailbox and eid in unpublished and serder.route == '/end/role/add':
+            continue
         cigars = []
         for verfer, cigar in hab.db.scgs.get(keys=(said.qb64,)):
             cigar.verfer = verfer
@@ -212,15 +297,14 @@ def purge_oobi_resolution_state(app, *, oobi: str | None) -> None:
             logger.warning("Failed purging %s OOBI state for %s", store_name, oobi, exc_info=True)
 
 
-def introduce_watcher_observed_aid(
+def watcher_introduction_doers(
     app,
     *,
     hab,
     watcher_eid: str,
     observed_aid: str,
     observed_oobis: list[str],
-    timeout_seconds: float = 10.0,
-) -> None:
+) -> list:
     """Send the local controller KEL and watcher-add reply to a hosted watcher."""
 
     if not watcher_eid:
@@ -264,11 +348,7 @@ def introduce_watcher_observed_aid(
         serder = SerderKERI(raw=raw)
         postman.send(serder=serder, attachment=raw[serder.size:])
 
-    doer = doing.DoDoer(doers=postman.deliver())
-    try:
-        doing.Doist(tock=0.03125, real=True).do(doers=[doer], limit=timeout_seconds)
-    except Exception as exc:
-        raise ValueError(f"Failed introducing observed AID {observed_aid} to watcher {watcher_eid}: {exc}") from exc
+    return postman.deliver()
 
 
 async def resolve_oobi(
@@ -319,7 +399,8 @@ async def resolve_oobi(
     vault.extend([doer])
     try:
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout_seconds + poll_interval
+        budget = timeout_seconds * (len(RETRY_DELAYS) + 1) + (sum(RETRY_DELAYS) if timeout_seconds > 0 else 0)
+        deadline = loop.time() + budget + poll_interval
         while not doer.done:
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -500,6 +581,7 @@ class ResolveOobiDoer(doing.DoDoer):
             signal_bridge: DoerSignalBridge for UI communication
         """
         self.app = app
+        self.vault = app.vault
         self.pre = pre
         self.oobi = oobi
         self.force = force
@@ -513,6 +595,19 @@ class ResolveOobiDoer(doing.DoDoer):
         doers = [doing.doify(self.resolve_do)]
 
         super(ResolveOobiDoer, self).__init__(doers=doers)
+
+    def _cancel_resolution(self):
+        if getattr(self.vault, 'closed', False):
+            return
+        for store in (self.vault.hby.db.oobis, self.vault.hby.db.coobi, self.vault.hby.db.eoobi):
+            store.rem(keys=(self.oobi,))
+        resolver = getattr(self.vault, 'oobiery', None)
+        if resolver is not None:
+            resolver.cancel(self.oobi)
+
+    def exit(self, **kwa):
+        self._cancel_resolution()
+        return super().exit(**kwa)
 
     def resolve_do(self, tymth, tock=0.0, **opts):
         """
@@ -534,41 +629,41 @@ class ResolveOobiDoer(doing.DoDoer):
             obr = basing.OobiRecord(date=helping.nowIso8601())
             obr.oobialias = self.alias
 
-            # Force re-resolution if requested
+            db = self.vault.hby.db
+            connections = self.vault.db.connections
+            keys = ('oobi', self.oobi)
+            state = connections.get(keys) or ConnectionRecord()
             if self.force:
-                self.app.vault.hby.db.roobi.rem(keys=(self.oobi,))
-                logger.info(f"Forcing re-resolution of OOBI: {self.oobi}")
-
-            # Write OOBI to database for resolution
-            self.app.vault.hby.db.oobis.put(keys=(self.oobi,), val=obr)
-            logger.info(f"OOBI written to database: {self.alias} ({self.oobi})")
-
-            # Wait for OOBI resolution with timeout
-            start_time = helping.nowUTC()
-            timeout_delta = datetime.timedelta(seconds=self.timeout_seconds)
-
-            while not self.app.vault.hby.db.roobi.get(keys=(self.oobi,)) and self.pre not in self.app.vault.hby.kevers:
-                if helping.nowUTC() > start_time + timeout_delta:
-                    logger.warning(f'OOBI resolve timeout for {self.alias} ({self.oobi})')
-
-                    # Signal timeout to UI
-                    if self.signal_bridge:
-                        self.signal_bridge.emit_doer_event(
-                            doer_name="ResolveOobiDoer",
-                            event_type="oobi_resolution_timeout",
-                            data={
-                                'alias': self.alias,
-                                'pre': self.pre,
-                                'oobi': self.oobi,
-                                'success': False
-                            }
-                        )
-                    return
-
-                yield self.tock
+                self._cancel_resolution()
+                db.roobi.rem(keys=(self.oobi,))
+                state = ConnectionRecord()
+            completed = db.roobi.get(keys=(self.oobi,))
+            while completed is None or completed.state != 'resolved':
+                if state.paused or state.attempts > len(RETRY_DELAYS):
+                    raise ValueError(state.error or 'Connection attempts exhausted. Retry to resume.')
+                while time.time() < state.retry_at:
+                    yield min(1.0, state.retry_at - time.time())
+                state.attempts += 1
+                connections.pin(keys, state)
+                db.roobi.rem(keys=(self.oobi,))
+                db.oobis.pin(keys=(self.oobi,), val=obr)
+                deadline = self.tyme + self.timeout_seconds
+                while not (completed := db.roobi.get(keys=(self.oobi,))):
+                    if self.tyme >= deadline:
+                        break
+                    yield self.tock
+                self._cancel_resolution()
+                if completed is not None and completed.state == 'resolved':
+                    connections.pin(keys, ConnectionRecord())
+                    break
+                state.error = 'Could not resolve this introduction. Your progress is saved.'
+                # Native rejection is permanent. Missing responses have bounded retries.
+                state.paused = completed is not None or state.attempts > len(RETRY_DELAYS)
+                state.retry_at = time.time() + RETRY_DELAYS[min(state.attempts, len(RETRY_DELAYS)) - 1]
+                connections.pin(keys, state)
 
             # Verify the prefix is now in kevers
-            if self.pre not in self.app.vault.hby.kevers:
+            if self.pre not in self.vault.hby.kevers:
                 logger.error(
                     f'OOBI Resolution failed for alias {self.alias} and OOBI {self.oobi}, '
                     f'{self.pre} not found in KERI DB after resolution.'
@@ -1001,7 +1096,7 @@ class ChallengeVerificationDoer(doing.DoDoer):
             sender_hab = hab.mhab if isinstance(hab, GroupHab) else hab
 
             # Send via postman
-            postman = StreamPoster(hby=self.app.vault.hby, recp=self.remote_id_pre, hab=sender_hab, topic="challenge")
+            postman = forwarding.StreamPoster(hby=self.app.vault.hby, recp=self.remote_id_pre, hab=sender_hab, topic="challenge")
             postman.send(
                 serder=exn,
                 attachment=ims

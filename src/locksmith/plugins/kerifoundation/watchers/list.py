@@ -113,11 +113,11 @@ class WatcherListPage(QWidget):
             if record is None:
                 rows = []
             else:
-                watchers = await asyncio.to_thread(
-                    boot_client.list_account_watchers,
+                watchers = await boot_client.list_account_watchers_async(
                     hab,
                     account_aid=record.account_aid,
                     destination=record.boot_server_aid,
+                    vault=vault,
                 )
                 rows = self._watcher_rows(watchers)
         except asyncio.CancelledError:

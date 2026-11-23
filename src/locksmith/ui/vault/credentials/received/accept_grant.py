@@ -20,7 +20,7 @@ from locksmith.ui.toolkit.widgets import (
     LocksmithButton,
     LocksmithInvertedButton
 )
-from locksmith.ui.vault.credentials.presentation import credential_details, credential_name, identifier_name, date_label
+from locksmith.ui.vault.credentials.presentation import credential_details, credential_name, identifier_name, date_label, show_delegations
 from locksmith.ui.toolkit.widgets.collapsible import CollapsibleSection
 from locksmith.ui.toolkit.widgets.buttons import LocksmithCopyButton
 
@@ -110,7 +110,7 @@ class AcceptGrantDialog(LocksmithDialog):
             saved = self.vault.hby.db.exns.get((reply.qb64,))
             if saved is None or saved.route != '/ipex/admit':
                 raise ValueError('This exchange was declined or closed. Start a new exchange to accept the credential.')
-        credential = ipexing.grant_credential(self.vault, self.grant_said)
+        credential, self.nests = ipexing.grant_evidence(self.vault, self.grant_said)
         self.sender = exn.sad['i']
         self.recipient = exn.sad['ri']
         self.timestamp = exn.sad.get('dt', '')
@@ -127,8 +127,7 @@ class AcceptGrantDialog(LocksmithDialog):
             schemer = self.vault.hby.db.schema.get(keys=(schema,))
             self.schema = schemer.sed if schemer is not None else {}
         self.subject = credential.iseaid
-        nest = next(item for item in exchanging.loadParsedNestedSubstreams(self.vault.hby, self.grant_said)
-                    if item.serder.said == self.credential_said)
+        nest = next(item for item in self.nests if item.serder.said == self.credential_said)
         try:
             self.authentication = credentialing.authentication(self.vault, nest)['auth']
         except (kering.ValidationError, kering.MissingChainError):
@@ -193,7 +192,7 @@ class AcceptGrantDialog(LocksmithDialog):
         names.setStyleSheet(f'color: {colors.TEXT_SECONDARY};')
         layout.addWidget(names)
         notice = QLabel('Review the values below before adding this credential.\n' + (
-                        'Adding it exports a receipt. No acknowledgment is sent.' if self.save else
+                        'Adding it exports a receipt for your records.' if self.save else
                         f'Adding it confirms receipt to {sender}.'))
         notice.setTextFormat(Qt.TextFormat.PlainText)
         notice.setWordWrap(True)
@@ -213,6 +212,7 @@ class AcceptGrantDialog(LocksmithDialog):
             warning.setStyleSheet(f'color: {colors.WARNING_TEXT};')
             layout.addWidget(warning)
 
+        show_delegations(layout, self.vault, self.credential_said, self.nests)
         self.credential_details = CollapsibleSection(title='Review credential data and terms')
         attributes = QVBoxLayout()
         self._create_credential_fields_section(attributes)
@@ -280,7 +280,7 @@ class AcceptGrantDialog(LocksmithDialog):
 
     def _create_credential_fields_section(self, layout: QVBoxLayout):
         """Show the actual origin and linked nodes received in this Grant."""
-        for nest in exchanging.loadParsedNestedSubstreams(self.vault.hby, self.grant_said):
+        for nest in self.nests:
             layout.addWidget(credential_details(self.vault, nest.serder.sad))
 
     def _on_admit(self):

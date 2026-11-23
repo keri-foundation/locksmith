@@ -44,8 +44,8 @@ def export_identifier_to_cesr(parent_widget: QWidget, app, identifier_alias: str
             logger.info("Identifier export cancelled")
             return
 
-        # Include the signed routes needed to send messages to this identifier.
-        introduction = identifier_introduction(hab)
+        # Include any signed delivery routes already in the vault.
+        introduction = identifier_introduction(hab, vault=app.vault)
         with open(file_path, "wb") as f:
             f.write(introduction)
 

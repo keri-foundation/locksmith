@@ -306,6 +306,7 @@ class VaultNavMenu(QFrame):
     issued_credentials_clicked = Signal()
     received_credentials_clicked = Signal()
     activity_clicked = Signal()
+    proofing_clicked = Signal()
     schema_clicked = Signal()
     back_to_vault_from_credentials_clicked = Signal()  # When Back button is clicked from credentials menu
 
@@ -679,6 +680,15 @@ class VaultNavMenu(QFrame):
         activity_btn.setVisible(False)
         activity_btn.set_attention(False)
         self.activity_button = activity_btn
+
+        proofing_btn = MenuButton(self._create_icon("credentials"), "Proofing")
+        proofing_btn.clicked.connect(
+            lambda: self._on_credentials_nav_clicked(proofing_btn, self.proofing_clicked)
+        )
+        self.layout.addWidget(proofing_btn)
+        self.credentials_items.append(proofing_btn)
+        self.credentials_nav_buttons.append(proofing_btn)
+        proofing_btn.setVisible(False)
 
         # Schema
         schema_btn = MenuButton(

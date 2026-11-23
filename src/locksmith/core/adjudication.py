@@ -4,65 +4,69 @@ locksmith.core.adjudication module
 
 """
 import random
+from time import monotonic
 
 from hio.base import doing
 from hio.help import decking
 from keri import help
 from keri.app import watching
 from keri.app.agenting import httpClient
-from keri.app.httping import Clienter, streamCESRRequests
+from keri.app.httping import streamCESRRequests
 from keri.core import eventing, routing, parsing
 
+from locksmith.core.messaging import NETWORK_TIMEOUT
 from locksmith.core.remoting import message_version
 
 logger = help.ogler.getLogger(__name__)
 
 
 class Watchmen(doing.DoDoer):
-    """ Who watches the Watchmen """
+    """Poll enabled watchers with at most one new request per scheduler turn."""
 
-    def __init__(self, hby, tock=None, **kwa):
-        self.cues = decking.Deck()
+    MaxRequests = 4
 
-        self.ksqs = decking.Deck()
-        inquisitor = Rorschach(hby=hby, cues=self.cues, ksqs=self.ksqs, tock=tock)
-        doers = [inquisitor]
-        super(Watchmen, self).__init__(doers=doers, **kwa)
-
-    def recur(self, tyme, deeds=None):
-        if self.ksqs:
-            ksq = self.ksqs.pull()
-            self.extend([ksq])
-
-        super(Watchmen, self).recur(tyme, deeds)
-
-
-class Rorschach(doing.Doer):
-
-    def __init__(self, hby, ksqs, cues=None, **kwa):
+    def __init__(self, hby, tock=15.0, **kwa):
         self.hby = hby
-        self.ksqs = ksqs
-        self.cues = cues if cues is not None else decking.Deck()
+        self.interval = tock
+        self.cues = decking.Deck()
+        super().__init__(doers=[doing.doify(self.poll_do)], **kwa)
 
-        super(Rorschach, self).__init__(**kwa)
-        
-    def recur(self, tyme, deeds=None):
-        watched = dict()
-        for (cid, wid, oid), obr in self.hby.db.obvs.getTopItemIter():
-            if (cid, oid) not in watched:
-                watched[(cid, oid)] = list()
-            watched[(cid, oid)].append(wid)
+    def poll_do(self, tymth, tock=0.0, **opts):
+        self.wind(tymth)
+        yield self.tock
+        rounds, requests = {}, []
+        while True:
+            watched = {}
+            for (cid, wid, oid), record in self.hby.db.obvs.getTopItemIter():
+                if record.enabled:
+                    watched.setdefault((cid, oid), []).append(wid)
+            for key, query in list(rounds.items()):
+                if query.done or query.wids != watched.get(key):
+                    self.remove([query])
+                    del rounds[key]
 
-        for (cid, oid), wids in watched.items():
-            hab = self.hby.habByPre(cid)
-            logger.info(f"Querying watchers={wids} for key state of {oid} as {hab.pre}")
-            ksq = KeyStateQuerier(hby=self.hby, hab=hab, wids=wids, oid=oid, cues=self.cues)
-            self.ksqs.append(ksq)
-
-        return False
+            for (cid, oid), wids in watched.items():
+                if (hab := self.hby.habByPre(cid)) is None:
+                    continue
+                if (query := rounds.get((cid, oid))) is None:
+                    query = rounds[cid, oid] = KeyStateQuerier(self.hby, hab, oid, wids, self.cues)
+                    self.extend([query])
+                for wid in wids:
+                    while len(requests) >= self.MaxRequests:
+                        requests = [(owner, wit, req) for owner, wit, req in requests
+                                    if owner.requests.get(wit) is req and not req.done]
+                        if len(requests) >= self.MaxRequests:
+                            yield self.tock
+                    # A cut can arrive while other identifiers use the available slots.
+                    record = self.hby.db.obvs.get((cid, wid, oid))
+                    if record and record.enabled and (req := query.request(wid)):
+                        requests.append((query, wid, req))
+                        yield self.tock
+            yield self.interval
 
 
 class KeyStateQuerier(doing.DoDoer):
+    """Wait for a signed state notice from each watcher in this round."""
 
     def __init__(self, hby, hab, oid, wids, cues, **opts):
         self.hby = hby
@@ -70,50 +74,58 @@ class KeyStateQuerier(doing.DoDoer):
         self.oid = oid
         self.wids = wids
         self.cues = cues
+        self.requests = {}
+        self.previous = {}
+        for wid in wids:
+            keys = (oid, wid)
+            if (saider := hby.db.knas.get(keys)) is not None:
+                self.previous[keys] = saider
+                hby.db.knas.rem(keys)
+        super().__init__(doers=[], **opts)
 
-        doers = []
-        self.saiders = dict()
-        for wid in self.wids:
-            keys = (self.oid, wid)
-            saider = self.hby.db.knas.get(keys)
-            if saider is not None:
-                self.saiders[keys] = saider
-                self.hby.db.knas.rem(keys)
+    def request(self, wid):
+        if self.done:
+            return None
+        if previous := self.requests.get(wid):
+            if not previous.done:
+                return None
+            self.remove([previous])
+            del self.requests[wid]
+        if self.hby.db.knas.get((self.oid, wid)) is None:
+            query = WatcherInquisitor(hab=self.hab, pre=self.oid, wit=wid, route="ksn",
+                                      query={"s": "0", "fn": "0"})
+            self.extend([query])
+            self.requests[wid] = query
+            return query
+        return None
 
-            logger.info(f"Launching the inquisition for {self.oid} from {wid}:")
-
-            self.witq = WatcherInquisitor(hby=self.hby)
-            self.witq.query(hab=self.hab, pre=self.oid, r="ksn", wit=wid)
-            doers.append(self.witq)
-
-        super(KeyStateQuerier, self).__init__(doers=doers, **opts)
+    def exit(self, deeds=None):
+        super().exit(deeds)
+        if deeds is None:
+            self.requests.clear()
+            if self.hby.db.opened:
+                for keys, saider in self.previous.items():
+                    if self.hby.db.knas.get(keys) is None:
+                        self.hby.db.knas.put(keys, saider)
 
     def recur(self, tyme, deeds=None):
-        """
-        Returns:  doifiable Doist compatible generator method
-        Usage:
-            add result of doify on this method to doers list
-        """
-
-        adjudicate = False
-        for wid in self.wids:
-            keys = (self.oid, wid)
-
-            if (saider := self.hby.db.knas.get(keys)) is None:
-                return super(KeyStateQuerier, self).recur(tyme, deeds)
-            else:
-                logger.info(f"Watcher {wid} reports {saider.qb64} as the current state of {self.oid}")
-                if keys in self.saiders and self.saiders[keys].qb64 != saider.qb64:
-                    adjudicate = True
-
-        if adjudicate:
-            adj = watching.Adjudicator(hby=self.hby, hab=self.hab, cues=self.cues)
-            adj.adjudicate(self.oid)
-
-        else:
-            logger.info(f"State for {self.oid} for all watchers of {self.hab.pre} remains unchanged")
-
-        return True
+        try:
+            super().recur(tyme, deeds)
+            reports = []
+            for wid in self.wids:
+                report = self.hby.db.knas.get((self.oid, wid))
+                if report is None:
+                    return False
+                reports.append(report)
+            # The local KEL still shows a missed update after a cut or vault reopen.
+            if self.oid in self.hby.kevers:
+                local = self.hby.kevers[self.oid].serder.said
+                if any(report.qb64 != local for report in reports):
+                    watching.Adjudicator(self.hby, self.hab, cues=self.cues).adjudicate(self.oid)
+            return True
+        except Exception:
+            logger.exception('Watcher query failed for %s', self.oid)
+            return True
 
 
 class KeyStateVarianceAuthority(doing.DoDoer):
@@ -122,232 +134,114 @@ class KeyStateVarianceAuthority(doing.DoDoer):
         self.hby = hby
         self.notifier = notifier
         self.cues = cues if cues is not None else decking.Deck()
-        super(KeyStateVarianceAuthority, self).__init__(doers=[], always=True, tock=1.0)
+        self.queries = {}
+        self.pending = {}
+        super().__init__(doers=[], always=True, tock=1.0)
 
     def recur(self, tyme, deeds=None):
-        if self.cues:
+        for key, query in list(self.queries.items()):
+            if query.done:
+                self.remove([query])
+                del self.queries[key]
+                if query.retry:
+                    self.pending[key] = query.state
+
+        while self.cues:
             cue = self.cues.pull()
-            kin = cue['kin']
-
-            match kin:
-                case "keyStateConsistent":
-                    pass  # This is the usual case and is logged in the adjudicator
-
-                case "keyStateLagging":
-                    pass  # Eventually we'll need reporting of this, but it is not logged in the adjudicator
-
-                case "keyStateUpdate":
-                    ahds = cue["aheads"]
-                    cid = cue["cid"]
-
-                    state = random.choice(ahds)
-                    hab = self.hby.habs[cid]
-                    fn = self.hby.kevers[state.pre].sn + 1
-
-                    logger.info(f"Submitting query for {state.pre} as seq no. {state.sn} to {state.wit}")
-                    querier = SeqNoQuerier(hby=self.hby, hab=hab, pre=state.pre, fn=fn, sn=state.sn, wit=state.wit)
-                    notify_doer = NotifyDoer(hby=self.hby, notifier=self.notifier, state=state)
-                    self.extend([querier, notify_doer])
-
-                case "keyStateDuplicitous":
-                    pass  # Eventually we'll need to halt processing until this is resolved.
-
-        return super(KeyStateVarianceAuthority, self).recur(tyme, deeds)
+            if cue['kin'] == 'keyStateUpdate':
+                state = random.choice(cue['aheads'])
+                cid = cue['cid']
+                key = (cid, state.pre)
+                if key not in self.queries and self.hby.kevers[state.pre].sn < state.sn:
+                    self.pending[key] = state
+        if self.pending and len(self.queries) < Watchmen.MaxRequests:
+            key = next(iter(self.pending))
+            state = self.pending.pop(key)
+            hab = self.hby.habByPre(key[0])
+            if hab is not None:
+                query = SeqNoQuerier(self.hby, hab, state, self.notifier)
+                self.queries[key] = query
+                self.extend([query])
+        return super().recur(tyme, deeds)
 
 
 class SeqNoQuerier(doing.DoDoer):
+    """Wait for the requested KEL event, including delivery through the mailbox."""
 
-    def __init__(self, hby, hab, pre, sn, fn=None, wit=None, **opts):
+    def __init__(self, hby, hab, state, notifier):
         self.hby = hby
         self.hab = hab
-        self.pre = pre
-        self.sn = sn
-        self.fn = fn if fn is not None else 0
-        self.witq = WatcherInquisitor(hby=self.hby)
-        self.witq.query(src=self.hab.pre, pre=self.pre,
-                        fn="{:x}".format(self.fn),
-                        sn="{:x}".format(self.sn),
-                        wit=wit)
-        super(SeqNoQuerier, self).__init__(doers=[self.witq], **opts)
+        self.state = state
+        self.notifier = notifier
+        self.witq = None
+        self.deadline = None
+        self.retry = False
+        super().__init__(doers=[])
 
     def recur(self, tyme, deeds=None):
-        """
-        Returns:  doifiable Doist compatible generator method
-        Usage:
-            add result of doify on this method to doers list
-        """
-        if self.pre not in self.hab.kevers:
-            return False
-
-        kever = self.hab.kevers[self.pre]
-        if kever.sn >= self.sn:
-            self.remove([self.witq])
+        state = self.state
+        observed = self.hby.db.obvs.get((self.hab.pre, state.wit, state.pre))
+        if not observed or not observed.enabled:
             return True
-
-        return super(SeqNoQuerier, self).recur(tyme, deeds)
+        kever = self.hby.kevers[state.pre]
+        if kever.sn >= state.sn:
+            if self.hby.db.kels.getLast(keys=state.pre, on=state.sn) == state.dig:
+                self.notifier.add(dict(r='/keystate/update', pre=state.pre, sn=state.sn, dig=state.dig))
+            return True
+        if self.deadline is None:
+            self.deadline = tyme + NETWORK_TIMEOUT
+            self.witq = WatcherInquisitor(hab=self.hab, pre=state.pre, wit=state.wit, route="logs",
+                                          query={"s": f"{state.sn:x}", "fn": f"{kever.sn + 1:x}"})
+            self.extend([self.witq])
+        if tyme >= self.deadline:
+            self.retry = True
+            return True
+        try:
+            super().recur(tyme, deeds)
+        except Exception:
+            logger.exception('Watcher replay failed for %s', state.pre)
+            self.remove([self.witq])
+        return False
 
 
 class WatcherInquisitor(doing.DoDoer):
 
-    def __init__(self, hby, msgs=None, cues=None):
+    """Send a single signed query and release its HTTP client when it finishes."""
 
-        self.hby = hby
-        rtr = routing.Router()
-        rvy = routing.Revery(db=self.hby.db, rtr=rtr)
-        kvy = eventing.Kevery(db=hby.db, lax=True, rvy=rvy)
-        kvy.registerReplyRoutes(router=rtr)
-        self.kvy = kvy
-        self.rvy = rvy
-        self.msgs = msgs if msgs is not None else decking.Deck()
-        self.cues = cues if cues is not None else decking.Deck()
-        self.clienter = Clienter()
+    def __init__(self, *, hab, pre, wit, route, query):
+        super().__init__(doers=[doing.doify(self.execute, hab=hab, pre=pre, wit=wit, route=route, query=query)])
 
-        doers = [self.clienter, doing.doify(self.wit_do)]
-
-        super(WatcherInquisitor, self).__init__(doers=doers)
-
-    def execute(self, target, src, route, query, wat):
-        """ Returns a generator for watcher querying
-
-        The returns a generator that will submit the query to the watcher using
-        the synchronous watcher API, then parse the results.
-
-
-        Parameters:
-            target (str): qualified base64 identifier to query for
-            src (str): qb64 identifierof the query submitter
-            route (str): query route, ie. /logs, /ksn
-            query (dict): additional query params
-            wat (str): watcher to query
-
-        Returns:
-            list: identifiers of witnesses that returned receipts.
-
-        """
-        if (hab := self.hby.habByPre(src)) is None:
+    def execute(self, tymth, *, hab, pre, wit, route, query, **opts):
+        self.wind(tymth)
+        yield self.tock
+        try:
+            client, client_doer = httpClient(hab, wit)
+            self.extend([client_doer])
+        except Exception:
+            logger.exception("Unable to create HTTP client for watcher %s", wit)
             return
 
         try:
-            client, client_doer = httpClient(hab, wat)
-            self.extend([client_doer])
-        except Exception as e:
-            logger.exception(f"unable to create http client for witness {wat}: {e}")
-            return
+            msg = hab.query(pre, src=wit, route=route, query=query, version=eventing.Vrsn_2_0,
+                            gvrsn=eventing.Vrsn_2_0, kind=eventing.Kinds.json)
+            streamCESRRequests(client=client, dest=wit, ims=bytearray(msg), path="/", headers=dict())
+            deadline = monotonic() + NETWORK_TIMEOUT
+            while not client.responses:
+                if monotonic() >= deadline:
+                    logger.warning("Watcher %s timed out querying %s", wit, pre)
+                    return
+                yield self.tock
 
-        msg = hab.query(
-            target,
-            src=wat,
-            route=route,
-            query=query,
-            version=eventing.Vrsn_2_0,
-            gvrsn=eventing.Vrsn_2_0,
-            kind=eventing.Kinds.json,
-        )  # Query for remote pre Event
-        streamCESRRequests(client=client, dest=wat, ims=bytearray(msg), path="/", headers=dict())
-        while not client.responses:
-            yield self.tock
-
-        rep = client.respond()
-        if rep.status == 200:
-            rpy = bytearray(rep.body)
-            parsing.Parser(
-                framed=True,
-                kvy=self.kvy,
-                rvy=self.rvy,
-                local=True,
-                version=message_version(rpy),
-            ).parse(bytearray(rpy))
-
-        elif rep.status == 204:
-            logger.debug(
-                f"watcher {wat} accepted key-state query for {target} without an inline response"
-            )
-
-        else:
-            logger.info(f"invalid response {rep.status} from watcher {wat}")
-
-        self.remove([client_doer])
-
-        return
-
-    def wit_do(self, tymth=None, tock=0.0, **kwa):
-        """
-         Returns doifiable Doist compatibile generator method (doer dog) to process
-            .kevery and .tevery escrows.
-
-        Parameters:
-            tymth (function): injected function wrapper closure returned by .tymen() of
-                Tymist instance. Calling tymth() returns associated Tymist .tyme.
-            tock (float): injected initial tock value
-
-        Usage:
-            add result of doify on this method to doers list
-        """
-        self.wind(tymth)
-        self.tock = tock
-        _ = (yield self.tock)
-
-        while True:
-            while self.msgs:
-                msg = self.msgs.popleft()
-                target = msg["target"]
-                src = msg["src"]
-                r = msg["r"]
-                q = msg["q"]
-                wat = msg["wit"]
-
-                yield from self.execute(target, src, route=r, query=q, wat=wat)
-                self.cues.push(msg)
-
-            yield self.tock
-
-    def query(self, pre, r="logs", sn='0', fn='0', src=None, hab=None, anchor=None, wit=None):
-        """ Create, sign and return a `qry` message against the attester for the prefix
-
-        Parameters:
-            src (str): qb64 identifier prefix of source of query
-            hab (Hab): Hab to use instead of src if provided
-            pre (str): qb64 identifier prefix being queried for
-            r (str): query route
-            sn (str): optional specific hex str of sequence number to query for
-            fn (str): optional specific hex str of sequence number to start with
-            anchor (Seal): anchored Seal to search for
-            wit (str) watcher qv94 prefix to query
-
-        Returns:
-            bytearray: signed query event
-
-        """
-        qry = dict(s=sn, fn=fn)
-        if anchor is not None:
-            qry["a"] = anchor
-
-        msg = dict(src=src, pre=pre, target=pre, r=r, q=qry, wit=wit)
-        if hab is not None:
-            msg["src"] = hab.pre
-
-        self.msgs.append(msg)
-
-class NotifyDoer(doing.Doer):
-
-    def __init__(self, hby, notifier, state, **kwa):
-        self.hby = hby
-        self.notifier = notifier
-        self.state = state
-        super(NotifyDoer, self).__init__(**kwa)
-
-    def recur(self, tyme=0.0, deeds=None):
-        while not self.hby.kevers[self.state.pre].sn >= self.state.sn:
-            yield 5.0
-
-        msg = dict(
-            r='/keystate/update',
-            pre=self.state.pre,
-            sn=self.state.sn,
-            dig=self.state.dig
-        )
-
-        # Notify controller of sucessful challenge
-        self.notifier.add(msg)
-
-        return True
+            reply = client.respond()
+            if reply.status == 200:
+                ims = bytearray(reply.body)
+                router = routing.Router()
+                rvy = routing.Revery(db=hab.db, rtr=router)
+                kvy = eventing.Kevery(db=hab.db, lax=True, rvy=rvy)
+                kvy.registerReplyRoutes(router=router)
+                parsing.Parser(framed=True, kvy=kvy, rvy=rvy, local=True,
+                               version=message_version(ims)).parse(ims)
+            elif reply.status != 204:
+                logger.info("Invalid response %s from watcher %s", reply.status, wit)
+        finally:
+            self.remove([client_doer])

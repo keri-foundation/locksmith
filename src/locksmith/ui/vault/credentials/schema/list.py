@@ -69,7 +69,7 @@ class SchemaListPage(BaseListPage):
             show_search=True,
             show_add_button=True,
             add_button_text="Add Schema",
-            row_actions=["View", "Apply for credential", "Delete"],
+            row_actions=["View", "Request credential", "Delete"],
             row_action_icons={
                 "View": ":/assets/material-icons/view.svg",
                 "Delete": ":/assets/material-icons/delete.svg"
@@ -135,7 +135,7 @@ class SchemaListPage(BaseListPage):
         schema_said = row_data.get('SAID', '')
         logger.info(f"Row action '{action}' triggered for: {schema_name} v{schema_version}")
 
-        if action == "Apply for credential":
+        if action == "Request credential":
             self.parent.start_credential_exchange('Apply', schema=schema_said)
         elif action == "View":
             # Open view schema dialog
@@ -196,8 +196,11 @@ class SchemaListPage(BaseListPage):
         """
         logger.debug(f"SchemaListPage received doer_event: {doer_name} - {event_type}")
 
+        if doer_name == "MenuDoer" and event_type == "load" and data.get('subpage') == "schema":
+            self._load_schema_data()
+
         # Refresh list when a schema is loaded
-        if doer_name == "LoadSchemaDoer" and event_type == "schema_loaded":
+        elif doer_name == "LoadSchemaDoer" and event_type == "schema_loaded":
             logger.info(f"Schema loaded: {data.get('title')}, refreshing list")
             self._load_schema_data()
 

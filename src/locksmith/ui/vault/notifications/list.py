@@ -16,6 +16,7 @@ from keri.peer import exchanging
 from locksmith.core import ipexing
 from locksmith.ui import colors
 from locksmith.ui.toolkit.tables import PaginatedTableWidget
+from locksmith.ui.vault.credentials.presentation import credential_name
 from locksmith.ui.vault.credentials.received.accept_grant import AcceptGrantDialog
 
 if TYPE_CHECKING:
@@ -141,7 +142,7 @@ class NotificationsListPage(QWidget):
                 route = note.pad.get('a', {}).get('r', '')
                 if '/multisig' in route:
                     notification_row = self._format_multisig_notification(note, rid, timestamp_display)
-                elif route.startswith('/exn/ipex'):
+                elif route.startswith(('/exn/ipex/', '/xip/ipex/')):
                     notification_row = self._format_ipex_notification(note, rid, timestamp_display)
                 elif route.startswith('/challenge/response'):
                     notification_row = self._format_challenge_response_notification(note, rid, timestamp_display)
@@ -336,27 +337,23 @@ class NotificationsListPage(QWidget):
 
     def _format_ipex_message(self, exn, route: str, actual_message: str = "") -> tuple[str, str]:
         """Format native exchange results and expose grants for explicit acceptance."""
-        if exn.pvrsn.major != 2 or not exn.sad.get('x'):
+        if exn.pvrsn.major != 2 or (exn.ilk != 'xip' and not exn.sad.get('x')):
             return "Unsupported IPEX", "This exchange does not use ACDC V2 IPEX"
         verb = route.rsplit('/', 1)[-1].upper()
         message = "Protocol verified"
         if route == '/ipex/grant':
             credential = ipexing.grant_credential(self.app.vault, exn.said)
             schema = credential.schema
-            title = (schema.get('title') if isinstance(schema, dict)
-                     else self._resolve_schema_title(schema))
-            message = f"Credential grant: {title or 'Unknown Schema'}"
+            if isinstance(schema, str):
+                schemer = self.app.vault.hby.db.schema.get(keys=(schema,))
+                schema = schemer.sed if schemer else None
+            message = f"Credential grant: {credential_name(schema)}"
             responded, response = self._get_response_status(exn.said)
             if responded:
                 message += f" | {response}"
         if actual_message:
             message += f" | {actual_message}"
         return verb, message
-
-    def _resolve_schema_title(self, schema_said: str) -> str | None:
-        """Read the schema title from the vault's shared schema cache."""
-        schemer = self.app.vault.hby.db.schema.get(keys=(schema_said,))
-        return schemer.sed.get('title') if schemer is not None else None
 
     def _get_response_status(self, exn_said: str) -> tuple[bool, str | None]:
         """

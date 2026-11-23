@@ -22,6 +22,7 @@ from locksmith.ui.vault.identifiers.delete import DeleteIdentifierDialog
 from locksmith.ui.vault.identifiers.interact import InteractDialog
 from locksmith.ui.vault.identifiers.rotate import RotateIdentifierDialog
 from locksmith.ui.vault.identifiers.view import ViewIdentifierDialog
+from locksmith.ui.vault.credentials.registry import RegistryDialog
 
 if TYPE_CHECKING:
     from locksmith.ui.vault.page import VaultPage
@@ -199,6 +200,7 @@ class IdentifierListPage(BaseListPage):
             # Normal actions
             actions = ["View", "Interact", "Rotate", "Delete", "Export", "Accept Delegate"]
 
+        actions.insert(1, "Presentation registries…")
         return actions, action_icons
 
     def _on_add_identifier(self):
@@ -232,6 +234,9 @@ class IdentifierListPage(BaseListPage):
                 dialog.open()
             except Exception as e:
                 logger.exception(f"Error opening view dialog: {e}")
+        elif action == "Presentation registries…":
+            self._registry_dialog = RegistryDialog(self.app, self.parent, controller=identifier_prefix)
+            self._registry_dialog.open()
         elif action == "Interact":
             # Open interact dialog
             try:

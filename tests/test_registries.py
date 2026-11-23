@@ -246,7 +246,7 @@ def test_registry_timeout_aborts_request(wallets, service, qapp, monkeypatch):
     assert doer.result is None and doer.manager is None
 
 
-def test_registry_worker_rebuilds_requests_and_refreshes_revocation(wallets, service, qapp, request):
+def test_registry_worker_rebuilds_requests_and_refreshes_revocation(wallets, service, qapp, request, monkeypatch):
     from keri.peer import exchanging
     from locksmith.db.basing import LocksmithBaser
 
@@ -268,7 +268,8 @@ def test_registry_worker_rebuilds_requests_and_refreshes_revocation(wallets, ser
     checks = []
     receiver.signals = SimpleNamespace(emit_doer_event=lambda name, event, data: checks.append(
         (name, event, data, worker.ensure(registry.regk, holder))))
-    worker.Refresh = 0.05
+    clock = [monotonic()]
+    monkeypatch.setattr(registries, 'monotonic', lambda: clock[0])
     assert not worker.ensure(registry.regk, holder)
     assert not worker.ensure(registry.regk, holder)  # Repeated UI reads coalesce.
     runner = doing.Doist(doers=[worker], tyme=monotonic(), tock=0.0)
@@ -281,15 +282,22 @@ def test_registry_worker_rebuilds_requests_and_refreshes_revocation(wallets, ser
     try:
         until(lambda: worker.ensure(registry.regk, holder))
         assert [path for method, path, _ in requests if method == 'POST'].count('/') == 1
+        loaded = [data['changed'] for name, event, data, _ in checks
+                  if name == 'RegistrySync' and event == 'registry_loaded']
+        assert loaded == [False]
         _, update = registrar.issue(registry, acdc=acdc, state='revoked')
         _anchor(issuer, registry, update)
         _copy_kel(issuer, receiver)
+        clock[0] += worker.Refresh
         until(lambda: receiver.rgy.store.headEvent(registry.regk).said == update.said)
         until(lambda: worker.ensure(registry.regk, holder))
+        assert [data['changed'] for name, event, data, _ in checks
+                if name == 'RegistrySync' and event == 'registry_loaded'] == [False, True]
         assert [path for method, path, _ in requests if method == 'POST'].count('/') == 2
         assert any(name == 'RegistryEvidence' and event == 'status_checked' and data['success'] and fresh
                    for name, event, data, fresh in checks)
         state['respond'] = lambda method, path, body: (503, b'')
+        clock[0] += worker.Refresh
         until(lambda: registry.regk in worker.errors)
         assert any(name == 'RegistryEvidence' and event == 'status_checked' and not data['success'] and not fresh
                    for name, event, data, fresh in checks)
@@ -300,6 +308,7 @@ def test_registry_worker_rebuilds_requests_and_refreshes_revocation(wallets, ser
         assert [path for method, path, _ in requests if method == 'PUT'].count('/changed/') == 1
         assert [path for method, path, _ in requests if method == 'POST'].count('/changed/') == 1
         assert receiver.rgy.store.headEvent(registry.regk).said == update.said
+        assert len(worker.doers) == 1
     finally:
         runner.exit()
     assert not worker._active
@@ -311,9 +320,56 @@ def test_registry_worker_rebuilds_requests_and_refreshes_revocation(wallets, ser
         until(lambda: [path for method, path, _ in requests if method == 'POST'].count('/changed/') == 2)
         until(lambda: worker.ensure(registry.regk, holder))
         assert receiver.rgy.store.headEvent(registry.regk).said == update.said
+        assert len(worker.doers) == 1
     finally:
         runner.exit()
     assert not worker._active
+
+
+def test_registry_worker_bounds_requests_and_serves_new_registries_before_retries(wallets, request, monkeypatch):
+    from locksmith.db.basing import LocksmithBaser
+
+    vault, _ = wallets
+    hab = vault.hby.makeHab(name='issuer')
+    registrar = Registrar(rgy=vault.rgy)
+    registries_to_check = set()
+    for index in range(12):
+        reg = registrar.makeRegistry(name=str(index), prefix=hab.pre)
+        _anchor(hab, reg, vault.rgy.store.event(reg.regk))
+        registries_to_check.add(reg.regk)
+    vault.db = LocksmithBaser(name='bounded-registry-polls', temp=True)
+    request.addfinalizer(vault.db.close)
+    vault.hby.cf.put({'registries': {'observer': 'http://observer', 'registrar': 'http://registrar'}})
+    started = {'fetch': [], 'publish': []}
+    held = True
+
+    class UnavailableService(doing.Doer):
+        def __init__(self, vault, hab, regk, observer_url=None, registrar_url=None):
+            super().__init__()
+            self.error = 'Service unavailable'
+            started['fetch' if observer_url else 'publish'].append(regk)
+
+        def recur(self, tyme):
+            return not held
+
+    monkeypatch.setattr(registries, 'RegistrySyncDoer', UnavailableService)
+    worker = registries.RegistryEvidenceDoer(vault)
+    worker.Retry = 0.0
+    runner = doing.Doist(doers=[worker], tock=0.125)
+    monkeypatch.setattr(registries, 'monotonic', lambda: runner.tyme)
+    runner.enter()
+    try:
+        for _ in range(20):
+            runner.recur()
+        assert all(len(requests) == worker.ConcurrentPerService for requests in started.values())
+        held = False
+        for _ in range(128):
+            runner.recur()
+        for requests in started.values():
+            assert set(requests[:len(registries_to_check)]) == registries_to_check
+            assert len(requests) > len(registries_to_check)
+    finally:
+        runner.exit()
 
 
 def test_registry_worker_without_services_stays_idle(wallets, qapp):
@@ -515,6 +571,13 @@ def test_wallet_query_uses_native_observer_ingress(wallets, qapp, rotations):
     holder = receiver.hby.makeHab(name='querying-holder')
     for _ in range(rotations):
         holder.rotate(gvrsn=kering.Vrsn_2_0)
+    witness = receiver.hby.makeHab(name='witness', transferable=False)
+    holder.rotate(adds=[witness.pre], toad=1, gvrsn=kering.Vrsn_2_0)
+    signing_event = holder.kever.serder
+    signature, = witness.sign(ser=signing_event.raw, indices=[0])
+    holder.db.wigs.add((holder.pre, signing_event.said), signature)
+    holder.interact()
+    assert not holder.db.wigs.get((holder.pre, holder.kever.serder.said))
     stream = source.rgy.store.cloneTel(registry.regk)
     with habbing.openHby(name='independent-observer', temp=True,
                          version=kering.Vrsn_2_0) as hby:
@@ -532,12 +595,12 @@ def test_wallet_query_uses_native_observer_ingress(wallets, qapp, rotations):
         runner = doing.Doist(doers=[ctx, http.ServerDoer(server=server), worker], tyme=monotonic(), tock=0.0)
         runner.enter()
         try:
-            deadline = monotonic() + 5
+            deadline = monotonic() + worker.Timeout
             while not worker.done and monotonic() < deadline:
                 _advance(runner, qapp)
             assert worker.done
             assert worker.error == ''
-            assert hby.kevers[holder.pre].sn == holder.kever.sn
+            assert hby.kevers[holder.pre].serder.said == signing_event.said
             assert worker.result.said == source.rgy.store.headEvent(registry.regk).said
             assert receiver.rgy.store.cloneTel(registry.regk) == stream
             assert worker.manager is None

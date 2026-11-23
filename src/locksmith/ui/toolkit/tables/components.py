@@ -87,6 +87,8 @@ class TableHeader(QWidget):
             self.search_layout = layout
             self.toolbar_layout = layout
 
+        self.title_layout = title_layout
+
         # Icon (optional)
         if icon_path:
             icon = QIcon(icon_path)
@@ -97,7 +99,7 @@ class TableHeader(QWidget):
                 title_layout.addWidget(icon_label)
 
         # Title
-        title_label = QLabel(title)
+        title_label = self.title_label = QLabel(title)
         title_label.setStyleSheet(f"""
             QLabel {{
                 font-size: 28px;

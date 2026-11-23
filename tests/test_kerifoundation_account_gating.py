@@ -20,6 +20,7 @@ from locksmith.plugins.kerifoundation.onboarding.service import (
     OnboardingSessionPending,
 )
 from locksmith.plugins.kerifoundation.plugin import KeriFoundationPlugin
+from locksmith.core.signals import DoerSignalBridge
 
 
 class FakeHby:
@@ -40,6 +41,7 @@ class FakeHby:
 class FakeVault:
     def __init__(self, name="test-vault"):
         self.hby = FakeHby(name=name)
+        self.signals = DoerSignalBridge()
 
 
 class FakeApp:
@@ -259,6 +261,7 @@ def test_kf_plugin_runs_onboarding_as_async_task(qapp, tmp_path, monkeypatch):
         await asyncio.sleep(0)
         return SimpleNamespace(
             account_aid="AID_ACCOUNT",
+            bootstrap=SimpleNamespace(mailbox_enabled=False),
             witness_registration=SimpleNamespace(results=[], batch_mode=True),
         )
 
@@ -330,6 +333,7 @@ def test_kf_plugin_ignores_stale_onboarding_success_after_vault_switch(
 
     outcome = SimpleNamespace(
         account_aid="AID_STALE",
+        bootstrap=SimpleNamespace(mailbox_enabled=False),
         witness_registration=SimpleNamespace(results=[], batch_mode=True),
     )
 

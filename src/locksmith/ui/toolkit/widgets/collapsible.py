@@ -158,6 +158,9 @@ class CollapsibleSection(QWidget):
             self._expanded_dialog_height = self._collapsed_dialog_height + self._content_height
 
     def _on_toggle(self, checked: bool):
+        if self._dialog is None:
+            self._set_expanded(checked)
+            return
         # Handle centralized management mode (LocksmithDialogNew)
         if self._uses_centralized_management:
             self._is_expanded = checked

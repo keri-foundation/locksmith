@@ -4,6 +4,15 @@ Developer Guide
 Setup
 -----
 
+Install libsodium with your system package manager. On macOS with Homebrew:
+
+.. code-block:: bash
+
+   brew install libsodium
+   export DYLD_LIBRARY_PATH="$(brew --prefix libsodium)/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+
+Set DYLD_LIBRARY_PATH in each terminal you use to run Locksmith or its tests.
+
 Install Python ``3.14`` and
 `uv 0.9.18 <https://docs.astral.sh/uv/getting-started/installation/>`_, then run
 this command from the repository root:
@@ -13,8 +22,12 @@ this command from the repository root:
    uv sync --locked
 
 This creates ``.venv`` with Locksmith and its development tools. The checked-in
-``uv.lock`` fixes the Keripy commit and package versions used by development and
+``uv.lock`` fixes the keripy commit and package versions used by development and
 CI. ``--locked`` fails if the lockfile needs an update.
+
+The keripy dependency names an explicit upstream Git commit in ``pyproject.toml``
+and ``uv.lock``. A fresh checkout can use the same ``uv sync --locked`` command;
+it does not require an editable sibling checkout or changes to installed source.
 
 Checks
 ------
@@ -28,14 +41,16 @@ Run the tests, lint, and dependency checks:
    uv run --locked pytest tests/
    uv run --locked pip-audit --local --skip-editable
 
-CI audits dependency changes; the audit workflow can also run manually.
+To run the audit on GitHub, open **Actions**, select **Audit locked dependencies**,
+and choose **Run workflow**.
 The audit checks published package advisories and skips Locksmith and
 Git-sourced Keripy.
 
 Dependency Updates
 ------------------
 
-To adopt a newer upstream Keripy commit and its required package versions:
+To adopt a new Keripy commit, change the Git SHA in ``pyproject.toml``.
+Update the lockfile and install it with these commands.
 
 .. code-block:: bash
 

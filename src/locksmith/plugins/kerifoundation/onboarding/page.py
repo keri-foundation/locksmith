@@ -620,6 +620,11 @@ class KFOnboardingPage(QWidget):
                     "Previous onboarding failed after a hosted session was saved. "
                     "Local progress is preserved. Begin onboarding again to resume the saved session."
                 )
+            elif record.onboarding_auth_alias:
+                self._progress_error = (
+                    "The previous onboarding session has not been confirmed. "
+                    "Local progress is preserved. Begin onboarding again to resume setup with the saved choices."
+                )
             else:
                 self._progress_error = (
                     "Previous onboarding failed before a safe resume point. "
@@ -1116,13 +1121,14 @@ class KFOnboardingPage(QWidget):
                 ACCOUNT_STATUS_FAILED,
             }:
                 account_aid = account_aid or record.account_aid
-                count, toad = witness_profile_params(self._selected_witness_profile)
-                record.account_alias = alias
-                record.account_aid = account_aid
-                record.witness_profile_code = self._selected_witness_profile
-                record.witness_count = count
-                record.toad = toad
-                self._db.pin_account(record)
+                if not record.onboarding_auth_alias:
+                    count, toad = witness_profile_params(self._selected_witness_profile)
+                    record.account_alias = alias
+                    record.account_aid = account_aid
+                    record.witness_profile_code = self._selected_witness_profile
+                    record.witness_count = count
+                    record.toad = toad
+                    self._db.pin_account(record)
 
         self.confirm_requested.emit(alias, self._selected_witness_profile, account_aid)
 

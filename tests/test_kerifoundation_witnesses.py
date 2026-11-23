@@ -80,6 +80,9 @@ class FakeBootClient:
         self.calls.append(("witnesses", hab.pre, account_aid, destination))
         return list(self.witness_rows)
 
+    async def list_account_watchers_async(self, hab, *, vault=None, **kwargs):
+        return self.list_account_watchers(hab, **kwargs)
+
     def list_account_watchers(self, hab, *, account_aid: str, destination: str = ""):
         self.calls.append(("watchers", hab.pre, account_aid, destination))
         if self.watcher_error:
@@ -344,12 +347,12 @@ def test_hosted_witness_registrar_persists_registration_state(tmp_path, monkeypa
         return True
 
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.witnesses.provision.register_with_witness",
-        lambda hab, witness_eid, witness_url, secret=None: {
+        "locksmith.plugins.kerifoundation.witnesses.provision.register_with_witness_async",
+        lambda hab, witness_eid, witness_url, secret=None, vault=None: asyncio.sleep(0, result={
             "eid": witness_eid,
             "totp_seed": "SEED",
             "oobi": "",
-        },
+        }),
     )
     monkeypatch.setattr(
         "locksmith.plugins.kerifoundation.witnesses.provision.resolve_oobi",
@@ -400,12 +403,12 @@ def test_hosted_witness_registrar_persists_recovery_state_when_rollback_fails(tm
     db = _make_db(tmp_path, "kf-hosted-registrar-rollback")
 
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.witnesses.provision.register_with_witness",
-        lambda hab, witness_eid, witness_url, secret=None: {
+        "locksmith.plugins.kerifoundation.witnesses.provision.register_with_witness_async",
+        lambda hab, witness_eid, witness_url, secret=None, vault=None: asyncio.sleep(0, result={
             "eid": witness_eid,
             "totp_seed": "SEED",
             "oobi": f"{witness_url}/oobi/{witness_eid}/controller",
-        },
+        }),
     )
     monkeypatch.setattr(
         "locksmith.plugins.kerifoundation.witnesses.provision.resolve_oobi",
@@ -457,12 +460,12 @@ def test_hosted_witness_registrar_preserves_primary_oobi_failure_when_cleanup_su
     purged_oobis = []
 
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.witnesses.provision.register_with_witness",
-        lambda hab, witness_eid, witness_url, secret=None: {
+        "locksmith.plugins.kerifoundation.witnesses.provision.register_with_witness_async",
+        lambda hab, witness_eid, witness_url, secret=None, vault=None: asyncio.sleep(0, result={
             "eid": witness_eid,
             "totp_seed": "SEED",
             "oobi": f"{witness_url}/oobi/{witness_eid}/controller",
-        },
+        }),
     )
     monkeypatch.setattr(
         "locksmith.plugins.kerifoundation.witnesses.provision.resolve_oobi",
@@ -512,7 +515,7 @@ def test_hosted_witness_registrar_deprovisions_partial_registration_failure(tmp_
     db = _make_db(tmp_path, "kf-hosted-registrar-partial-failure")
     deprovisioned = []
 
-    def fake_register(hab, witness_eid, witness_url, secret=None):
+    async def fake_register(hab, witness_eid, witness_url, secret=None, *, vault=None):
         if witness_eid == "WIT_2":
             raise RuntimeError("register failed")
         return {
@@ -522,7 +525,7 @@ def test_hosted_witness_registrar_deprovisions_partial_registration_failure(tmp_
         }
 
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.witnesses.provision.register_with_witness",
+        "locksmith.plugins.kerifoundation.witnesses.provision.register_with_witness_async",
         fake_register,
     )
     monkeypatch.setattr(
@@ -654,8 +657,10 @@ def test_witness_parallel_provision_failure_deprovisions_late_success(
         db.close()
 
 
+@pytest.mark.parametrize("cancellations", [1, 2])
+@pytest.mark.parametrize("cleanup_succeeds", [True, False])
 def test_witness_provision_cancellation_after_provision_deprovisions(
-    qapp, tmp_path, monkeypatch
+    qapp, tmp_path, monkeypatch, cancellations, cleanup_succeeds
 ):
     hab = make_hab("kf-account", "AID_ACCOUNT")
     app = FakeApp([hab])
@@ -665,11 +670,15 @@ def test_witness_provision_cancellation_after_provision_deprovisions(
     page.set_identifier(hab.pre)
     started = threading.Event()
     release = threading.Event()
+    provision_finished = threading.Event()
+    remote_witnesses = set()
     deprovisioned = []
 
     def fake_provision(hab_pre, boot_url):
         started.set()
-        release.wait(timeout=1.0)
+        assert release.wait(timeout=5.0)
+        remote_witnesses.add("WIT_1")
+        provision_finished.set()
         return {
             "eid": "WIT_1",
             "oobi": "https://wit-1.example/oobi/WIT_1/controller",
@@ -677,7 +686,9 @@ def test_witness_provision_cancellation_after_provision_deprovisions(
 
     def fake_deprovision(eid, boot_url):
         deprovisioned.append((eid, boot_url))
-        return True
+        if cleanup_succeeds:
+            remote_witnesses.remove(eid)
+        return cleanup_succeeds
 
     monkeypatch.setattr(
         "locksmith.plugins.kerifoundation.witnesses.provision.provision_witness",
@@ -707,18 +718,32 @@ def test_witness_provision_cancellation_after_provision_deprovisions(
             )
         )
         page._provision_task = task
-        while not started.is_set():
-            await asyncio.sleep(0.01)
-        task.cancel()
+        async with asyncio.timeout(2.0):
+            while not started.is_set():
+                await asyncio.sleep(0.01)
+        for _ in range(cancellations):
+            task.cancel()
+            await asyncio.sleep(0)
         release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        async with asyncio.timeout(2.0):
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            while not provision_finished.is_set():
+                await asyncio.sleep(0.01)
 
     try:
         _run(run_cancelled_provision())
 
         assert deprovisioned == [("WIT_1", "https://boot-1.example")]
-        assert db.provisionedWitnesses.get(keys=(hab.pre, "https://boot-1.example")) is None
+        record = db.provisionedWitnesses.get(keys=(hab.pre, "https://boot-1.example"))
+        if cleanup_succeeds:
+            assert remote_witnesses == set()
+            assert record is None
+        else:
+            assert remote_witnesses == {"WIT_1"}
+            assert record is not None
+            assert record.eid == "WIT_1"
+            assert record.boot_url == "https://boot-1.example"
         assert page._provision_task is None
     finally:
         release.set()

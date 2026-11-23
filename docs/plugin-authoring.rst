@@ -4,18 +4,19 @@ Locksmith Plugin Interface
 ==========================
 
 Locksmith loads provider integrations as Python plugins. A plugin can register
-wallet pages, talk to services that operate witnesses or watchers, and keep provider-specific state.
+wallet pages, talk to services that operate witnesses, watchers, or mailboxes,
+and keep provider-specific state.
 
 The ownership boundary is:
 
 * Locksmith owns the wallet, the open vault, and the shared runtime.
 * The plugin owns its pages, provider data, and service calls.
 * Keripy is used to manage keys, events, signatures, receipts, and KERI message parsing.
-* The remote provider owns accounts and any hosted witnesses or watchers.
+* The remote provider owns accounts and any hosted witnesses, watchers, or mailboxes.
 
 The bundled KERI Foundation plugin is the working example used throughout this
-guide. It onboards an account, registers witnesses, connects a watcher, and
-keeps the provider state needed to manage those services.
+guide. It onboards an account, registers witnesses, connects a watcher, sets up
+mailboxes, and keeps the provider state needed to manage those services.
 
 This document describes the interface implemented in the current Locksmith
 source. A third-party provider can use a different service contract, account
@@ -229,6 +230,19 @@ The following optional hooks have host call sites:
 ``after_identifier_authenticated(vault, hab)``
    Run provider work after Locksmith authenticates an identifier or group.
 
+``ensure_messaging(vault, pre, retry=False)``
+   Finish receiving setup for a local identifier. Return true when this provider
+   handles the request. Retain bounded retries and stop work when the vault closes.
+
+``messaging_status(vault, pre)``
+   Return the status and error when receiving depends on this provider's setup.
+   Return ``None`` when the identifier can receive over an independent route.
+
+``unpublished_mailboxes(vault, pre)``
+   Return the mailbox EIDs whose signed authorization is in the vault but whose
+   receiving address the provider has yet to verify. Locksmith omits these
+   routes when sharing the identifier. The default is an empty set.
+
 ``get_witness_state`` is defined on ``PluginBase`` and ``on_account_created`` is
 defined on ``AccountProviderPlugin``. Neither has a current host call site, so a
 plugin cannot depend on either one being called.
@@ -371,7 +385,9 @@ wallet.
 For work started by a UI action:
 
 * Start one tracked ``asyncio.Task``.
-* Run blocking libraries such as ``requests`` with ``asyncio.to_thread``.
+* Sign requests and parse replies on the vault loop. Pass the prepared bytes to
+  the HTTP worker. Run blocking calls such as ``requests.post`` with
+  ``asyncio.to_thread``.
 * Reject a second click while the same operation is already running.
 * Capture the vault and database that own the task.
 * Cancel or finish the task when that vault closes.

@@ -4,6 +4,8 @@ locksmith.core.tasking module
 
 Module for running hio Doers with Qt integration
 """
+import asyncio
+
 from PySide6.QtCore import QTimer
 from hio.base import tyming, doing
 from keri import help
@@ -128,3 +130,25 @@ def run_qt_task(doers, expire=0.0, tock=0.03125):
     logger.info('QtTask launched')
 
     return qtask
+
+async def await_owned_result(awaitable, *, on_cancel_result=None):
+    """Retain an in-flight operation through repeated cancellation until it stops."""
+    task = asyncio.ensure_future(awaitable)
+    cancelled = None
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+            if task.cancelled():
+                raise
+        except Exception as exc:
+            if cancelled is not None:
+                raise asyncio.CancelledError from exc
+            raise
+    if cancelled is not None:
+        if on_cancel_result is not None:
+            on_cancel_result(result)
+        raise cancelled
+    return result

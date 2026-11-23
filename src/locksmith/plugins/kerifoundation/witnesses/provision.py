@@ -27,6 +27,7 @@ from keri import help
 from keri.help import helping
 
 from locksmith.core.otping import create_totp_uri
+from locksmith.core.tasking import await_owned_result
 from locksmith.core.remoting import (
     describe_oobi_resolution_state,
     purge_oobi_resolution_state,
@@ -37,6 +38,7 @@ from locksmith.plugins.kerifoundation.core.remoting import (
     deprovision_witness,
     provision_witness,
     register_with_witness,
+    register_with_witness_async,
 )
 from locksmith.plugins.kerifoundation.db.basing import (
     ProvisionedWitnessRecord,
@@ -66,18 +68,9 @@ async def _await_blocking_result(func, /, *args, on_cancel_result=None, **kwa):
     this coroutine is cancelled, the late result is handed to
     on_cancel_result before cancellation is re-raised.
     """
-    task = asyncio.create_task(asyncio.to_thread(func, *args, **kwa))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError as cancel:
-        try:
-            result = await task
-        except Exception:
-            logger.warning("Background witness operation failed after cancellation", exc_info=True)
-            raise asyncio.CancelledError from cancel
-        if on_cancel_result is not None:
-            on_cancel_result(result)
-        raise
+    return await await_owned_result(
+        asyncio.to_thread(func, *args, **kwa), on_cancel_result=on_cancel_result,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -383,14 +376,7 @@ class HostedWitnessRegistrar:
                 def remember_cancelled_registration(reg, witness=witness):
                     results.append(_hosted_registration_result(witness, reg))
 
-                reg = await _await_blocking_result(
-                    register_with_witness,
-                    hab,
-                    witness.eid,
-                    witness.witness_url,
-                    secret=secret,
-                    on_cancel_result=remember_cancelled_registration,
-                )
+                reg = await await_owned_result(register_with_witness_async(hab, witness.eid, witness.witness_url, secret=secret, vault=self._app.vault), on_cancel_result=remember_cancelled_registration)
                 results.append(_hosted_registration_result(witness, reg))
 
             if persist:
@@ -421,6 +407,8 @@ class HostedWitnessRegistrar:
                     batch_mode,
                 )
         except asyncio.CancelledError:
+            if getattr(self._app.vault, "closed", False):
+                raise
             logger.info("Hosted witness registration cancelled for account %s", hab.pre)
             await rollback_registration_state(
                 self._app,
@@ -432,6 +420,8 @@ class HostedWitnessRegistrar:
             )
             raise
         except Exception as exc:
+            if getattr(self._app.vault, "closed", False):
+                raise
             logger.exception("Hosted witness registration failed for account %s", hab.pre)
             rollback_failures, persisted_failures, persistence_failures = await rollback_registration_state(
                 self._app,
@@ -865,13 +855,7 @@ class WitnessProvisionPage(LocksmithFormPage):
                     self._finish_provision_task(task)
                     return
                 self._status_label.setText(f"Registering with witness {i + 1}/{total}...")
-                reg = await _await_blocking_result(
-                    register_with_witness,
-                    hab,
-                    entry["eid"],
-                    entry["witness_url"],
-                    secret=secret,
-                )
+                reg = await await_owned_result(register_with_witness_async(hab, entry["eid"], entry["witness_url"], secret=secret, vault=self._app.vault))
                 oobi = reg.get("oobi") or entry["oobi"]
                 results.append({
                     "eid": entry["eid"],
@@ -881,8 +865,10 @@ class WitnessProvisionPage(LocksmithFormPage):
                     "witness_url": entry["witness_url"],
                 })
         except asyncio.CancelledError:
-            await self._rollback_abandoned_provisioned_entries(provisioned, db=db, hab_pre=hab_pre)
-            self._finish_provision_task(task)
+            try:
+                await self._rollback_abandoned_provisioned_entries(provisioned, db=db, hab_pre=hab_pre)
+            finally:
+                self._finish_provision_task(task)
             raise
         except Exception as exc:
             logger.exception("Provision-and-register failed")
@@ -965,16 +951,11 @@ class WitnessProvisionPage(LocksmithFormPage):
                 self._status_label.setText(
                     f"Provisioned {len(entries_by_index)}/{total} witnesses..."
                 )
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, Exception):
             await self._remember_finished_provisions(task_servers, entries_by_index)
-            sync_provisioned()
             raise
-        except Exception:
-            await self._remember_finished_provisions(task_servers, entries_by_index)
+        finally:
             sync_provisioned()
-            raise
-
-        provisioned[:] = [entries_by_index[index] for index in range(total)]
 
     @staticmethod
     async def _remember_finished_provisions(task_servers, entries_by_index):
@@ -982,23 +963,30 @@ class WitnessProvisionPage(LocksmithFormPage):
             return
 
         task_list = list(task_servers)
-        results = await asyncio.gather(*task_list, return_exceptions=True)
-        for provision_task, result in zip(task_list, results):
-            index, server = task_servers[provision_task]
-            if index in entries_by_index:
-                continue
-            if isinstance(result, BaseException):
-                logger.warning(
-                    "Witness provisioning task did not complete cleanly",
-                    exc_info=(type(result), result, result.__traceback__),
-                )
-                continue
-            entries_by_index[index] = {
-                "eid": result["eid"],
-                "oobi": result["oobi"],
-                "boot_url": server.boot_url,
-                "witness_url": server.witness_url,
-            }
+
+        def remember_results(results):
+            for provision_task, result in zip(task_list, results):
+                index, server = task_servers[provision_task]
+                if index in entries_by_index:
+                    continue
+                if isinstance(result, BaseException):
+                    logger.warning(
+                        "Witness provisioning task did not complete cleanly",
+                        exc_info=(type(result), result, result.__traceback__),
+                    )
+                    continue
+                entries_by_index[index] = {
+                    "eid": result["eid"],
+                    "oobi": result["oobi"],
+                    "boot_url": server.boot_url,
+                    "witness_url": server.witness_url,
+                }
+
+        results = await await_owned_result(
+            asyncio.gather(*task_list, return_exceptions=True),
+            on_cancel_result=remember_results,
+        )
+        remember_results(results)
 
     async def _rollback_provisioned_entries(self, entries):
         failures = []

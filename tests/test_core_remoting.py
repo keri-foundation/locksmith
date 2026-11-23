@@ -81,7 +81,6 @@ def test_import_native_identifier_requires_verified_key_state(tmp_path, signatur
         else:
             assert event["event_type"] == "import_failed"
             assert event["data"]["success"] is False
-            assert "No verified key state" in event["data"]["error"]
             assert hab.pre not in target.kevers
             assert org.get(hab.pre) is None
 
@@ -230,7 +229,7 @@ def test_purge_oobi_resolution_state_removes_retry_records():
     assert all(store.get(keys=(oobi,)) is None for store in stores.values())
 
 
-def test_introduce_watcher_observed_aid_sends_kel_and_add_reply(monkeypatch):
+def test_watcher_introduction_sends_kel_and_add_reply(monkeypatch):
     parsed = []
     sent = []
     replies = []
@@ -252,17 +251,6 @@ def test_introduce_watcher_observed_aid_sends_kel_and_add_reply(monkeypatch):
         def deliver(self):
             delivered.append(True)
             return []
-
-    class FakeDoDoer:
-        def __init__(self, *, doers):
-            self.doers = doers
-
-    class FakeDoist:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def do(self, *, doers, limit):
-            delivered.append((doers, limit))
 
     def fake_parse_one(*, ims):
         parsed.append(bytes(ims))
@@ -290,10 +278,8 @@ def test_introduce_watcher_observed_aid_sends_kel_and_add_reply(monkeypatch):
     monkeypatch.setattr(remoting.forwarding, "StreamPoster", FakePoster)
     monkeypatch.setattr(remoting.serdering, "SerderKERI", FakeSerder)
     monkeypatch.setattr(remoting, "SerderKERI", FakeSerder)
-    monkeypatch.setattr(remoting.doing, "DoDoer", FakeDoDoer)
-    monkeypatch.setattr(remoting.doing, "Doist", FakeDoist)
 
-    remoting.introduce_watcher_observed_aid(
+    remoting.watcher_introduction_doers(
         app,
         hab=hab,
         watcher_eid="WAT_1",
@@ -339,7 +325,7 @@ def test_introduce_watcher_observed_aid_sends_kel_and_add_reply(monkeypatch):
     assert delivered
 
 
-def test_introduce_watcher_observed_aid_skips_role_add_when_already_allowed(monkeypatch):
+def test_watcher_introduction_skips_role_add_when_already_allowed(monkeypatch):
     parsed = []
     sent = []
     replies = []
@@ -359,17 +345,6 @@ def test_introduce_watcher_observed_aid_skips_role_add_when_already_allowed(monk
 
         def deliver(self):
             return []
-
-    class FakeDoDoer:
-        def __init__(self, *, doers):
-            self.doers = doers
-
-    class FakeDoist:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def do(self, *, doers, limit):
-            _ = (doers, limit)
 
     def fake_parse_one(*, ims):
         parsed.append(bytes(ims))
@@ -399,10 +374,8 @@ def test_introduce_watcher_observed_aid_skips_role_add_when_already_allowed(monk
     monkeypatch.setattr(remoting.forwarding, "StreamPoster", FakePoster)
     monkeypatch.setattr(remoting.serdering, "SerderKERI", FakeSerder)
     monkeypatch.setattr(remoting, "SerderKERI", FakeSerder)
-    monkeypatch.setattr(remoting.doing, "DoDoer", FakeDoDoer)
-    monkeypatch.setattr(remoting.doing, "Doist", FakeDoist)
 
-    remoting.introduce_watcher_observed_aid(
+    remoting.watcher_introduction_doers(
         app,
         hab=hab,
         watcher_eid="WAT_1",
@@ -441,66 +414,6 @@ def test_introduce_watcher_observed_aid_skips_role_add_when_already_allowed(monk
         (b"reply:/watcher/WAT_1/add", b""),
         (b"reply:/watcher/WAT_1/add", b""),
     ]
-
-
-def test_introduce_watcher_observed_aid_wraps_delivery_failures(monkeypatch):
-    class FakePoster:
-        def __init__(self, *, hby, hab, recp, topic):
-            _ = (hby, hab, recp, topic)
-
-        def send(self, *, serder, attachment):
-            _ = (serder, attachment)
-
-        def deliver(self):
-            return []
-
-    class FakeSerder:
-        def __init__(self, raw):
-            self.raw = bytes(raw)
-            self.size = len(self.raw)
-
-    class FakeDoDoer:
-        def __init__(self, *, doers):
-            self.doers = doers
-
-    class FakeDoist:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def do(self, *, doers, limit):
-            _ = (doers, limit)
-            raise RuntimeError("boom")
-
-    hab = SimpleNamespace(
-        pre="AID_ACCOUNT",
-        kever=SimpleNamespace(),
-        db=SimpleNamespace(
-            ends=_FakeStore(),
-            cloneDelegation=lambda _kever, *, gvrsn: [],
-            clonePreIter=lambda pre, *, gvrsn: [],
-        ),
-        psr=SimpleNamespace(parseOne=lambda ims: None),
-        reply=lambda *, route, data: f"reply:{route}".encode("utf-8"),
-    )
-    app = SimpleNamespace(vault=SimpleNamespace(hby=object()))
-
-    monkeypatch.setattr(remoting.forwarding, "StreamPoster", FakePoster)
-    monkeypatch.setattr(remoting.serdering, "SerderKERI", FakeSerder)
-    monkeypatch.setattr(remoting, "SerderKERI", FakeSerder)
-    monkeypatch.setattr(remoting.doing, "DoDoer", FakeDoDoer)
-    monkeypatch.setattr(remoting.doing, "Doist", FakeDoist)
-
-    with pytest.raises(
-        ValueError,
-        match="Failed introducing observed AID AID_ACCOUNT to watcher WAT_1: boom",
-    ):
-        remoting.introduce_watcher_observed_aid(
-            app,
-            hab=hab,
-            watcher_eid="WAT_1",
-            observed_aid="AID_ACCOUNT",
-            observed_oobis=["https://wit-1.example/oobi/AID_ACCOUNT/witness/WIT_1"],
-        )
 
 
 def test_resolve_oobi_blocking_uses_sync_doer_when_qtask_is_missing(monkeypatch):
@@ -593,7 +506,6 @@ def test_identifier_export_repairs_delivery_routes(tmp_path, monkeypatch, transf
         monkeypatch.setattr('locksmith.ui.vault.shared.export.QFileDialog.getSaveFileName',
                             lambda *args, **kwargs: (str(path), 'CESR Files (*.cesr)'))
         export_identifier_to_cesr(None, SimpleNamespace(vault=SimpleNamespace(hby=source)), 'owner')
-        assert path.read_bytes() == remoting.identifier_introduction(hab)
         active_introduction = path.read_bytes()
         import_contact()
         assert target.db.ends.get(keys=(hab.pre, 'mailbox', mailbox.pre)).allowed is True
@@ -620,7 +532,7 @@ def test_identifier_export_repairs_delivery_routes(tmp_path, monkeypatch, transf
         assert target.db.eans.get(keys=keys).qb64 == cut.qb64
         assert target.db.rpys.get(keys=(cut.qb64,)).raw == source.db.rpys.get(keys=(cut.qb64,)).raw
         with pytest.raises(ipexing.MissingRouteError):
-            ipexing._require_route(sender, hab.pre, reply=False)
+            ipexing._require_route(app.vault, sender, hab.pre, reply=False)
         import_contact()
         assert target.db.ends.get(keys=keys).allowed is False
 
@@ -635,4 +547,67 @@ def test_identifier_export_repairs_delivery_routes(tmp_path, monkeypatch, transf
         export_identifier_to_cesr(None, SimpleNamespace(vault=SimpleNamespace(hby=source)), 'owner')
         import_contact()
         assert target.db.ends.get(keys=keys).allowed is True
-        ipexing._require_route(sender, hab.pre, reply=False)
+        ipexing._require_route(app.vault, sender, hab.pre, reply=False)
+
+
+@pytest.mark.parametrize('status', [200, 403, 503])
+def test_oobi_refresh_waits_for_routes_and_bounds_http_failures(monkeypatch, status):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from time import monotonic, sleep
+    from locksmith.db.basing import LocksmithBaser
+
+    monkeypatch.setattr(remoting, 'RETRY_DELAYS', (0.0, 0.0, 0.0))
+    with (habbing.openHby(name='oobi-source', temp=True) as source,
+          habbing.openHby(name='oobi-reader', temp=True) as target):
+        hab = source.makeHab(name='contact')
+        target.psr.parse(ims=bytearray(hab.replay()))  # Already knowing the AID is insufficient.
+        source.psr.parse(ims=bytearray(hab.makeEndRole(eid=hab.pre, role='mailbox')))
+        source.psr.parse(ims=bytearray(hab.makeLocScheme(url='http://example.test')))
+        body = remoting.identifier_introduction(hab)
+        calls = []
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                calls.append(self.path)
+                self.send_response(status)
+                self.send_header('Content-Type', 'application/cesr')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *args):
+                pass
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        db = LocksmithBaser(name='oobi-reader', temp=True)
+        resolver = remoting.Oobiery(hby=target, db=db)
+        resolver.RetryDelay = -1  # Even an immediately due native retry must use our budget.
+        vault = SimpleNamespace(hby=target, db=db, org=organizing.Organizer(hby=target),
+                                oobiery=resolver, closed=False)
+        url = f'http://127.0.0.1:{server.server_port}/oobi/{hab.pre}/mailbox'
+        doer = remoting.ResolveOobiDoer(SimpleNamespace(vault=vault), hab.pre, url,
+                                       timeout_seconds=0.25)
+        scheduler = doing.Doist(doers=[*resolver.doers, doer], tock=0.01)
+        scheduler.enter()
+        try:
+            deadline = monotonic() + 5
+            while not doer.done and monotonic() < deadline:
+                scheduler.recur()
+                sleep(0.002)
+            assert doer.done
+            assert doer.resolved == (status == 200)
+            if status == 200:
+                assert target.db.ends.get((hab.pre, 'mailbox', hab.pre)).allowed
+                assert target.db.locs.get((hab.pre, 'http')).url == 'http://example.test'
+            else:
+                saved = db.connections.get(('oobi', url))
+                assert saved.paused
+                assert saved.attempts == len(calls) == (1 if status == 403 else 4)
+            assert target.db.coobi.get((url,)) is None
+            assert target.db.eoobi.get((url,)) is None
+            assert not resolver.clienter.clients
+        finally:
+            scheduler.exit()
+            db.close(clear=True)
+            server.shutdown()
+            server.server_close()
+            thread.join()

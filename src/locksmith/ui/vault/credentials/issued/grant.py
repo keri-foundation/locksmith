@@ -11,8 +11,10 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QHBoxLayout,
     QButtonGroup, QFileDialog
 )
-from keri import help
+from keri import help, kering
+from keri.core import parsing
 
+from locksmith.ui.vault.shared.messaging import prepare_messaging
 from locksmith.core import credentialing, ipexing
 from locksmith.ui import colors
 from locksmith.ui.toolkit.widgets import (
@@ -22,7 +24,8 @@ from locksmith.ui.toolkit.widgets import (
 )
 from locksmith.ui.toolkit.widgets.buttons import LocksmithRadioButton, LocksmithIconButton
 from locksmith.ui.toolkit.widgets.fields import FloatingLabelComboBox, FloatingLabelLineEdit
-from locksmith.ui.vault.credentials.presentation import credential_details, disclosed_credentials, identifier_name
+from locksmith.ui.vault.shared.witness_auth_mixin import WitnessAuthenticationPanel
+from locksmith.ui.vault.credentials.presentation import credential_details, identifier_name
 from locksmith.ui.toolkit.widgets.collapsible import CollapsibleSection
 
 if TYPE_CHECKING:
@@ -61,6 +64,8 @@ class GrantCredentialDialog(LocksmithDialog):
         self.app = app
         self.vault = app.vault
         self._pending_said = None
+        self._draft = None
+        self._auth_panels = None
         self._listening = False
         self.parent_widget = parent
         self.credential_said = credential_said
@@ -91,8 +96,8 @@ class GrantCredentialDialog(LocksmithDialog):
         review_layout = QVBoxLayout()
         disclosure_error = None
         try:
-            nodes = disclosed_credentials(self.vault, credential_said)
-            for node in nodes:
+            _, _, _, nodes = ipexing._credential_evidence(self.vault, credential_said)
+            for node in nodes.values():
                 review_layout.addWidget(credential_details(self.vault, node))
             if len(nodes) > 1:
                 count = len(nodes) - 1
@@ -305,10 +310,23 @@ class GrantCredentialDialog(LocksmithDialog):
             hab = self.vault.hby.habByPre(self.credential_issuer)
             if hab is None:
                 raise ValueError("The credential issuer is not a local identifier")
-            serder, attachment = ipexing.grant(
-                self.vault, hab, self.credential_said,
-                self.recipient_dropdown.currentData(),
-            )
+            if self.send_radio.isChecked() and prepare_messaging(
+                    self, self.app, hab, self._on_grant, self._messaging_error):
+                return
+            if self._draft is not None and self._draft_est != hab.kever.lastEst.d:
+                self._draft = None
+                for panel in self._auth_panels or []:
+                    panel.setParent(None)
+                    panel.deleteLater()
+                self._auth_panels = None
+                for field in (self.recipient_dropdown, self.send_radio, self.save_radio):
+                    field.setEnabled(True)
+                raise ValueError('Identifier key state changed. Review the Grant and witness authentication again.')
+            if self._draft is None:
+                serder, attachment = ipexing.grant(self.vault, hab, self.credential_said,
+                                                     self.recipient_dropdown.currentData())
+            else:
+                serder, attachment = self._draft
             if self.send_radio.isChecked():
                 self._send_grant(hab, serder, attachment)
             else:
@@ -319,9 +337,51 @@ class GrantCredentialDialog(LocksmithDialog):
             self.show_error(f"Failed to create grant: {error}")
             self._reset_button()
 
+    def _messaging_error(self, message):
+        self.show_error(message)
+        self._reset_button()
+
     def _send_grant(self, hab, serder, attachment):
         """Submit the signed grant through the vault's transport."""
-        self._pending_said = ipexing.submit(self.vault, hab, serder, attachment)
+        if self._auth_panels is not None and any(
+                (controller := self.vault.hby.habByPre(pre)) is None or controller.kever.lastEst.d != state
+                for pre, state in self._auth_states):
+            for panel in self._auth_panels:
+                panel.setParent(None)
+                panel.deleteLater()
+            self._auth_panels = None
+        if self._auth_panels is None:
+            parsed, = parsing.Parser().parse(ims=bytearray(serder.raw + attachment),
+                                              processive=False, version=kering.Vrsn_2_0)
+            required = ipexing.presentation_registries(self.vault, hab.pre, serder.sad['ri'],
+                                                      self.credential_said,
+                                                      [nest.serder for nest in parsed.nests])
+            habitats = {registry.hab.pre: registry.hab for registry in required.values() if registry.hab.kever.wits}
+            self._auth_panels = []
+            self._auth_states = {(registry.hab.pre, registry.hab.kever.lastEst.d)
+                                 for registry in required.values()}
+            for controller in habitats.values():
+                panel = WitnessAuthenticationPanel(self.app, controller, list(controller.kever.wits), self)
+                self.content_layout.addWidget(panel)
+                self._auth_panels.append(panel)
+            if habitats:
+                self._draft = serder, attachment
+                self._draft_est = hab.kever.lastEst.d
+                for field in (self.recipient_dropdown, self.send_radio, self.save_radio):
+                    field.setEnabled(False)
+                self.action_button.setText('Authenticate and send')
+                self.action_button.setEnabled(True)
+                return
+        codes = {}
+        for panel in self._auth_panels:
+            valid, values, error = panel.validate_authentication_codes()
+            if not valid:
+                raise ValueError(error)
+            codes[panel.hab.pre] = values
+        self._pending_said = ipexing.submit(self.vault, hab, serder, attachment, codes=codes)
+        for panel in self._auth_panels:
+            for field in panel.passcode_fields.values():
+                field.setText('')
         self.cancel_button.setText("Close")
         self.delivery_notice.show()
         self.vault.signals.doer_event.connect(self._on_doer_event)
@@ -344,6 +404,15 @@ class GrantCredentialDialog(LocksmithDialog):
         if not self._listening:
             return
         if doer_name != "Ipex" or data.get('said') != self._pending_said:
+            return
+        if event_type == 'preparing':
+            self.action_button.setText('Preparing presentation…')
+            return
+        if event_type == 'preparation_failed':
+            self._disconnect()
+            self.show_error(f"Presentation preparation failed: {data['error']}")
+            self.action_button.setEnabled(False)
+            self.delivery_notice.setText('Inspect the presentation registry before trying again.')
             return
         if event_type not in ("transport_submitted", "send_failed"):
             return
@@ -393,4 +462,4 @@ class GrantCredentialDialog(LocksmithDialog):
         """Reset action button to enabled state."""
         self.action_button.setEnabled(True)
         button_text = "Retry sending" if self._pending_said else ("Send credential" if self.send_radio.isChecked() else "Export credential")
-        self.action_button.setText(button_text)
+        self.action_button.setText("Authenticate and send" if self._draft and not self._pending_said else button_text)

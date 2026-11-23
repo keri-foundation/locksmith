@@ -15,6 +15,7 @@ from locksmith.ui.vault.credentials.issued.list import IssuedCredentialsListPage
 from locksmith.ui.vault.credentials.received.list import ReceivedCredentialsListPage
 from locksmith.ui.vault.credentials.schema.list import SchemaListPage
 from locksmith.ui.vault.credentials.activity import CredentialActivityPage
+from locksmith.ui.vault.credentials.proofing import ProofingSessionsPage
 from locksmith.ui.vault.identifiers.list import IdentifierListPage
 from locksmith.ui.vault.groups.list import GroupIdentifierListPage
 from locksmith.ui.vault.menu import VaultNavMenu
@@ -89,11 +90,11 @@ class VaultPage(BasePage):
         self.register_page("identifiers", IdentifierListPage(self))
         self.register_page("remotes", RemoteIdentifierListPage(self))
         self.register_page("groups", GroupIdentifierListPage(self))
-        self.register_page("credentials", IssuedCredentialsListPage(self))
         self.register_page("settings", SettingsPage(self))
         self.register_page("issued_credentials", IssuedCredentialsListPage(self))
         self.register_page("received_credentials", ReceivedCredentialsListPage(self))
         self.register_page("credential_activity", CredentialActivityPage(self))
+        self.register_page("proofing", ProofingSessionsPage(self))
         self.register_page("schema", SchemaListPage(self))
         self.register_page("notifications", NotificationsListPage(self))
 
@@ -125,7 +126,7 @@ class VaultPage(BasePage):
             lambda: self._show_vault_page("groups")
         )
         self.nav_menu.credentials_clicked.connect(
-            lambda: self._show_vault_page("credentials")
+            lambda: self._show_vault_page("issued_credentials")
         )
         self.nav_menu.settings_clicked.connect(
             lambda: self._show_vault_page("settings")
@@ -146,6 +147,10 @@ class VaultPage(BasePage):
         )
         self.nav_menu.activity_clicked.connect(
             lambda: self._show_credentials_page("credential_activity")
+        )
+
+        self.nav_menu.proofing_clicked.connect(
+            lambda: self._show_credentials_page('proofing')
         )
 
         self._pages['credential_activity'].attention_changed.connect(
@@ -234,10 +239,12 @@ class VaultPage(BasePage):
         self.nav_menu.activity_button.click()
         self._pages['credential_activity'].show_exchange(said, received=received, open_dialog=open_dialog)
 
-    def start_credential_exchange(self, action, *, schema=None, credential_said=None, received=False):
+    def start_credential_exchange(self, action, *, schema=None, credential_said=None, received=False,
+                                  intent='issuance'):
         from locksmith.ui.vault.credentials.start import StartExchangeDialog
         self._credential_exchange_dialog = StartExchangeDialog(
-            self.app, self, action, schema=schema, credential_said=credential_said, received=received)
+            self.app, self, action, schema=schema, credential_said=credential_said, received=received,
+            intent=intent)
         self._credential_exchange_dialog.submitted.connect(
             lambda said: self.show_credential_activity(said, received=action == 'Apply', open_dialog=False))
         self._credential_exchange_dialog.open()
@@ -286,13 +293,11 @@ class VaultPage(BasePage):
         # Update nav menu with vault name
         self.nav_menu.set_vault_name(self.vault_name)
 
-        # Update all sub-pages with vault name
+        # Select the landing page before the new vault binds its inventory views.
+        self._show_page("identifiers")
         for page in self._pages.values():
             if hasattr(page, "set_vault_name"):
                 page.set_vault_name(self.vault_name)
-
-        # Show Identifiers sub-page by default
-        self._show_page("identifiers")
 
     def on_hide(self):
         super().on_hide()

@@ -37,6 +37,7 @@ class DeleteVaultDialog(LocksmithDialog):
 
         # Confirmation instruction
         confirm_label = QLabel(f"Type <b>{vault_name}</b> to confirm:")
+        confirm_label.setWordWrap(True)
         confirm_label.setStyleSheet(f"font-size: 14px; color: {colors.TEXT_MENU};")
         content_layout.addWidget(confirm_label)
 
@@ -99,14 +100,13 @@ class DeleteVaultDialog(LocksmithDialog):
             show_overlay=True
         )
         
-        # Set fixed size (non-resizable)
-        self.setFixedSize(450, 340)
-        
         # Style the title with red color for danger
         if self.title_label:
             self.title_label.setStyleSheet(
                 f"font-size: 18px; font-weight: bold; color: {colors.DANGER};"
             )
+
+        self.fit_content(450)
 
         # Connect button actions
         self.cancel_btn.clicked.connect(self.reject)
